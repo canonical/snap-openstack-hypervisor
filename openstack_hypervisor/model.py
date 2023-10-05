@@ -73,6 +73,9 @@ class ComputeConfig(BaseModel):
     virt_type: str = Field(alias="virt-type", default="auto")
     cpu_models: Optional[str] = Field(alias="cpu-models")
     spice_proxy_address: Optional[IPvAnyAddress] = Field(alias="spice-proxy-address")
+    rbd_user: Optional[str] = Field(alias="rbd-user", default="nova")
+    rbd_secret_uuid: Optional[str] = Field(alias="rbd-secret-uuid")
+    rbd_key: Optional[str] = Field(alias="rbd-key")
 
 
 class NetworkConfig(BaseModel):
@@ -103,3 +106,16 @@ class LoggingConfig(BaseModel):
     """Data model for the logging configuration for the hypervisor."""
 
     debug: bool = Field(default=False)
+
+
+class TelemetryConfig(BaseModel):
+    """Data model for telemetry configuration settings."""
+
+    enable: bool = Field(default=False)
+    publisher_secret: Optional[str] = Field(alias="publisher-secret")
+
+
+class MonitoringConfig(BaseModel):
+    """Data model for the monitoring configuration settings."""
+
+    enable: bool = Field(default=False)

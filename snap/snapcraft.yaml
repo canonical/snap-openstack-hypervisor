@@ -124,6 +124,7 @@ apps:
       - hardware-observe
       - hugepages-control
       - microstack-support
+
   ovsdb-server:
     command: "bin/ovsdb-server-service"
     stop-command: usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd stop
@@ -233,6 +234,16 @@ apps:
       - firewall-control
       - microstack-support
 
+  ceilometer-compute-agent:
+    command: 'bin/ceilometer-compute-agent-service'
+    after: [libvirtd]
+    daemon: simple
+    plugs:
+      - network
+      - network-bind
+      - firewall-control
+      - microstack-support
+
   hypervisor-config-service:
     command: 'bin/gunicorn openstack_hypervisor.api:app --workers 1 --worker-class uvicorn.workers.UvicornWorker --timeout 120 --bind unix:$SNAP_DATA/run/hypervisor-config/unix.socket'
     restart-condition: on-failure
@@ -251,12 +262,69 @@ apps:
         listen-stream: $SNAP_DATA/run/hypervisor-config/unix.socket
         socket-mode: 0666
 
+  libvirt-exporter:
+    daemon: simple
+    install-mode: disable
+    restart-condition: on-abnormal
+    command: 'bin/libvirt-exporter --web.listen-address :9177 --web.telemetry-path /metrics --libvirt.uri qemu:///system'
+    plugs:
+      - libvirt
+      - network-bind
+
+  ovs-exporter:
+    command: 'bin/ovs-exporter-service'
+    plugs:
+      - network-bind
+      - openvswitch
+      - log-observe
+      - system-observe
+      - network-observe
+      - netlink-audit
+      - kernel-module-observe
+    daemon: simple
+    install-mode: disable
+
 parts:
   kvm-support:
     plugin: nil
     stage-packages:
     - on amd64:
       - msr-tools
+
+  ovs-exporter:
+    plugin: go
+    source: https://github.com/greenpau/ovs_exporter.git
+    source-tag: v1.0.7
+    build-packages:
+      - gcc
+      - golang-go
+    override-build: |
+      GIT_COMMIT=$(git describe --dirty --always)
+      GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD -- | head -1)
+      BUILD_USER=snapcraft
+      BUILD_DATE=$(date +"%Y-%m-%d")
+      BINARY=ovs-exporter
+      VERBOSE=-v
+      PROJECT=ovs_exporter
+      PKG_DIR=pkg/ovs_exporter
+      mkdir -p ./bin/
+      CGO_ENABLED=0 go build -o ./bin/${BINARY} \
+      -ldflags="-w -s \
+      -X github.com/prometheus/common/version.Version=$SNAPCRAFT_PROJECT_VERSION \
+      -X github.com/prometheus/common/version.Revision=$GIT_COMMIT \
+      -X github.com/prometheus/common/version.Branch=$GIT_BRANCH \
+      -X github.com/prometheus/common/version.BuildUser=$BUILD_USER \
+      -X github.com/prometheus/common/version.BuildDate=$BUILD_DATE \
+      -X ${PROJECT}/${PKG_DIR}.appName=$BINARY \
+      -X ${PROJECT}/${PKG_DIR}.appVersion=$SNAPCRAFT_PROJECT_VERSION \
+      -X ${PROJECT}/${PKG_DIR}.gitBranch=$GIT_BRANCH \
+      -X ${PROJECT}/${PKG_DIR}.gitCommit=$GIT_COMMIT \
+      -X ${PROJECT}/${PKG_DIR}.buildUser=$BUILD_USER \
+      -X ${PROJECT}/${PKG_DIR}.buildDate=$BUILD_DATE" \
+      ./cmd/ovs_exporter/*.go
+    override-prime: |
+      snapcraftctl prime
+      install -D $SNAPCRAFT_PART_SRC/../build/bin/ovs-exporter bin/ovs-exporter
 
   qemu:
     source: https://git.launchpad.net/ubuntu/+source/qemu
@@ -540,6 +608,7 @@ parts:
   openstack:
     plugin: nil
     stage-packages:
+      - ceilometer-agent-compute
       - python3-nova
       - python3-neutron
       - python3-os-vif
@@ -574,6 +643,19 @@ parts:
     override-build: |
       craftctl default
       snap-helpers write-hooks
+
+  libvirt-exporter:
+    plugin: go
+    source-tag: 2.3.3
+    source-type: git
+    source: https://github.com/Tinkoff/libvirt-exporter
+    build-snaps:
+      - go
+    after:
+      - libvirt
+    build-environment:
+      - CGO_CFLAGS: "-I$CRAFT_STAGE/usr/include"
+      - CGO_LDFLAGS: "-L$CRAFT_STAGE/usr/lib"
 
 slots:
   hypervisor-config:

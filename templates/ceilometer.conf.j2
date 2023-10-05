@@ -1,0 +1,52 @@
+# THIS FILE IS MANAGED BY THE SNAP - CHANGES WILL BE OVERWRITTEN
+# Use $SNAP_COMMON/etc/ceilometer/ceilometer.conf.d for deployment specific
+# configuration
+[DEFAULT]
+debug = {{ logging.debug }}
+
+# AMQP connection to RabbitMQ
+transport_url = {{ rabbitmq.url }}
+
+[polling]
+batch_size = 50
+cfg_file = {{ snap_common }}/etc/ceilometer/polling.yaml
+pollsters_definitions_dirs = {{ snap_common }}/etc/ceilometer/pollsters.d
+
+{% if telemetry.publisher_secret -%}
+[publisher]
+telemetry_secret = {{ telemetry.publisher_secret }}
+{%- endif %}
+
+[gnocchi]
+filter_service_activity = False
+archive_policy = low
+
+[keystone_authtoken]
+auth_url = {{ identity.auth_url }}
+auth_type = password
+project_domain_name = {{ identity.project_domain_name }}
+user_domain_name = {{ identity.user_domain_name }}
+project_name = {{ identity.project_name }}
+username = {{ identity.username }}
+password = {{ identity.password }}
+service_token_roles = {{ identity.admin_role }}
+service_token_roles_required = True
+
+[service_user]
+send_service_user_token = true
+auth_type = password
+auth_url = {{ identity.auth_url }}
+project_domain_id = {{ identity.project_domain_id }}
+user_domain_id = {{ identity.user_domain_id }}
+project_name = {{ identity.project_name }}
+username = {{ identity.username }}
+password = {{ identity.password }}
+
+[service_credentials]
+auth_type = password
+auth_url = {{ identity.auth_url }}
+project_domain_id = {{ identity.project_domain_id }}
+user_domain_id = {{ identity.user_domain_id }}
+project_name = {{ identity.project_name }}
+username = {{ identity.username }}
+password = {{ identity.password }}

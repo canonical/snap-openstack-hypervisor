@@ -70,6 +70,7 @@ COMMON_DIRS = [
     Path("etc/neutron/neutron.conf.d"),
     Path("etc/ssl/certs"),
     Path("etc/ssl/private"),
+    Path("etc/ceilometer"),
     # log
     Path("log/libvirt/qemu"),
     Path("log/ovn"),
@@ -90,6 +91,22 @@ DATA_DIRS = [
     Path("lib/ovn"),
     Path("lib/neutron"),
     Path("run/hypervisor-config"),
+]
+SECRET_XML = string.Template(
+    """
+<secret ephemeral='no' private='no'>
+   <uuid>$uuid</uuid>
+   <usage type='ceph'>
+     <name>client.cinder-ceph secret</name>
+   </usage>
+</secret>
+"""
+)
+
+# As defined in the snap/snapcraft.yaml
+MONITORING_SERVICES = [
+    "libvirt-exporter",
+    "ovs-exporter",
 ]
 
 
@@ -223,6 +240,9 @@ DEFAULT_CONFIG = {
     "compute.virt-type": "auto",
     "compute.cpu-models": UNSET,
     "compute.spice-proxy-address": _get_local_ip_by_default_route,  # noqa: F821
+    "compute.rbd_user": "nova",
+    "compute.rbd_secret_uuid": UNSET,
+    "compute.rbd_key": UNSET,
     # Neutron
     "network.physnet-name": "physnet1",
     "network.external-bridge": "br-ex",
@@ -236,11 +256,16 @@ DEFAULT_CONFIG = {
     "network.enable-gateway": False,
     "network.ip-address": _get_local_ip_by_default_route,  # noqa: F821
     "network.external-nic": UNSET,
+    # Monitoring
+    "monitoring.enable": False,
     # General
     "logging.debug": False,
     "node.fqdn": socket.getfqdn,
     "node.ip-address": _get_local_ip_by_default_route,  # noqa: F821
     # TLS
+    # Telemetry
+    "telemetry.enable": False,
+    "telemetry.publisher-secret": UNSET,
 }
 
 
@@ -256,6 +281,12 @@ REQUIRED_CONFIG = {
         "network",
     ],
     "neutron-ovn-metadata-agent": ["credentials", "network", "node", "network.ovn_key"],
+    "ceilometer-compute-agent": [
+        "identity.password",
+        "identity.username",
+        "identity",
+        "rabbitmq.url",
+    ],
 }
 
 
@@ -334,6 +365,14 @@ TEMPLATES = {
     Path("etc/libvirt/virtlogd.conf"): {"template": "virtlogd.conf.j2", "services": ["virtlogd"]},
     Path("etc/openvswitch/system-id.conf"): {
         "template": "system-id.conf.j2",
+    },
+    Path("etc/ceilometer/ceilometer.conf"): {
+        "template": "ceilometer.conf.j2",
+        "services": ["ceilometer-compute-agent"],
+    },
+    Path("etc/ceilometer/polling.yaml"): {
+        "template": "polling.yaml.j2",
+        "services": ["ceilometer-compute-agent"],
     },
 }
 
@@ -899,7 +938,73 @@ def _is_hw_virt_supported() -> bool:
         return False
 
 
-def _configure_kvm(snap) -> None:
+def _set_secret(conn, secret_uuid: str, secret_value: str) -> None:
+    """Set the ceph access secret in libvirt."""
+    logging.info(f"Setting secret {secret_uuid}")
+    new_secret = conn.secretDefineXML(SECRET_XML.substitute(uuid=secret_uuid))
+    # nova assumes the secret is raw and always encodes it *1, so decode it
+    # before storing it.
+    # *1 https://opendev.org/openstack/nova/src/branch/stable/2023.1/nova/
+    #           virt/libvirt/imagebackend.py#L1110
+    new_secret.setValue(base64.b64decode(secret_value))
+
+
+def _get_libvirt():
+    # Lazy import libvirt otherwise snap will not build
+    import libvirt
+
+    return libvirt
+
+
+def _ensure_secret(secret_uuid: str, secret_value: str) -> None:
+    """Ensure libvirt has the ceph access secret with the correct value."""
+    libvirt = _get_libvirt()
+    conn = libvirt.open("qemu:///system")
+    # Check if secret exists
+    if secret_uuid in conn.listSecrets():
+        logging.info(f"Found secret {secret_uuid}")
+        # check secret matches
+        secretobj = conn.secretLookupByUUIDString(secret_uuid)
+        try:
+            secret = secretobj.value()
+        except libvirt.libvirtError as e:
+            if e.get_error_code() == libvirt.VIR_ERR_NO_SECRET:
+                logging.info(f"Secret {secret_uuid} has no value.")
+                secret = None
+            else:
+                raise
+        # Secret is stored raw so encode it before comparison.
+        if secret == base64.b64encode(secret_value.encode()):
+            logging.info(f"Secret {secret_uuid} has desired value.")
+        else:
+            logging.info(f"Secret {secret_uuid} has wrong value, replacing.")
+            secretobj.undefine()
+            _set_secret(conn, secret_uuid, secret_value)
+    else:
+        logging.info(f"Secret {secret_uuid} not found, creating.")
+        _set_secret(conn, secret_uuid, secret_value)
+
+
+def _configure_ceph(snap) -> None:
+    """Configure ceph client.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: None
+    """
+    logging.info("Configuring ceph access")
+    context = (
+        snap.config.get_options(
+            "compute",
+        )
+        .as_dict()
+        .get("compute")
+    )
+    if all(k in context for k in ("rbd-key", "rbd-secret-uuid")):
+        _ensure_secret(context["rbd-secret-uuid"], context["rbd-key"])
+
+
+def _configure_kvm(snap: Snap) -> None:
     """Configure KVM hardware virtualization.
 
     :param snap: the snap reference
@@ -917,6 +1022,25 @@ def _configure_kvm(snap) -> None:
             "Hardware virtualization is not supported - software" " emulation will be used."
         )
         snap.config.set({"compute.virt-type": "qemu"})
+
+
+def _configure_monitoring_services(snap: Snap) -> None:
+    """Configure all the monitoring services.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: None
+    """
+    services = snap.services.list()
+    enable_monitoring = snap.config.get("monitoring.enable")
+    if enable_monitoring:
+        logging.info("Enabling all exporter services.")
+        for service in MONITORING_SERVICES:
+            services[service].start(enable=True)
+    else:
+        logging.info("Disabling all exporter services.")
+        for service in MONITORING_SERVICES:
+            services[service].stop(disable=True)
 
 
 def services() -> List[str]:
@@ -958,6 +1082,15 @@ def _services_not_ready(context: dict) -> List[str]:
     return sorted(list(set(not_ready)))
 
 
+def _services_not_enabled_by_config(context: dict) -> List[str]:
+    """Check if services are enabled by configuration."""
+    not_enabled = []
+    if not context.get("telemetry", {}).get("enable"):
+        not_enabled.append("ceilometer-compute-agent")
+
+    return not_enabled
+
+
 def configure(snap: Snap) -> None:
     """Runs the `configure` hook for the snap.
 
@@ -984,6 +1117,8 @@ def configure(snap: Snap) -> None:
         "node",
         "rabbitmq",
         "credentials",
+        "telemetry",
+        "monitoring",
     ).as_dict()
 
     # Add some general snap path information
@@ -997,6 +1132,7 @@ def configure(snap: Snap) -> None:
     context = _context_compat(context)
     logging.info(context)
     exclude_services = _services_not_ready(context)
+    exclude_services.extend(_services_not_enabled_by_config(context))
     logging.warning(f"{exclude_services} are missing required config, stopping")
     services = snap.services.list()
     for service in exclude_services:
@@ -1021,3 +1157,5 @@ def configure(snap: Snap) -> None:
     _configure_ovn_external_networking(snap)
     _configure_ovn_tls(snap)
     _configure_kvm(snap)
+    _configure_monitoring_services(snap)
+    _configure_ceph(snap)
