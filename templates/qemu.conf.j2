@@ -2,3 +2,8 @@
 # ownership over files it is relabeling. Defaults to 1, set
 # to 0 to disable the feature.
 remember_owner = 0
+
+{% if compute.key -%}
+default_tls_x509_cert_dir = "{{ snap_common }}/etc/pki/qemu"
+default_tls_x509_verify = 1
+{% endif -%}

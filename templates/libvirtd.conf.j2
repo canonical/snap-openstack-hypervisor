@@ -19,7 +19,11 @@
 # using this capability.
 #
 # This is enabled by default, uncomment this to disable it
+{% if compute.key -%}
+listen_tls = 1
+{% else -%}
 listen_tls = 0
+{% endif -%}
 
 # Listen for unencrypted TCP connections on the public TCP/IP port.
 # NB, must pass the --listen flag to the libvirtd process for this to
@@ -37,7 +41,7 @@ listen_tcp = 1
 # Override the port for accepting secure TLS connections
 # This can be a port number, or service name
 #
-#tls_port = "16514"
+tls_port = "16514"
 
 # Override the port for accepting insecure TCP connections
 # This can be a port number, or service name

@@ -29,11 +29,16 @@ disable_rootwrap = True
 [libvirt]
 virt_type = {{ compute.virt_type }}
 cpu_mode = {{ compute.cpu_mode }}
-{% if compute.cpu_mode == 'custom' %}
+{% if compute.cpu_mode == 'custom' -%}
 cpu_models = {{ compute.cpu_models }}
 {% endif %}
+live_migration_with_native_tls = true
+live_migration_scheme = tls
+{% if compute.migration_address %}
+live_migration_inbound_addr = {{ compute.migration_address }}
+{% endif -%}
 
-{% if compute.rbd_secret_uuid %}
+{% if compute.rbd_secret_uuid -%}
 rbd_user = {{ compute.rbd_user }}
 rbd_secret_uuid = {{ compute.rbd_secret_uuid }}
 {% endif %}
@@ -120,3 +125,8 @@ driver = messagingv2
 
 [oslo_messaging_rabbit]
 rabbit_quorum_queue = True
+
+[workarounds]
+# Needed for live live migration, skip CPU comparison on destination host.
+# Until https://bugs.launchpad.net/nova/+bug/2039803 is fixed.
+skip_cpu_compare_on_dest = True

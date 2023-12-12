@@ -1,5 +1,5 @@
 name: openstack-hypervisor
-version: '2023.1'
+version: '2023.2'
 base: core22
 summary: OpenStack Hypervisor
 description: |
@@ -59,13 +59,16 @@ layout:
 package-repositories:
   - type: apt
     components: [main]
-    suites: [jammy-updates/antelope]
+    suites: [jammy-updates/bobcat]
     key-id: 391A9AA2147192839E9DB0315EDB1B62EC4926EA
     url: http://ubuntu-cloud.archive.canonical.com/ubuntu
 
 apps:
   # Libvirt
   libvirtd:
+    environment:
+      # overriding usr/bin path to current, to ensure the symlink to qemu-system-* is not dependent on the snap revision 
+      PATH: $SNAP/../current/usr/bin:$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$SNAP/usr/local/bin:$SNAP/usr/local/sbin:$PATH
     command: usr/sbin/libvirtd --pid $SNAP_DATA/libvirt.pid --listen
     daemon: simple
     plugs:

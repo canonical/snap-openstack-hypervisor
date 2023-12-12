@@ -71,6 +71,11 @@ COMMON_DIRS = [
     Path("etc/ssl/certs"),
     Path("etc/ssl/private"),
     Path("etc/ceilometer"),
+    Path("etc/pki"),
+    Path("etc/pki/CA"),
+    Path("etc/pki/libvirt"),
+    Path("etc/pki/libvirt/private"),
+    Path("etc/pki/qemu"),
     # log
     Path("log/libvirt/qemu"),
     Path("log/ovn"),
@@ -243,6 +248,10 @@ DEFAULT_CONFIG = {
     "compute.rbd_user": "nova",
     "compute.rbd_secret_uuid": UNSET,
     "compute.rbd_key": UNSET,
+    "compute.cacert": UNSET,
+    "compute.cert": UNSET,
+    "compute.key": UNSET,
+    "compute.migration-address": UNSET,
     # Neutron
     "network.physnet-name": "physnet1",
     "network.external-bridge": "br-ex",
@@ -374,6 +383,13 @@ TEMPLATES = {
         "template": "polling.yaml.j2",
         "services": ["ceilometer-compute-agent"],
     },
+}
+
+
+TLS_TEMPLATES = {
+    Path("etc/pki/CA/cacert.pem"): {"services": ["libvirtd"]},
+    Path("etc/pki/libvirt/servercert.pem"): {"services": ["libvirtd"]},
+    Path("etc/pki/libvirt/private/serverkey.pem"): {"services": ["libvirtd"]},
 }
 
 
@@ -804,6 +820,83 @@ def _configure_ovn_external_networking(snap: Snap) -> None:
         )
 
 
+def _parse_tls(snap: Snap, config_key: str) -> bytes:
+    """Parse Base64 encoded key or cert.
+
+    :param config_key: base64 encoded data (or UNSET)
+    :type config_key: str
+    :return: decoded data or None
+    :rtype: bytes
+    """
+    try:
+        return base64.b64decode(snap.config.get(config_key))
+    except (binascii.Error, TypeError):
+        pass
+
+
+def _configure_tls(snap: Snap) -> None:
+    """Configure TLS."""
+    _configure_ovn_tls(snap)
+    _configure_libvirt_tls(snap)
+
+
+def _configure_libvirt_tls(snap: Snap) -> None:
+    """Configure Libvirt / QEMU TLS."""
+    try:
+        cacert = _parse_tls(snap, "compute.cacert")
+        cert = _parse_tls(snap, "compute.cert")
+        key = _parse_tls(snap, "compute.key")
+    except UnknownConfigKey:
+        logging.info("Libvirt / QEMU TLS configuration incomplete, skipping.")
+        return
+
+    if not all((cacert, cert, key)):
+        logging.info("Libvirt / QEMU TLS configuration incomplete, skipping.")
+        return
+
+    pki_cacert = snap.paths.common / Path("etc/pki/CA/cacert.pem")
+    # Libvirt TLS configuration
+    libvirt_cert = snap.paths.common / Path("etc/pki/libvirt/servercert.pem")
+    libvirt_key = snap.paths.common / Path("etc/pki/libvirt/private/serverkey.pem")
+    libvirt_client_cert = snap.paths.common / Path("etc/pki/libvirt/clientcert.pem")
+    libvirt_client_key = snap.paths.common / Path("etc/pki/libvirt/private/clientkey.pem")
+    # QEMU TLS configuration
+    qemu_cacert = snap.paths.common / Path("etc/pki/qemu/ca-cert.pem")
+    qemu_cert = snap.paths.common / Path("etc/pki/qemu/server-cert.pem")
+    qemu_key = snap.paths.common / Path("etc/pki/qemu/server-key.pem")
+    qemu_client_cert = snap.paths.common / Path("etc/pki/qemu/client-cert.pem")
+    qemu_client_key = snap.paths.common / Path("etc/pki/qemu/client-key.pem")
+
+    def _template_tls_file(pem: bytes, file: Path, links: List[Path], permissions: int = 0o644):
+        file.write_bytes(pem)
+        file.chmod(permissions)
+        for link in links:
+            link.unlink(missing_ok=True)
+            link.symlink_to(file)
+            link.chmod(permissions)
+
+    _template_tls_file(cacert, pki_cacert, [qemu_cacert])
+    _template_tls_file(
+        cert,
+        libvirt_cert,
+        [
+            libvirt_client_cert,
+            qemu_cert,
+            qemu_client_cert,
+        ],
+    )
+    _template_tls_file(
+        key,
+        libvirt_key,
+        [
+            libvirt_client_key,
+            qemu_key,
+            qemu_client_key,
+        ],
+        0o600,
+    )
+
+
 def _configure_ovn_tls(snap: Snap) -> None:
     """Configure OVS/OVN TLS.
 
@@ -811,47 +904,27 @@ def _configure_ovn_tls(snap: Snap) -> None:
     :type snap: Snap
     :return: None
     """
-
-    def _parse_tls(config_key: str) -> str:
-        """Parse Base64 encoded key or cert.
-
-        :param config_key: base64 encoded data (or UNSET)
-        :type config_key: str
-        :return: decoded data or None
-        :rtype: str
-        """
-        try:
-            return base64.b64decode(snap.config.get(config_key))
-        except (binascii.Error, TypeError):
-            pass
-
     try:
-        ovn_cert = _parse_tls("network.ovn-cert")
-        ovn_cacert = _parse_tls("network.ovn-cacert")
-        ovn_key = _parse_tls("network.ovn-key")
+        ovn_cert = _parse_tls(snap, "network.ovn-cert")
+        ovn_cacert = _parse_tls(snap, "network.ovn-cacert")
+        ovn_key = _parse_tls(snap, "network.ovn-key")
     except UnknownConfigKey:
         logging.info("OVN TLS configuration incomplete, skipping.")
         return
-    if not all(
-        (
-            ovn_cert,
-            ovn_cacert,
-            ovn_key,
-        )
-    ):
+    if not all((ovn_cert, ovn_cacert, ovn_key)):
         logging.info("OVN TLS configuration incomplete, skipping.")
         return
 
-    ssl_key = snap.paths.common / Path("etc/ssl/private/ovn-key.pem")
-    ssl_cert = snap.paths.common / Path("etc/ssl/certs/ovn-cert.pem")
     ssl_cacert = snap.paths.common / Path("etc/ssl/certs/ovn-cacert.pem")
+    ssl_cert = snap.paths.common / Path("etc/ssl/certs/ovn-cert.pem")
+    ssl_key = snap.paths.common / Path("etc/ssl/private/ovn-key.pem")
 
-    with open(ssl_key, "wb") as f:
-        f.write(ovn_key)
-    with open(ssl_cert, "wb") as f:
-        f.write(ovn_cert)
-    with open(ssl_cacert, "wb") as f:
-        f.write(ovn_cacert)
+    ssl_cacert.write_bytes(ovn_cacert)
+    ssl_cacert.chmod(0o644)
+    ssl_cert.write_bytes(ovn_cert)
+    ssl_cert.chmod(0o644)
+    ssl_key.write_bytes(ovn_key)
+    ssl_key.chmod(0o600)
 
     subprocess.check_call(
         [
@@ -1138,24 +1211,28 @@ def configure(snap: Snap) -> None:
     for service in exclude_services:
         services[service].stop()
 
-    with RestartOnChange(snap, TEMPLATES, exclude_services):
+    with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         for config_file, template in TEMPLATES.items():
-            template = _get_template(snap, template.get("template"))
+            tpl_name = template.get("template")
+            if tpl_name is None:
+                continue
+            template = _get_template(snap, tpl_name)
             config_file = snap.paths.common / config_file
             logging.info(f"Rendering {config_file}")
             try:
                 output = template.render(context)
                 with open(config_file, "w+") as f:
                     f.write(output)
-            except:  # noqa
+            except Exception:  # noqa
                 logging.exception(
-                    "An error occurred when attempting to render the mysql configuration file."
+                    "An error occurred when attempting to render the configuration file: %s",
+                    config_file,
                 )
                 raise
+        _configure_tls(snap)
 
     _configure_ovn_base(snap)
     _configure_ovn_external_networking(snap)
-    _configure_ovn_tls(snap)
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
