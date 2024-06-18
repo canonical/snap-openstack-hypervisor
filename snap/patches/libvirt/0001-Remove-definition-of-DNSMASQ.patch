@@ -1,0 +1,25 @@
+From 72cd39442d659c19fc604841e9c5cf72fbc882f9 Mon Sep 17 00:00:00 2001
+From: Guillaume Boutry <guillaume.boutry@canonical.com>
+Date: Tue, 18 Jun 2024 11:05:48 +0200
+Subject: [PATCH] Remove definition of DNSMASQ
+
+Part responsible for building libvirt will define the absolute path to
+DNSMASQ. Remove not to create conflict.
+---
+ src/util/virdnsmasq.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/util/virdnsmasq.c b/src/util/virdnsmasq.c
+index 7d6de943c..c782f2ba3 100644
+--- a/src/util/virdnsmasq.c
++++ b/src/util/virdnsmasq.c
+@@ -43,7 +43,6 @@
+ 
+ VIR_LOG_INIT("util.dnsmasq");
+ 
+-#define DNSMASQ "dnsmasq"
+ #define DNSMASQ_HOSTSFILE_SUFFIX "hostsfile"
+ #define DNSMASQ_ADDNHOSTSFILE_SUFFIX "addnhosts"
+ 
+-- 
+2.43.0

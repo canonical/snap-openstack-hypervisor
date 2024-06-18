@@ -1,6 +1,6 @@
 name: openstack-hypervisor
 version: '2024.1'
-base: core22
+base: core24
 summary: OpenStack Hypervisor
 description: |
   The OpenStack Hypervisor snap provides the requires components
@@ -13,7 +13,7 @@ environment:
   LC_ALL: C
   PATH: $SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$SNAP/usr/local/bin:$SNAP/usr/local/sbin:$PATH
   # Standard library components must have priority in module name resolution: https://storyboard.openstack.org/#!/story/2007806
-  PYTHONPATH: $PYTHONPATH:$SNAP/usr/lib/python3.10:$SNAP/usr/lib/python3.10/site-packages:$SNAP/usr/lib/python3/dist-packages:$SNAP/lib/python3.10:$SNAP/lib/python3.10/site-packages
+  PYTHONPATH: $PYTHONPATH:$SNAP/usr/lib/python3.12:$SNAP/usr/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages:$SNAP/lib/python3.12:$SNAP/lib/python3.12/site-packages
   # OVN runtime configuration
   OVN_LOGDIR: $SNAP_COMMON/log/ovn
   OVN_RUNDIR: $SNAP_COMMON/run/ovn
@@ -29,10 +29,10 @@ environment:
   OVS_BINDIR: $SNAP/usr/bin
   OVS_SBINDIR: $SNAP/usr/sbin
 
-architectures:
-  - build-on: amd64
-  - build-on: arm64
-  - build-on: s390x
+platforms:
+  amd64:
+  arm64:
+  s390x:
 
 system-usernames:
   snap_daemon: shared
@@ -60,13 +60,6 @@ layout:
     symlink: $SNAP/usr/share/AAVMF
   /var/lib/libvirt:
     symlink: $SNAP_DATA/var/lib/libvirt
-
-package-repositories:
-  - type: apt
-    components: [main]
-    suites: [jammy-updates/caracal]
-    key-id: 391A9AA2147192839E9DB0315EDB1B62EC4926EA
-    url: http://ubuntu-cloud.archive.canonical.com/ubuntu
 
 apps:
   openstack-hypervisor:
@@ -330,13 +323,13 @@ parts:
       -X ${PROJECT}/${PKG_DIR}.buildDate=$BUILD_DATE" \
       ./cmd/ovs_exporter/*.go
     override-prime: |
-      snapcraftctl prime
+      craftctl default
       install -D $SNAPCRAFT_PART_SRC/../build/bin/ovs-exporter bin/ovs-exporter
 
   qemu:
     source: https://git.launchpad.net/ubuntu/+source/qemu
     source-type: git
-    source-branch: ubuntu/jammy-updates
+    source-branch: ubuntu/noble-updates
     source-depth: 1
     plugin: autotools
     stage-packages:
@@ -348,7 +341,7 @@ parts:
         - qemu-efi-arm
       - on amd64:
         - ovmf
-      - freeglut3 # provides libglut.so.3
+      - libglut3.12 # provides libglut.so.3
       - libnuma1
       - libspice-server1
       - libasound2
@@ -360,7 +353,7 @@ parts:
       - libboost-thread1.74.0
       - libcaca0
       - libfdt1
-      - libflac8
+      - libflac++10
       - libglib2.0-0
       - libglu1-mesa
       - libiscsi7
@@ -387,20 +380,20 @@ parts:
       - libxdmcp6
       - libxext6
       - libpng16-16
-      - libaio1
+      - libaio1t64
       - libasn1-8-heimdal
       - libbrotli1
-      - libcurl3-gnutls
-      - libgssapi3-heimdal
-      - libhcrypto4-heimdal
+      - libcurl3t64-gnutls
+      - libgssapi3t64-heimdal
+      - libhcrypto5t64-heimdal
       - libheimbase1-heimdal
       - libheimntlm0-heimdal
       - libhx509-5-heimdal
       - libkrb5-26-heimdal
-      - libldap-2.5-0
+      - libldap2
       - libnghttp2-14
       - libpsl5
-      - libroken18-heimdal
+      - libroken19t64-heimdal
       - librtmp1
       - libssh-4
       - libwind0-heimdal
@@ -442,7 +435,7 @@ parts:
     autotools-configure-parameters:
       - --enable-system
       - --target-list=x86_64-softmmu,aarch64-softmmu
-      - --disable-blobs
+      - --disable-install-blobs
       - --disable-user
       - --disable-linux-user
       - --disable-bsd-user
@@ -457,13 +450,13 @@ parts:
       dpkg-source --before-build .
       craftctl default
 
-      # Install keymaps as the qemu build process doe not!
+      # Install keymaps as the qemu build process does not!
       install -Dp -m0644 -t $CRAFT_PART_INSTALL/usr/share/qemu/keymaps $(ls -1 $CRAFT_PART_SRC/pc-bios/keymaps/* | fgrep -v /meson.build)
 
   libvirt:
     source: https://git.launchpad.net/ubuntu/+source/libvirt
     source-type: git
-    source-branch: ubuntu/jammy-updates
+    source-branch: ubuntu/noble-updates
     source-depth: 1
     after:
       - qemu
@@ -472,7 +465,7 @@ parts:
     - libxml2-dev
     - libxml-libxml-perl
     - libcurl4-gnutls-dev
-    - libncurses5-dev
+    - libncurses-dev
     - libreadline-dev
     - zlib1g-dev
     - libgcrypt20-dev
@@ -484,11 +477,12 @@ parts:
     - libpciaccess-dev
     - libnl-3-dev
     - libnl-route-3-dev
+    - libtirpc-dev
     - libxml2-utils
     - uuid-dev
     - libnuma-dev
-    - python-all
-    - python-six
+    - python3-all
+    - python3-six
     - wget
     - dpkg-dev
     - xsltproc
@@ -518,6 +512,9 @@ parts:
     meson-parameters:
     # Hypervisors
     - -Ddriver_qemu=enabled
+    - -Ddriver_libvirtd=enabled
+    - -Ddriver_remote=enabled
+    - -Ddriver_ch=disabled
     - -Ddriver_bhyve=disabled
     - -Ddriver_openvz=disabled
     - -Ddriver_vmware=disabled
@@ -539,7 +536,6 @@ parts:
     # Storage Drivers
     - -Dstorage_iscsi=enabled
     - -Dstorage_rbd=enabled
-    - -Dstorage_sheepdog=disabled
     - -Dstorage_lvm=disabled
     - -Dstorage_vstorage=disabled
     - -Dstorage_zfs=disabled
@@ -576,8 +572,8 @@ parts:
       #define DNSMASQ \"/snap/$CRAFT_PROJECT_NAME/current/usr/sbin/dnsmasq\"
       #undef DMIDECODE
       #define DMIDECODE \"/snap/$CRAFT_PROJECT_NAME/current/usr/sbin/dmidecode\"
-      #undef OVSVSCTL
-      #define OVSVSCTL \"/snap/$CRAFT_PROJECT_NAME/current/usr/local/bin/ovs-vsctl\"
+      #undef OVS_VSCTL
+      #define OVS_VSCTL \"/snap/$CRAFT_PROJECT_NAME/current/usr/local/bin/ovs-vsctl\"
       #undef IPTABLES
       #define IPTABLES \"/snap/$CRAFT_PROJECT_NAME/current/usr/sbin/iptables-legacy\"
       #undef IP6TABLES
@@ -585,6 +581,10 @@ parts:
       #undef EBTABLES
       #define EBTABLES \"/snap/$CRAFT_PROJECT_NAME/current/usr/sbin/ebtables-legacy\"
       " >> $CRAFT_PART_SRC/config.h
+
+      pushd $CRAFT_PART_SRC
+      git am $CRAFT_PROJECT_DIR/snap/patches/libvirt/*.patch
+      popd || exit 1
 
       craftctl default
 
@@ -622,11 +622,27 @@ parts:
       - python3-masakari-monitors
       - python3-os-vif
       - python3-os-brick
-      - python3-distutils
+      - python3-setuptools
       - python3-systemd
       - python3-tz
       - haproxy
       - util-linux
+      # following packages are explicitly declared, because they are inside core24
+      # removed when core24 bug is fixed
+      - python3-attr
+      - python3-chardet
+      - python3-cryptography
+      - python3-cffi-backend
+      - python3-dbus
+      - python3-idna
+      - python3-jinja2
+      - python3-jsonschema
+      - python3-jsonpatch
+      - python3-json-pointer
+      - python3-pyrsistent
+      - python3-requests
+      - python3-urllib3
+      - python3-yaml
     override-build: |
       craftctl default
       # NOTE:
