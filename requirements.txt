@@ -1,10 +1,9 @@
 # WARNING: Please ensure that any packages listed here do not overlap with
 #          the payloads requirements.
 # for interacting with snap
-git+https://github.com/albertodonato/snap-helpers#egg=snap-helpers
+snap-helpers @ git+https://github.com/albertodonato/snap-helpers
 jinja2
 
-fastapi
 netifaces
 pydantic
 
