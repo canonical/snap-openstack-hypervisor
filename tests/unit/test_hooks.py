@@ -114,19 +114,21 @@ class TestHooks:
         """Tests the configure hook."""
         mock_template = mocker.Mock()
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
-        mock_file = mocker.patch("builtins.open", mocker.mock_open())
+        mock_write_text = mocker.patch.object(hooks.Path, "write_text")
+        mock_chmod = mocker.patch.object(hooks.Path, "chmod")
 
         hooks.configure(snap)
 
         mock_template.render.assert_called()
-        mock_file.assert_called()
+        mock_write_text.assert_called()
+        mock_chmod.assert_called()
 
     def test_configure_hook_exception(self, mocker, snap, os_makedirs, check_call):
         """Tests the configure hook raising an exception while writing file."""
         mock_template = mocker.Mock()
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
-        mock_file = mocker.patch("builtins.open", mocker.mock_open())
-        mock_file.side_effect = FileNotFoundError
+        mocker.patch.object(hooks.Path, "write_text")
+        mocker.patch.object(hooks.Path, "chmod")
 
         with pytest.raises(FileNotFoundError):
             hooks.configure(snap)

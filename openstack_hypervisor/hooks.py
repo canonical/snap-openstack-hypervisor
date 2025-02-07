@@ -100,6 +100,9 @@ COMMON_DIRS = [
     Path("lib/nova/instances"),
 ]
 
+DEFAULT_PERMS = 0o640
+PRIVATE_PERMS = 0o600
+
 DATA_DIRS = [
     Path("lib/libvirt/images"),
     Path("lib/ovn"),
@@ -898,7 +901,9 @@ def _configure_tls(snap: Snap) -> None:
     _configure_cabundle_tls(snap)
 
 
-def _template_tls_file(pem: bytes, file: Path, links: List[Path], permissions: int = 0o644):
+def _template_tls_file(
+    pem: bytes, file: Path, links: List[Path], permissions: int = DEFAULT_PERMS
+):
     file.write_bytes(pem)
     file.chmod(permissions)
     for link in links:
@@ -995,7 +1000,7 @@ def _generate_local_ca(root_path: Path) -> tuple[x509.Certificate, rsa.RSAPrivat
         (ca_certificate, ca_crt_pem),
     ):
         path.unlink(missing_ok=True)
-        path.touch(0o660)
+        path.touch(DEFAULT_PERMS)
         path.write_bytes(pem)
     return certificate, private_key, True
 
@@ -1069,7 +1074,7 @@ def _generate_local_servercert(
         (server_crt, server_crt_pem),
     ):
         path.unlink(missing_ok=True)
-        path.touch(0o660)
+        path.touch(DEFAULT_PERMS)
         path.write_bytes(pem)
     return certificate, private_key
 
@@ -1142,7 +1147,7 @@ def _configure_libvirt_tls(snap: Snap) -> None:
             qemu_key,
             qemu_client_key,
         ],
-        0o600,
+        PRIVATE_PERMS,
     )
 
 
@@ -1169,11 +1174,11 @@ def _configure_ovn_tls(snap: Snap) -> None:
     ssl_key = snap.paths.common / Path("etc/ssl/private/ovn-key.pem")
 
     ssl_cacert.write_bytes(ovn_cacert)
-    ssl_cacert.chmod(0o644)
+    ssl_cacert.chmod(DEFAULT_PERMS)
     ssl_cert.write_bytes(ovn_cert)
-    ssl_cert.chmod(0o644)
+    ssl_cert.chmod(DEFAULT_PERMS)
     ssl_key.write_bytes(ovn_key)
-    ssl_key.chmod(0o600)
+    ssl_key.chmod(PRIVATE_PERMS)
 
     subprocess.check_call(
         [
@@ -1494,8 +1499,8 @@ def configure(snap: Snap) -> None:
             logging.info(f"Rendering {config_file}")
             try:
                 output = template.render(context)
-                with open(config_file, "w+") as f:
-                    f.write(output)
+                config_file.write_text(output)
+                config_file.chmod(DEFAULT_PERMS)
             except Exception:  # noqa
                 logging.exception(
                     "An error occurred when attempting to render the configuration file: %s",
