@@ -17,6 +17,7 @@ import textwrap
 from unittest import mock
 
 import pytest
+from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import hooks
 
@@ -402,3 +403,99 @@ class TestHooks:
         conn_mock.secretLookupByUUIDString.return_value = secret_mock
         hooks._ensure_secret("uuid1", "secret")
         mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "secret")
+
+    def test_detect_compute_flavors_with_no_flavors_set(self, mocker, snap):
+        mock_os_path_exists = mocker.patch("os.path.exists")
+        mock_os_path_exists.return_value = True
+        mocker.patch("builtins.open", mock.mock_open(read_data="Y"))
+        conn_mock = mocker.Mock()
+        mock_libvirt = mocker.Mock()
+        mock_get_libvirt = mocker.patch.object(hooks, "_get_libvirt")
+        mock_get_libvirt.return_value = mock_libvirt
+        mock_libvirt.open.return_value = conn_mock
+        conn_mock.getDomainCapabilities.return_value = """<domainCapabilities>
+        <features>
+          <sev supported='yes'/>
+        </features>
+        </domainCapabilities>
+        """
+
+        snap.config.get.side_effect = UnknownConfigKey("compute.flavors")
+        hooks._detect_compute_flavors(snap)
+        snap.config.set.assert_called_once_with({"compute.flavors": "sev"})
+
+    def test_detect_compute_flavors_with_flavors_set(self, mocker, snap):
+        mock_os_path_exists = mocker.patch("os.path.exists")
+        mock_os_path_exists.return_value = True
+        mocker.patch("builtins.open", mock.mock_open(read_data="Y"))
+        conn_mock = mocker.Mock()
+        mock_libvirt = mocker.Mock()
+        mock_get_libvirt = mocker.patch.object(hooks, "_get_libvirt")
+        mock_get_libvirt.return_value = mock_libvirt
+        mock_libvirt.open.return_value = conn_mock
+        conn_mock.getDomainCapabilities.return_value = """<domainCapabilities>
+        <features>
+          <sev supported='yes'/>
+        </features>
+        </domainCapabilities>
+        """
+
+        snap.config.get.return_value = "flavor1"
+        hooks._detect_compute_flavors(snap)
+        snap.config.set.assert_called_once_with({"compute.flavors": "flavor1,sev"})
+
+    def test_detect_compute_flavors_with_sev_flavor_already_set(self, mocker, snap):
+        mock_os_path_exists = mocker.patch("os.path.exists")
+        mock_os_path_exists.return_value = True
+        mocker.patch("builtins.open", mock.mock_open(read_data="Y"))
+        conn_mock = mocker.Mock()
+        mock_libvirt = mocker.Mock()
+        mock_get_libvirt = mocker.patch.object(hooks, "_get_libvirt")
+        mock_get_libvirt.return_value = mock_libvirt
+        mock_libvirt.open.return_value = conn_mock
+        conn_mock.getDomainCapabilities.return_value = """<domainCapabilities>
+        <features>
+          <sev supported='yes'/>
+        </features>
+        </domainCapabilities>
+        """
+
+        snap.config.get.return_value = "sev"
+        hooks._detect_compute_flavors(snap)
+        snap.config.set.assert_not_called()
+
+    def test_detect_compute_flavors_with_libvirt_sev_capability_no(self, mocker, snap):
+        mock_os_path_exists = mocker.patch("os.path.exists")
+        mock_os_path_exists.return_value = True
+        mocker.patch("builtins.open", mock.mock_open(read_data="Y"))
+        conn_mock = mocker.Mock()
+        mock_libvirt = mocker.Mock()
+        mock_get_libvirt = mocker.patch.object(hooks, "_get_libvirt")
+        mock_get_libvirt.return_value = mock_libvirt
+        mock_libvirt.open.return_value = conn_mock
+        conn_mock.getDomainCapabilities.return_value = """<domainCapabilities>
+        <features>
+          <sev supported='no'/>
+        </features>
+        </domainCapabilities>
+        """
+
+        snap.config.get.side_effect = UnknownConfigKey("compute.flavors")
+        hooks._detect_compute_flavors(snap)
+        snap.config.set.assert_not_called()
+
+    def test_detect_compute_flavors_with_sev_file_value_n(self, mocker, snap):
+        mock_os_path_exists = mocker.patch("os.path.exists")
+        mock_os_path_exists.return_value = True
+        mocker.patch("builtins.open", mock.mock_open(read_data="N"))
+        mock_libvirt = mocker.Mock()
+        mock_get_libvirt = mocker.patch.object(hooks, "_get_libvirt")
+        mock_get_libvirt.return_value = mock_libvirt
+
+        mock_get_libvirt.assert_not_called()
+
+    def test_detect_compute_flavors_with_sev_file_not_exists(self, mocker, snap):
+        mock_os_path_exists = mocker.patch("os.path.exists")
+        mock_os_path_exists.return_value = False
+        mock_builtins_open = mocker.patch("builtins.open", mock.mock_open(read_data="N"))
+        mock_builtins_open.assert_not_called()
