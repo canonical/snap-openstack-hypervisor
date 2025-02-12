@@ -699,6 +699,7 @@ hooks:
       - network-control
       - firewall-control
       - microstack-support
+      - kvm
   connect-slot-hypervisor-config:
     plugs:
       - network
