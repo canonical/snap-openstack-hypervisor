@@ -74,6 +74,19 @@ IP address to use for configuration of SPICE consoles in instances.
 
 Whether to resume instances on boot or not.
 
+* `compute.flavors` Flavor of the compute host
+
+Comma separated string of Flavors like SEV, SRIOV, DPDK.
+Currently SEV is supported for instance memory encryption.
+
+Valid values: `sev`
+
+* `sev.reserved-host-memory-mb` Host memory reserved
+
+Amount of memory reserved for host in MB. nova-compute service deducts this
+memory from the available memory in the usage report sent to the placement
+service.
+
 ### identity
 
 Configuration of options related to identity (Keystone):

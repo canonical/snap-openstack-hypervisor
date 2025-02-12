@@ -28,6 +28,7 @@ import stat
 import string
 import subprocess
 import uuid
+import xml.etree.ElementTree
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +57,7 @@ IPVANYNETWORK_UNSET = "0.0.0.0/0"
 SECRETS = ["credentials.ovn-metadata-proxy-shared-secret"]
 
 DEFAULT_SECRET_LENGTH = 32
+TRUE_STRINGS = ("1", "t", "true", "on", "y", "yes")
 
 # NOTE(dmitriis): there is currently no way to make sure this directory gets
 # recreated on reboot which would normally be done via systemd-tmpfiles.
@@ -268,6 +270,8 @@ DEFAULT_CONFIG = {
     "compute.key": UNSET,
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
+    "compute.flavors": UNSET,
+    "sev.reserved-host-memory-mb": UNSET,
     # Neutron
     "network.physnet-name": "physnet1",
     "network.external-bridge": "br-ex",
@@ -1216,6 +1220,49 @@ def _is_kvm_api_available() -> bool:
     return True
 
 
+def _is_amd_sev_supported() -> bool:
+    """Determine whether AMD SEV is supportable.
+
+    Following checks are performed to determine sev feature
+    * kernel file exists
+    * kernel file has content Y/y
+    * libvirtd can view the host features sev supportability as yes
+    """
+    kernel_sev_param_file = "/sys/module/kvm_amd/parameters/sev"
+    if not os.path.exists(kernel_sev_param_file):
+        logging.debug(f"{kernel_sev_param_file} does not exist")
+        return False
+
+    with open(kernel_sev_param_file) as f:
+        content = f.read()
+        logging.info(content)
+        logging.debug(f"{kernel_sev_param_file} contains [{content}]")
+        if content.strip().lower() not in TRUE_STRINGS:
+            return False
+
+    libvirt = _get_libvirt()
+    conn = libvirt.open("qemu:///system")
+    try:
+        caps = conn.getDomainCapabilities()
+        root = xml.etree.ElementTree.fromstring(caps)
+        features = root.find("features")
+        if not features:
+            logging.debug("No features set in libvirt domain capabilities")
+            return False
+
+        sev = features.find("sev")
+        sev_supported = sev.get("supported")
+        if sev_supported != "yes":
+            logging.debug(
+                f"SEV supported flag value in libvirt domain capabilities: {sev_supported}"
+            )
+            return False
+    finally:
+        conn.close()
+
+    return True
+
+
 def _is_hw_virt_supported() -> bool:
     """Determine whether hardware virt is supported."""
     cpu_info = json.loads(subprocess.check_output(["lscpu", "-J"]))["lscpu"]
@@ -1351,6 +1398,21 @@ def _configure_kvm(snap: Snap) -> None:
         snap.config.set({"compute.virt-type": "qemu"})
 
 
+def _detect_compute_flavors(snap: Snap) -> None:
+    """Detect Compute flavors.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: None
+    """
+    logging.info("Checking if SEV is supported on the host")
+    if _is_amd_sev_supported():
+        logging.info("AMD SEV is supported on the host")
+        _add_compute_flavor(snap, "sev")
+    else:
+        logging.info("AMD SEV is not supported on the host")
+
+
 def _configure_monitoring_services(snap: Snap) -> None:
     """Configure all the monitoring services.
 
@@ -1440,6 +1502,26 @@ def _services_not_enabled_by_config(context: dict) -> List[str]:
     return not_enabled
 
 
+def _add_compute_flavor(snap: Snap, flavor: str) -> None:
+    logging.debug(f"Adding compute flavor to snap config: {flavor}")
+    flavors = []
+    try:
+        flavors_str = snap.config.get("compute.flavors")
+        if flavors_str:
+            flavors = flavors_str.split(",")
+    except UnknownConfigKey:
+        # Do nothing if key does not exist yet
+        pass
+
+    if flavor in flavors:
+        return
+
+    flavors.append(flavor)
+    updated_flavors = ",".join(flavors)
+    logging.info(f"Setting snap config compute.flavor {updated_flavors}")
+    snap.config.set({"compute.flavors": updated_flavors})
+
+
 def configure(snap: Snap) -> None:
     """Runs the `configure` hook for the snap.
 
@@ -1457,6 +1539,7 @@ def configure(snap: Snap) -> None:
     _mkdirs(snap)
     _update_default_config(snap)
     _setup_secrets(snap)
+    _detect_compute_flavors(snap)
 
     context = snap.config.get_options(
         "compute",
@@ -1470,6 +1553,7 @@ def configure(snap: Snap) -> None:
         "monitoring",
         "ca",
         "masakari",
+        "sev",
     ).as_dict()
 
     # Add some general snap path information

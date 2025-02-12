@@ -30,6 +30,14 @@ resume_guests_state_on_host_boot = {{ compute.resume_on_boot }}
 # To collect compute node related metrics
 compute_monitors = cpu.virt_driver
 
+{% if 'sev' in compute.flavors -%}
+# Set ram_allocation_ratio to 1.0 as SEV is enabled
+ram_allocation_ratio = 1.0
+{% if sev and sev.reserved_host_memory_mb -%}
+reserved_host_memory_mb  = {{ sev.reserved_host_memory_mb }}
+{% endif %}
+{% endif %}
+
 [workarounds]
 disable_rootwrap = True
 
@@ -48,6 +56,11 @@ live_migration_inbound_addr = {{ compute.migration_address }}
 {% if compute.rbd_secret_uuid -%}
 rbd_user = {{ compute.rbd_user }}
 rbd_secret_uuid = {{ compute.rbd_secret_uuid }}
+{% endif %}
+
+{% if 'sev' in compute.flavors -%}
+# hw_machine_type set to q35 as sev is enabled
+hw_machine_type = x86_64=q35
 {% endif %}
 
 [oslo_concurrency]
