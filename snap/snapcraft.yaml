@@ -343,7 +343,8 @@ parts:
         - ovmf
       - libglut3.12 # provides libglut.so.3
       - libnuma1
-      - libspice-server1
+      - on amd64,arm64:
+        - libspice-server1
       - libasound2
       - libasyncns0
       - libbluetooth3
@@ -404,7 +405,6 @@ parts:
     build-packages:
       - bison
       - flex
-      - acpica-tools
       - libaio-dev
       - libjack-dev
       - libpulse-dev
@@ -419,7 +419,6 @@ parts:
       - libpixman-1-dev
       - librbd-dev
       - libsasl2-dev
-      - libspice-server-dev
       - libusb-1.0-0-dev
       - libusbredirparser-dev
       - libzstd-dev
@@ -427,7 +426,10 @@ parts:
       - libudev-dev
       - libjpeg-dev
       - libpng-dev
-      - libpmem-dev
+      - on amd64,arm64:
+        - libspice-server-dev
+        - libpmem-dev
+        - acpica-tools
       - nettle-dev
       - gcc
       - meson
@@ -494,7 +496,8 @@ parts:
     - meson
     - ninja-build
     stage-packages:
-    - dmidecode
+    - on amd64,arm64:
+      - dmidecode
     - dnsmasq
     - iptables
     - genisoimage
@@ -607,11 +610,14 @@ parts:
     plugin: nil
     stage-packages:
       - openvswitch-switch
-      - openvswitch-switch-dpdk
+      - on amd64,arm64:
+        - openvswitch-switch-dpdk
       - ovn-host
-    organize:
-       # Deal with alternatives usage in deb packages.
-       usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk: usr/sbin/ovs-vswitchd
+    override-prime: |
+      if [ -f $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk ]; then
+          mv $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk $CRAFT_PART_INSTALL/usr/sbin/ovs-vswitchd
+      fi
+      craftctl default
 
   openstack:
     plugin: nil
