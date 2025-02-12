@@ -404,10 +404,13 @@ class TestHooks:
         hooks._ensure_secret("uuid1", "secret")
         mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "secret")
 
+    def test_detect_compute_flavors_no_rights(self, mocker, snap):
+        mocker.patch("pathlib.Path.read_text", mock.Mock(side_effect=PermissionError))
+        hooks._detect_compute_flavors(snap)
+        snap.config.set.assert_not_called()
+
     def test_detect_compute_flavors_with_no_flavors_set(self, mocker, snap):
-        mock_os_path_exists = mocker.patch("os.path.exists")
-        mock_os_path_exists.return_value = True
-        mocker.patch("builtins.open", mock.mock_open(read_data="Y"))
+        mocker.patch("pathlib.Path.read_text", mock.Mock(return_value="Y"))
         conn_mock = mocker.Mock()
         mock_libvirt = mocker.Mock()
         mock_get_libvirt = mocker.patch.object(hooks, "_get_libvirt")
@@ -425,9 +428,7 @@ class TestHooks:
         snap.config.set.assert_called_once_with({"compute.flavors": "sev"})
 
     def test_detect_compute_flavors_with_flavors_set(self, mocker, snap):
-        mock_os_path_exists = mocker.patch("os.path.exists")
-        mock_os_path_exists.return_value = True
-        mocker.patch("builtins.open", mock.mock_open(read_data="Y"))
+        mocker.patch("pathlib.Path.read_text", mock.Mock(return_value="Y"))
         conn_mock = mocker.Mock()
         mock_libvirt = mocker.Mock()
         mock_get_libvirt = mocker.patch.object(hooks, "_get_libvirt")
