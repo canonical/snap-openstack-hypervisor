@@ -667,6 +667,8 @@ parts:
     source: .
     build-packages:
       - git
+      - cargo
+      - rustc
     python-requirements:
       - requirements.txt
     after:
