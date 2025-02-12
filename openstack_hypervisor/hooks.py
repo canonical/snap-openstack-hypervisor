@@ -1228,17 +1228,21 @@ def _is_amd_sev_supported() -> bool:
     * kernel file has content Y/y
     * libvirtd can view the host features sev supportability as yes
     """
-    kernel_sev_param_file = "/sys/module/kvm_amd/parameters/sev"
-    if not os.path.exists(kernel_sev_param_file):
-        logging.debug(f"{kernel_sev_param_file} does not exist")
+    kernel_sev_param_file = Path("/sys/module/kvm_amd/parameters/sev")
+
+    try:
+        content = kernel_sev_param_file.read_text()
+    except FileNotFoundError:
+        logging.warning(f"{kernel_sev_param_file} does not exist")
+        return False
+    except PermissionError:
+        logging.warning(f"Unable to read {kernel_sev_param_file}")
         return False
 
-    with open(kernel_sev_param_file) as f:
-        content = f.read()
-        logging.info(content)
-        logging.debug(f"{kernel_sev_param_file} contains [{content}]")
-        if content.strip().lower() not in TRUE_STRINGS:
-            return False
+    logging.info(content)
+    logging.debug(f"{kernel_sev_param_file} contains [{content}]")
+    if content.strip().lower() not in TRUE_STRINGS:
+        return False
 
     libvirt = _get_libvirt()
     conn = libvirt.open("qemu:///system")
@@ -1251,6 +1255,9 @@ def _is_amd_sev_supported() -> bool:
             return False
 
         sev = features.find("sev")
+        if sev is None:
+            logging.debug("No sev feature set in libvirt domain capabilities")
+            return False
         sev_supported = sev.get("supported")
         if sev_supported != "yes":
             logging.debug(
