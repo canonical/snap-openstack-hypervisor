@@ -405,7 +405,6 @@ parts:
     build-packages:
       - bison
       - flex
-      - acpica-tools
       - libaio-dev
       - libjack-dev
       - libpulse-dev
@@ -430,6 +429,7 @@ parts:
       - on amd64,arm64:
         - libspice-server-dev
         - libpmem-dev
+        - acpica-tools
       - nettle-dev
       - gcc
       - meson
