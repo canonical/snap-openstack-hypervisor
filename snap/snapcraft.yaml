@@ -339,12 +339,12 @@ parts:
       - on arm64:
         - qemu-efi-aarch64
         - qemu-efi-arm
+        - libspice-server1
       - on amd64:
         - ovmf
+        - libspice-server1
       - libglut3.12 # provides libglut.so.3
       - libnuma1
-      - on amd64,arm64:
-        - libspice-server1
       - libasound2
       - libasyncns0
       - libbluetooth3
@@ -426,7 +426,11 @@ parts:
       - libudev-dev
       - libjpeg-dev
       - libpng-dev
-      - on amd64,arm64:
+      - on amd64:
+        - libspice-server-dev
+        - libpmem-dev
+        - acpica-tools
+      - on arm64:
         - libspice-server-dev
         - libpmem-dev
         - acpica-tools
@@ -496,7 +500,9 @@ parts:
     - meson
     - ninja-build
     stage-packages:
-    - on amd64,arm64:
+    - on amd64:
+      - dmidecode
+    - on arm64:
       - dmidecode
     - dnsmasq
     - iptables
@@ -610,14 +616,16 @@ parts:
     plugin: nil
     stage-packages:
       - openvswitch-switch
-      - on amd64,arm64:
+      - on amd64:
+        - openvswitch-switch-dpdk
+      - on arm64:
         - openvswitch-switch-dpdk
       - ovn-host
-    override-prime: |
+    override-build: |
+      craftctl default
       if [ -f $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk ]; then
           mv $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk $CRAFT_PART_INSTALL/usr/sbin/ovs-vswitchd
       fi
-      craftctl default
 
   openstack:
     plugin: nil
