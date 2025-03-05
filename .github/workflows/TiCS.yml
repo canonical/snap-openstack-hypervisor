@@ -1,0 +1,32 @@
+name: TICS scan
+
+on:
+  schedule:
+    - cron: '00 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+    TICS:
+      runs-on: [self-hosted, linux, amd64, tiobe, noble]
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
+
+        - name: Install dependencies
+          run: python -m pip install tox
+
+        - name: Run coverage tests
+          run: tox -e unit
+
+        - name: TICS
+          uses: tiobe/tics-github-action@v3
+          with:
+            mode: qserver
+            viewerUrl: https://canonical.tiobe.com/tiobeweb/TICS/api/cfg?name=default
+            ticsAuthToken: ${{ secrets.TICSAUTHTOKEN }}
+            project: snap-openstack-hypervisor
+            branchdir: ${{ env.GITHUB_WORKSPACE }}
+            installTics: true
