@@ -1,0 +1,8 @@
+# Requirements that are required for Tiobe TiCS tool
+# to run pylint
+
+# Typically these are packages that are installed in
+# the snap but not part of requirements.txt file
+
+python-novaclient
+libvirt-python
