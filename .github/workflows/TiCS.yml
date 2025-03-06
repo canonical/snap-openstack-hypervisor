@@ -16,10 +16,19 @@ jobs:
           uses: actions/checkout@v4
 
         - name: Install dependencies
-          run: python -m pip install tox
+          run: |
+            sudo apt update
+            sudo apt install -y tox libvirt-dev
 
         - name: Run coverage tests
           run: tox -e unit
+
+        - name: Install hypervisor snap dependencies
+          run: |
+            for f in $(find -name '*requirements.txt'); do
+              echo "${f}"
+              pip3 install --requirement "${f}"
+            done
 
         - name: TICS
           uses: tiobe/tics-github-action@v3
