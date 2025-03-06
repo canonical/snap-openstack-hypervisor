@@ -10,7 +10,7 @@ permissions:
 
 jobs:
     TICS:
-      runs-on: [self-hosted, linux, amd64, tiobe, noble]
+      runs-on: [self-hosted, linux, amd64, tiobe]
       steps:
         - name: Checkout
           uses: actions/checkout@v4
