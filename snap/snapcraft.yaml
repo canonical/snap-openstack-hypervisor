@@ -345,7 +345,7 @@ parts:
         - libspice-server1
       - libglut3.12 # provides libglut.so.3
       - libnuma1
-      - libasound2
+      - libasound2t64
       - libasyncns0
       - libbluetooth3
       - libboost-iostreams1.74.0
