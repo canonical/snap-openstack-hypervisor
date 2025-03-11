@@ -25,6 +25,7 @@ jobs:
 
         - name: Install hypervisor snap dependencies
           run: |
+            pip3 install --upgrade pip
             for f in $(find -name '*requirements.txt'); do
               echo "${f}"
               pip3 install --requirement "${f}"
