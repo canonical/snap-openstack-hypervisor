@@ -157,6 +157,19 @@ class MasakariInstanceMonitorService(OpenStackService):
 masakari_instancemonitor = partial(entry_point, MasakariInstanceMonitorService)
 
 
+class VMShutdownListenerService(OpenStackService):
+    """A python service object used to run the vm-shutdown-listener daemon."""
+
+    conf_files = []
+    conf_dirs = []
+    extra_args = []
+
+    executable = Path("usr/bin/vm-shutdown-listener-service")
+
+
+vm_shutdown_listener = partial(entry_point, VMShutdownListenerService)
+
+
 class OVSDBServerService:
     """A python service object used to run the ovsdb-server daemon."""
 

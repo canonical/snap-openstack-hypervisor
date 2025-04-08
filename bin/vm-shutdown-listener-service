@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+import socket
+import subprocess
+import logging
+
+HOST = '0.0.0.0'
+PORT = 9999
+
+
+def shutdown_vms():
+    """
+    Shut down all running VMs using virsh.
+    """
+    logging.info("Initiating shutdown of all running VMs...")
+    try:
+        result = subprocess.run(
+            ["virsh", "list", "--name"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        vm_names = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+
+        if not vm_names:
+            logging.info("No running VMs found.")
+            return
+
+        for vm in vm_names:
+            logging.info(f"Shutting down VM: {vm}")
+            subprocess.run(["virsh", "shutdown", vm], check=True)
+
+        logging.info("Shutdown commands sent to all VMs.")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error during VM shutdown: {e.stderr.strip()}")
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+
+
+def run_listener():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    logging.info("VM Shutdown Listener starting...")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
+        server_sock.bind((HOST, PORT))
+        server_sock.listen(5)
+        logging.info(f"Listening for shutdown signals on port {PORT}...")
+        while True:
+            conn, addr = server_sock.accept()
+            with conn:
+                logging.info(f"Received connection from {addr}")
+                data = conn.recv(1024)
+                if not data:
+                    continue
+                command = data.decode().strip()
+                logging.info(f"Received command: {command}")
+                if command.lower() == "shutdown":
+                    shutdown_vms()
+                    conn.sendall(b"Shutdown initiated")
+                else:
+                    conn.sendall(b"Unknown command")
+
+if __name__ == "__main__":
+    run_listener()
