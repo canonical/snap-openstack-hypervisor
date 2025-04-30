@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 import socket
 import subprocess
+import os
 import logging
 
-HOST = '0.0.0.0'
-PORT = 9999
+SOCKET_PATH = os.path.join(os.environ["SNAP"], "consul", "shutdown.sock")
 
 
 def shutdown_vms():
-    """
-    Shut down all running VMs using virsh.
-    """
     logging.info("Initiating shutdown of all running VMs...")
     try:
         result = subprocess.run(
@@ -20,34 +17,32 @@ def shutdown_vms():
             stderr=subprocess.PIPE,
             text=True
         )
-        vm_names = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
-
-        if not vm_names:
-            logging.info("No running VMs found.")
-            return
+        vm_names = result.stdout.strip().splitlines()
 
         for vm in vm_names:
-            logging.info(f"Shutting down VM: {vm}")
-            subprocess.run(["virsh", "shutdown", vm], check=True)
-
-        logging.info("Shutdown commands sent to all VMs.")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error during VM shutdown: {e.stderr.strip()}")
+            if vm.strip():
+                logging.info(f"Shutting down VM: {vm}")
+                subprocess.run(["virsh", "shutdown", vm.strip()], check=True)
+        logging.info("Shutdown commands sent.")
     except Exception as e:
-        logging.error(f"Unexpected error: {e}")
+        logging.error(f"VM shutdown error: {str(e)}")
 
 
 def run_listener():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-    logging.info("VM Shutdown Listener starting...")
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
-        server_sock.bind((HOST, PORT))
-        server_sock.listen(5)
-        logging.info(f"Listening for shutdown signals on port {PORT}...")
+    logging.basicConfig(level=logging.INFO)
+
+    if os.path.exists(SOCKET_PATH):
+        os.remove(SOCKET_PATH)
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_sock:
+        server_sock.bind(SOCKET_PATH)
+        os.chmod(SOCKET_PATH, 0o666)
+        server_sock.listen()
+        logging.info(f"Listening on Unix socket: {SOCKET_PATH}")
+
         while True:
-            conn, addr = server_sock.accept()
+            conn, _ = server_sock.accept()
             with conn:
-                logging.info(f"Received connection from {addr}")
                 data = conn.recv(1024)
                 if not data:
                     continue
@@ -58,6 +53,7 @@ def run_listener():
                     conn.sendall(b"Shutdown initiated")
                 else:
                     conn.sendall(b"Unknown command")
+
 
 if __name__ == "__main__":
     run_listener()

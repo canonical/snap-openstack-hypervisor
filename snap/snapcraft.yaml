@@ -716,6 +716,12 @@ slots:
       write:
         - $SNAP_DATA/run/hypervisor-config
 
+plugs:
+  consul-socket:
+    interface: content
+    content: consul-unix-sock
+    target: $SNAP/consul
+
 hooks:
   install:
     plugs: [ network, microstack-support]
