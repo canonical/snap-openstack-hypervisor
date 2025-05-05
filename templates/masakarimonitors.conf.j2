@@ -24,6 +24,6 @@ cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
 {% endif -%}
 service_token_roles = {{ identity.admin_role }}
 service_token_roles_required = True
-
+monitoring_samples=4
 [libvirt]
 # connection_uri = qemu:///system
