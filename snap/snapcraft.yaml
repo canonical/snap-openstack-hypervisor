@@ -268,8 +268,8 @@ apps:
       - firewall-control
       - microstack-support
 
-  vm-shutdown-listener:
-    command: 'bin/vm-shutdown-listener-service'
+  evacuation-trigger:
+    command: 'bin/evacuation-trigger-service'
     after: [libvirtd]
     daemon: simple
     plugs:

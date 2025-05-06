@@ -129,10 +129,7 @@ MONITORING_SERVICES = [
     "ovs-exporter",
 ]
 
-MASAKARI_SERVICES = [
-    "masakari-instancemonitor",
-    "vm-shutdown-listener"
-]
+MASAKARI_SERVICES = ["masakari-instancemonitor", "evacuation-trigger"]
 
 
 def _generate_secret(length: int = DEFAULT_SECRET_LENGTH) -> str:
