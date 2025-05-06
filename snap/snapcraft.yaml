@@ -268,8 +268,8 @@ apps:
       - firewall-control
       - microstack-support
 
-  evacuation-trigger:
-    command: 'bin/evacuation-trigger-service'
+  pre-evacuation-setup:
+    command: 'bin/pre-evacuation-setup-service'
     after: [libvirtd]
     daemon: simple
     plugs:
