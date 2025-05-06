@@ -1,6 +1,64 @@
 # Copyright 2022 Canonical Ltd.
 # See LICENSE file for licensing details.
 
+[build-system]
+requires = [
+    "setuptools",
+    "pbr>=2.0.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openstack-hypervisor"
+version = "2025.1"
+requires-python = "~=3.12.0"
+license-files = ["LICENSE"]
+description = "Hypervisor component of OpenStack"
+readme = "README.md"
+authors = [{ name = "Canonical", email = "openstack-charmers@lists.launchpad.net" }]
+classifiers = [
+    "Environment :: OpenStack",
+    "Environment :: Web Environment",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operation System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "snap-helpers@git+https://github.com/albertodonato/snap-helpers",
+    "jinja2",
+    "netifaces",
+    "pydantic",
+    "cryptography>=38.0.0,<42,!=40.0.0,!=40.0.1",  # PyOpenSSL requirements
+    "pyroute2==0.7.11",  # matched to caracal cloud-archive
+    "click",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/canonical/openstack-hypervisor"
+"Bug Reports" = "https://github.com/canonical/openstack-hypervisor/issues"
+
+[project.scripts]
+nova-compute-service = "openstack_hypervisor.services:nova_compute"
+nova-api-metadata-service = "openstack_hypervisor.services:nova_api_metadata"
+ovsdb-server-service = "openstack_hypervisor.services:ovsdb_server"
+neutron-ovn-metadata-agent-service = "openstack_hypervisor.services:neutron_ovn_metadata_agent"
+ceilometer-compute-agent-service = "openstack_hypervisor.services:ceilometer_compute_agent"
+ovs-exporter-service = "openstack_hypervisor.services:ovs_exporter"
+masakari-instancemonitor-service = "openstack_hypervisor.services:masakari_instancemonitor"
+hypervisor = "openstack_hypervisor.cli.main:main"
+
+[project.entry-points.'snaphelpers.hooks']
+configure = "openstack_hypervisor.hooks:configure"
+install = "openstack_hypervisor.hooks:install"
+
+[tool.setuptools]
+packages = ["openstack_hypervisor"]
+
 # Testing tools configuration
 [tool.coverage.run]
 branch = true
@@ -41,4 +99,5 @@ docstring-convention = "google"
 # Check for properly formatted copyright header in each file
 copyright-check = "True"
 copyright-author = "Canonical Ltd."
-copyright-regexp = "Copyright\\s\\d{4}([-,]\\d{4})*\\s+%(author)s"
+copyright-regexp = "(?i)# SPDX-FileCopyrightText:\\s\\d{4}(-(\\d{4}|present))*"
+#copyright-regexp = "Copyright\\s\\d{4}([-,]\\d{4})*\\s+%(author)s"
