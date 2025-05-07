@@ -720,7 +720,7 @@ plugs:
   consul-socket:
     interface: content
     content: consul-unix-sock
-    target: $SNAP/consul
+    target: $SNAP_DATA/data
 
 hooks:
   install:

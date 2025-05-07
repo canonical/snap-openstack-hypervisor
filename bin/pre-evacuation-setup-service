@@ -4,7 +4,7 @@ import os
 import socket
 import subprocess
 
-SOCKET_PATH = os.path.join(os.environ["SNAP"], "consul", "shutdown.sock")
+SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "data", "shutdown.sock")
 
 def stop_nova_compute():
     """
