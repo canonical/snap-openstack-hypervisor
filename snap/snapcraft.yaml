@@ -716,11 +716,12 @@ slots:
       write:
         - $SNAP_DATA/run/hypervisor-config
 
-plugs:
   consul-socket:
     interface: content
     content: consul-unix-sock
-    target: $SNAP_DATA/data
+    source:
+      read:
+        - $SNAP_DATA/data
 
 hooks:
   install:

@@ -69,6 +69,7 @@ def shutdown_vms():
 def run_listener():
     logging.basicConfig(level=logging.INFO)
 
+    os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
     if os.path.exists(SOCKET_PATH):
         os.remove(SOCKET_PATH)
 
