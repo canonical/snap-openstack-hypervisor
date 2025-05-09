@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+import logging
+import os
+import socket
+import subprocess
+
+SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "data", "shutdown.sock")
+
+def stop_nova_compute():
+    """
+    Stop the nova-compute service to allow VM evacuation,
+    but only if it is currently running.
+    """
+    try:
+        result = subprocess.run(
+            ["snap", "services", "openstack-hypervisor.nova-compute"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        if "active" in result.stdout:
+            logging.info("nova-compute is active. Proceeding to stop the service...")
+            subprocess.run(
+                ["sudo", "snap", "stop", "openstack-hypervisor.nova-compute"],
+                check=True
+            )
+            logging.info("nova-compute service stopped successfully.")
+        else:
+            logging.info("nova-compute service is already stopped. No action needed.")
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error checking or stopping nova-compute: {e.stderr if e.stderr else str(e)}")
+    except Exception as e:
+        logging.error(f"Unexpected error during nova-compute stop: {e}")
+
+
+def shutdown_vms():
+    """
+    Shut down all running VMs using virsh.
+    """
+    logging.info("Initiating shutdown of all running VMs...")
+    result = subprocess.run(
+        ["virsh", "list", "--name"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    vm_names = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+
+    if not vm_names:
+        logging.info("No running VMs found.")
+        return
+
+    for vm in vm_names:
+        logging.info(f"Shutting down VM: {vm}")
+        try:
+            subprocess.run(["virsh", "shutdown", vm], check=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            logging.error(f"Timeout: VM '{vm}' did not shutdown in 30 seconds.")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error during VM shutdown: {e.stderr.strip()}")
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+
+    logging.info("Shutdown commands sent to all VMs.")
+
+
+def run_listener():
+    logging.basicConfig(level=logging.INFO)
+
+    os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+    if os.path.exists(SOCKET_PATH):
+        os.remove(SOCKET_PATH)
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_sock:
+        server_sock.bind(SOCKET_PATH)
+        os.chmod(SOCKET_PATH, 0o666)
+        server_sock.listen()
+        logging.info(f"Listening on Unix socket: {SOCKET_PATH}")
+
+        while True:
+            conn, _ = server_sock.accept()
+            with conn:
+                data = conn.recv(1024)
+                if not data:
+                    continue
+                command = data.decode().strip()
+                logging.info(f"Received command: {command}")
+                if command.lower() == "shutdown":
+                    stop_nova_compute()
+                    shutdown_vms()
+                    conn.sendall(b"Shutdown initiated")
+                else:
+                    conn.sendall(b"Unknown command")
+
+
+if __name__ == "__main__":
+    run_listener()
