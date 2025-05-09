@@ -57,7 +57,9 @@ def shutdown_vms():
     for vm in vm_names:
         logging.info(f"Shutting down VM: {vm}")
         try:
-            subprocess.run(["virsh", "shutdown", vm], check=True)
+            subprocess.run(["virsh", "shutdown", vm], check=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            logging.error(f"Timeout: VM '{vm}' did not shutdown in 30 seconds.")
         except subprocess.CalledProcessError as e:
             logging.error(f"Error during VM shutdown: {e.stderr.strip()}")
         except Exception as e:
