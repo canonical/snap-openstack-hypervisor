@@ -130,7 +130,7 @@ MONITORING_SERVICES = [
     "ovs-exporter",
 ]
 
-MASAKARI_SERVICES = ["masakari-instancemonitor"]
+MASAKARI_SERVICES = ["masakari-instancemonitor", "pre-evacuation-setup"]
 
 
 def _generate_secret(length: int = DEFAULT_SECRET_LENGTH) -> str:
