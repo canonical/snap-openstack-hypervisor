@@ -268,6 +268,16 @@ apps:
       - firewall-control
       - microstack-support
 
+  pre-evacuation-setup:
+    command: 'bin/pre-evacuation-setup-service'
+    after: [libvirtd]
+    daemon: simple
+    plugs:
+      - network
+      - network-bind
+      - firewall-control
+      - microstack-support
+
   libvirt-exporter:
     daemon: simple
     install-mode: disable
@@ -705,6 +715,13 @@ slots:
     source:
       write:
         - $SNAP_DATA/run/hypervisor-config
+
+  consul-socket:
+    interface: content
+    content: consul-unix-sock
+    source:
+      write:
+        - $SNAP_DATA/data
 
 hooks:
   install:
