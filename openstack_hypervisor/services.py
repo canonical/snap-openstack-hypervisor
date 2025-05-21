@@ -146,6 +146,19 @@ class MasakariInstanceMonitorService(OpenStackService):
 masakari_instancemonitor = partial(entry_point, MasakariInstanceMonitorService)
 
 
+class PreEvacuationSetupService(OpenStackService):
+    """A python service object used to run the pre-evacuation-setup daemon."""
+
+    conf_files = []
+    conf_dirs = []
+    extra_args = []
+
+    executable = Path("usr/bin/pre-evacuation-setup-service")
+
+
+pre_evacuation_setup = partial(entry_point, PreEvacuationSetupService)
+
+
 class OVSDBServerService:
     """A python service object used to run the ovsdb-server daemon."""
 
