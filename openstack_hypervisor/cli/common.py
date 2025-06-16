@@ -6,6 +6,7 @@ import click
 VALUE_FORMAT = "value"
 JSON_FORMAT = "json"
 JSON_INDENT_FORMAT = "json-indent"
+TABLE_FORMAT = "table"
 
 click_option_format = click.option(
     "-f",

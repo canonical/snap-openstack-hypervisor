@@ -70,6 +70,7 @@ apps:
     plugs:
       - network
       - network-observe
+      - hardware-observe
 
   # Libvirt
   libvirtd:
