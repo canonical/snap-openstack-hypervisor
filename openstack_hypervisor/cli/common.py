@@ -19,6 +19,8 @@ from .schemas import (
 VALUE_FORMAT = "value"
 JSON_FORMAT = "json"
 JSON_INDENT_FORMAT = "json-indent"
+TABLE_FORMAT = "table"
+
 SOCKET_FILENAME = "epa.sock"
 SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "data", SOCKET_FILENAME)
 click_option_format = click.option(
