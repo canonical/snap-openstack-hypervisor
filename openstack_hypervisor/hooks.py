@@ -33,6 +33,7 @@ from pyroute2.netlink.exceptions import NetlinkError
 from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
+from openstack_hypervisor.cli.common import get_cpu_pinning_from_socket
 from openstack_hypervisor.log import setup_logging
 
 UNSET = ""
@@ -1537,6 +1538,9 @@ def configure(snap: Snap) -> None:
     _setup_secrets(snap)
     _detect_compute_flavors(snap)
 
+    # Get CPU pinning info from external provider snap, requesting all available cores
+    shared_cpus, vcpu_pin_set = get_cpu_pinning_from_socket(cores_requested=0)
+
     context = snap.config.get_options(
         "compute",
         "network",
@@ -1552,7 +1556,8 @@ def configure(snap: Snap) -> None:
         "sev",
     ).as_dict()
 
-    # Add some general snap path information
+    context["compute"]["vcpu_pin_set"] = vcpu_pin_set
+
     context.update(
         {
             "snap_common": str(snap.paths.common),
