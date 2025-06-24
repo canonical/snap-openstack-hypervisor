@@ -75,6 +75,7 @@ apps:
     plugs:
       - network
       - network-observe
+      - epa-info
 
   # Libvirt
   libvirtd:
@@ -101,6 +102,7 @@ apps:
       - block-devices
       - microstack-support
       - system-observe
+      - epa-info
     # Make sure KillMode=process is set in the resulting systemd unit instead of
     # the default KillMode=control-group to avoid the situation where stopping
     # libvirtd causes the forced power off scenario for all VMs; it also affects
@@ -701,6 +703,7 @@ parts:
       uv export --frozen --no-hashes --format=requirements-txt -o requirements.txt
       craftctl default
       snap-helpers write-hooks
+    
 
   libvirt-exporter:
     plugin: go
@@ -740,8 +743,15 @@ hooks:
       - firewall-control
       - microstack-support
       - kvm
+      - epa-info
   connect-slot-hypervisor-config:
     plugs:
       - network
       - network-bind
       - microstack-support
+
+plugs:
+  epa-info:
+    interface: content
+    content: epa-info
+    target: $SNAP_DATA

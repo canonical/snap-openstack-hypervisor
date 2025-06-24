@@ -53,6 +53,12 @@ live_migration_scheme = tls
 live_migration_inbound_addr = {{ compute.migration_address }}
 {% endif -%}
 
+{% if compute.allocated_cores and compute.cpu_shared_set -%}
+[compute]
+cpu_dedicated_set = {{ compute.allocated_cores }}
+cpu_shared_set = {{ compute.cpu_shared_set }}
+{% endif %}
+
 {% if compute.rbd_secret_uuid -%}
 rbd_user = {{ compute.rbd_user }}
 rbd_secret_uuid = {{ compute.rbd_secret_uuid }}
