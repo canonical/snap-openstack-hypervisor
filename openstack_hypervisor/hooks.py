@@ -1539,7 +1539,9 @@ def configure(snap: Snap) -> None:
     _detect_compute_flavors(snap)
 
     # Get CPU pinning info from external provider snap, requesting all available cores
-    shared_cpus, vcpu_pin_set = get_cpu_pinning_from_socket(cores_requested=0)
+    cpu_shared_set, allocated_cores = get_cpu_pinning_from_socket(
+        snap_name=snap.name, cores_requested=0
+    )
 
     context = snap.config.get_options(
         "compute",
@@ -1556,7 +1558,8 @@ def configure(snap: Snap) -> None:
         "sev",
     ).as_dict()
 
-    context["compute"]["vcpu_pin_set"] = vcpu_pin_set
+    context["compute"]["allocated_cores"] = allocated_cores
+    context["compute"]["cpu_shared_set"] = cpu_shared_set
 
     context.update(
         {
