@@ -130,6 +130,7 @@ class TestHooks:
             "libvirtd",
             "masakari-instancemonitor",
             "neutron-ovn-metadata-agent",
+            "neutron-sriov-nic-agent",
             "nova-api-metadata",
             "nova-compute",
             "virtlogd",

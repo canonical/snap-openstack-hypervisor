@@ -33,6 +33,7 @@ from pyroute2.netlink.exceptions import NetlinkError
 from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
+from openstack_hypervisor.cli import interfaces
 from openstack_hypervisor.log import setup_logging
 
 UNSET = ""
@@ -1527,7 +1528,17 @@ def _add_compute_flavor(snap: Snap, flavor: str) -> None:
 
 
 def _determine_sriov_device_mappings(snap: Snap) -> str:
-    return ""
+    assignable_nics = interfaces.get_assignable_sriov_nics()
+
+    mappings = []
+    for nic in assignable_nics:
+        physnet = nic["physical_network"]
+        name = nic["name"]
+        if not name or physnet:
+            logging.warning("Missing sriov device name or physnet: %s", nic)
+            continue
+        mappings.append(":".join(physnet, name))
+    return ",".join(mappings)
 
 
 def _configure_sriov(snap: Snap) -> None:
@@ -1539,10 +1550,8 @@ def _configure_sriov(snap: Snap) -> None:
     """
     logging.info("Checking SR-IOV configuration.")
 
-
-    if config.get("network.sriov_nic.physical-device-mappings"):
-        logging.info(
-            "SR-IOV physical device mappings already provided, skipping discovery.")
+    if snap.config.get("network.sriov_nic.physical-device-mappings"):
+        logging.info("SR-IOV physical device mappings already provided, skipping discovery.")
     else:
         logging.info("Determining SR-IOV physical device mappings.")
 
@@ -1556,7 +1565,6 @@ def _configure_sriov(snap: Snap) -> None:
         else:
             logging.info("No SR-IOV mappings detected, disabling SR-IOV agent.")
             sriov_service.stop(disable=True)
-
 
 
 def configure(snap: Snap) -> None:

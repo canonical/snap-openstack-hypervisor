@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import pathlib
-from typing import Iterable
+from typing import Any, Dict, Iterable, Optional
 
 import click
 import prettytable
@@ -14,6 +14,7 @@ import pydantic
 import pyroute2
 from pyroute2.ndb.objects.interface import Interface
 
+from openstack_hypervisor import devspec
 from openstack_hypervisor.cli.common import (
     JSON_FORMAT,
     JSON_INDENT_FORMAT,
@@ -320,3 +321,77 @@ def list_nics(format: str):
         candidate_nics = filter_candidate_nics(nics)
         nics_ = to_output_schema(nics)
     display_nics(nics_, candidate_nics, format)
+
+
+def get_sriov_pf_physnet(
+    nic: InterfaceOutput, pci_device_spec: list[Dict[Any, Any]]
+) -> Optional[str]:
+    """Obtain the corresponding Neutron physnet of an SR-IOV PF."""
+    if not nic.sriov_available:
+        logger.debug("Not an SR-IOV device: %s", nic.name)
+        return ""
+
+    for spec_dict in pci_device_spec:
+        physical_network = spec_dict.get("physical_network")
+        if not physical_network:
+            logger.debug("The pci spec doesn't contain a physical network, continuing.")
+            continue
+
+        pci_spec = devspec.PciDeviceSpec(spec_dict)
+        if not pci_spec.match(
+            {
+                "vendor_id": nic.vendor_id,
+                "product_id": nic.product_id,
+                "address": nic.address,
+                "parent_addr": None,  # we only care about PFs.
+            }
+        ):
+            continue
+
+        return physical_network
+
+
+def get_assignable_sriov_nics(pci_device_spec: list[Dict[Any, Any]]) -> list[dict]:
+    """Obtain the list of SR-IOV PFs that can expose VFs to Nova instances.
+
+    Discovers the local SR-IOV capable devices and checks the Nova PCI
+    passthrough whitelist that was provided through the `compute.pci.device-spec`
+    config option.
+
+    :param: pci_device_spec: a list of dictionaries as defined by Nova:
+            https://docs.openstack.org/nova/latest/configuration/config.html#pci.device_spec
+    :type: list[dict]
+    :returns: A list of dictionaries containing assignable PFs and corresponding physnet.
+    :rtype: list[dict]
+
+    Device spec example:
+    [
+        {
+            "vendor_id":"a2d6",
+            "product_id":"15b3",
+            "address": "0000:82:00.0",
+            "physical_network":"physnet1",
+            "remote_managed": "true"
+        },
+    ]
+    """
+    with pyroute2.NDB() as ndb:
+        nics = get_interfaces(ndb)
+
+    out_list = []
+    for nic in nics:
+        physnet = get_sriov_pf_physnet(to_output_schema(nic))
+        if not physnet:
+            logging.debug("No physical network associated with nic: %s", nic.name)
+            continue
+
+        assignable_nic = {
+            "vendor_id": nic.vendor_id,
+            "product_id": nic.product_id,
+            "address": nic.address,
+            "physical_network": physnet,
+            "name": nic.name,
+        }
+        out_list.append(assignable_nic)
+
+    return out_list
