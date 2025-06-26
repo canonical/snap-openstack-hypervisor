@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2024 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
-
 """Pydantic schemas for socket communication."""
 from enum import Enum
 from typing import List, Literal, Optional
@@ -26,20 +25,32 @@ class EpaRequest(BaseModel):
     cores_requested: Optional[int] = Field(
         default=None,
         ge=0,
-        description=("Number of dedicated cores requested " "(only for allocate_cores)"),
+        description="Number of dedicated cores requested (only for allocate_cores)",
     )
 
     @field_validator("cores_requested")
     @classmethod
-    def validate_cores_requested(cls, v, info):
-        """Validate and adjust the value of cores_requested based on the action type."""
-        action = info.data.get("action")
+    def validate_cores_requested(cls, v, values):
+        """Validate cores_requested field based on action type.
+
+        Args:
+            v: The value to validate
+            values: Dictionary containing other field values
+
+        Returns:
+            The validated value
+
+        Notes:
+            - For ALLOCATE_CORES action: if cores_requested is None, defaults to 0
+            - For LIST_ALLOCATIONS action: cores_requested should be None
+        """
+        action = values.data.get("action")
         if action == ActionType.ALLOCATE_CORES and v is None:
-            # For allocate_cores, if cores_requested is None, set it to 0
-            # (which means 80% allocation)
+            # For allocate_cores, if cores_requested is None,
+            # set it to 0 (which means 80% allocation)
             return 0
-        elif action == ActionType.LIST_ALLOCATIONS and v is not None:
-            # For list_allocations, cores_requested should be None or ignored
+        elif action == ActionType.LIST_ALLOCATIONS:
+            # For list_allocations, cores_requested should be None
             return None
         return v
 
