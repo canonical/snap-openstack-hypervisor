@@ -4,10 +4,12 @@
 import glob
 import json
 import logging
+import os
 import pathlib
 from typing import Iterable
 
 import click
+import prettytable
 import pydantic
 import pyroute2
 from pyroute2.ndb.objects.interface import Interface
@@ -15,8 +17,8 @@ from pyroute2.ndb.objects.interface import Interface
 from openstack_hypervisor.cli.common import (
     JSON_FORMAT,
     JSON_INDENT_FORMAT,
+    TABLE_FORMAT,
     VALUE_FORMAT,
-    click_option_format,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,16 @@ class InterfaceOutput(pydantic.BaseModel):
     )
     up: bool = pydantic.Field(description="Whether the interface is up")
     connected: bool = pydantic.Field(description="Whether the interface is connected")
+
+    sriov_available: bool = pydantic.Field(description="Whether SR-IOV is supported")
+    sriov_totalvfs: int = pydantic.Field(description="Total number of SR-IOV VFs")
+    sriov_numvfs: int = pydantic.Field(description="Number of enabled SR-IOV VFs")
+    hw_offload_available: bool = pydantic.Field(
+        description="Whether switchdev hardware offload is supported"
+    )
+    pci_address: str = pydantic.Field(description="The PCI address of the interface")
+    product_id: str = pydantic.Field(description="The PCI product id of the interface")
+    vendor_id: str = pydantic.Field(description="The PCI vendor id of the interface")
 
 
 class NicList(pydantic.RootModel[list[InterfaceOutput]]):
@@ -75,6 +87,115 @@ def load_virtual_interfaces() -> list[str]:
     return [pathlib.Path(p).name for p in glob.iglob(virtual_nic_dir)]
 
 
+def get_pci_address(ifname: str) -> str:
+    """Determine the interface PCI address.
+
+    :param: ifname: interface name
+    :type: str
+    :returns: the PCI address of the device.
+    :rtype: str
+    """
+    net_dev_path = f"/sys/class/net/{ifname}/device"
+    if not (os.path.exists(net_dev_path) and os.path.islink(net_dev_path)):
+        # Not a PCI device.
+        return ""
+    resolved_path = os.path.realpath(net_dev_path)
+    parts = resolved_path.split("/")
+    if "virtio" in parts[-1]:
+        return parts[-2]
+    return parts[-1]
+
+
+def get_pci_product_id(ifname: str) -> str:
+    """Determine the PCI product id of the specified interface.
+
+    :param: ifname: interface name
+    :type: str
+    :returns: the PCI product id of the device.
+    :rtype: str
+    """
+    path = f"/sys/class/net/{ifname}/device/device"
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r") as f:
+        return f.read().strip()
+
+
+def get_pci_vendor_id(ifname: str) -> str:
+    """Determine the PCI product id of the specified interface.
+
+    :param: ifname: interface name
+    :type: str
+    :returns: the PCI product id of the device.
+    :rtype: str
+    """
+    path = f"/sys/class/net/{ifname}/device/vendor"
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r") as f:
+        return f.read().strip()
+
+
+def is_sriov_capable(ifname: str) -> bool:
+    """Determine whether a device is SR-IOV capable.
+
+    :param: ifname: interface name
+    :type: str
+    :returns: whether device is SR-IOV capable or not
+    :rtype: bool
+    """
+    sriov_totalvfs_file = f"/sys/class/net/{ifname}/device/sriov_totalvfs"
+    return os.path.exists(sriov_totalvfs_file)
+
+
+def is_hw_offload_available(ifname: str) -> bool:
+    """Determine whether a devices supports switchdev hardware offload.
+
+    :param: ifname: interface name
+    :type: str
+    :returns: whether device is SR-IOV capable or not
+    :rtype: bool
+    """
+    phys_port_name_file = f"/sys/class/net/{ifname}/phys_port_name"
+    if not os.path.isfile(phys_port_name_file):
+        return False
+
+    try:
+        with open(phys_port_name_file, "r") as f:
+            phys_port_name = f.readline().strip()
+            return phys_port_name != ""
+    except (OSError, IOError):
+        return False
+
+
+def get_sriov_totalvfs(ifname: str) -> int:
+    """Read total VF capacity for a device.
+
+    :param: ifname: interface name
+    :type: str
+    :returns: number of VF's the device supports
+    :rtype: int
+    """
+    sriov_totalvfs_file = f"/sys/class/net/{ifname}/device/sriov_totalvfs"
+    with open(sriov_totalvfs_file, "r") as f:
+        read_data = f.read()
+    return int(read_data.strip())
+
+
+def get_sriov_numvfs(ifname: str) -> int:
+    """Read configured VF capacity for a device.
+
+    :param: ifname: interface name
+    :type: str
+    :returns: number of VF's the device is configured with
+    :rtype: int
+    """
+    sriov_numvfs_file = f"/sys/class/net/{ifname}/device/sriov_numvfs"
+    with open(sriov_numvfs_file, "r") as f:
+        read_data = f.read()
+    return int(read_data.strip())
+
+
 def filter_candidate_nics(nics: Iterable[Interface]) -> list[str]:
     """Return a list of candidate nics.
 
@@ -115,12 +236,29 @@ def to_output_schema(nics: list[Interface]) -> NicList:
     """Convert the interfaces to the output schema."""
     nics_ = []
     for nic in nics:
+        ifname = nic["ifname"]
+
+        sriov_available = is_sriov_capable(ifname)
+        if sriov_available:
+            sriov_totalvfs = get_sriov_totalvfs(ifname)
+            sriov_numvfs = get_sriov_numvfs(ifname)
+        else:
+            sriov_totalvfs = 0
+            sriov_numvfs = 0
+
         nics_.append(
             InterfaceOutput(
-                name=nic["ifname"],
+                name=ifname,
                 configured=is_interface_configured(nic),
                 up=is_nic_up(nic),
                 connected=is_nic_connected(nic),
+                sriov_available=sriov_available,
+                sriov_totalvfs=sriov_totalvfs,
+                sriov_numvfs=sriov_numvfs,
+                hw_offload_available=is_hw_offload_available(ifname),
+                pci_address=get_pci_address(ifname),
+                product_id=get_pci_product_id(ifname),
+                vendor_id=get_pci_vendor_id(ifname),
             )
         )
     return NicList(nics_)
@@ -128,33 +266,54 @@ def to_output_schema(nics: list[Interface]) -> NicList:
 
 def display_nics(nics: NicList, candidate_nics: list[str], format: str):
     """Display the result depending on the format."""
-    if format == VALUE_FORMAT:
-        print("All nics:")
+    if format in (VALUE_FORMAT, TABLE_FORMAT):
+        table = prettytable.PrettyTable()
+        table.title = "All NICs"
+        table.field_names = ["Name", "Configured", "Up", "Connected", "SR-IOV", "HW offload"]
         for nic in nics.root:
-            print(
-                nic.name + ",",
-                "configured:",
-                nic.configured,
-                "up:",
-                nic.up,
-                "connected:",
-                nic.connected,
+            table.add_row(
+                [
+                    nic.name,
+                    nic.configured,
+                    nic.up,
+                    nic.connected,
+                    nic.sriov_available,
+                    nic.hw_offload_available,
+                ]
             )
+        print(table)
+
         if candidate_nics:
-            print("Candidate nics:")
+            table = prettytable.PrettyTable()
+            table.title = "Candidate NICs"
+            table.field_names = ["Name"]
             for candidate in candidate_nics:
-                print(candidate)
+                table.add_row([candidate])
+            print(table)
     elif format in (JSON_FORMAT, JSON_INDENT_FORMAT):
         indent = 2 if format == JSON_INDENT_FORMAT else None
         print(json.dumps({"nics": nics.model_dump(), "candidates": candidate_nics}, indent=indent))
 
 
 @click.command("list-nics")
-@click_option_format
+@click.option(
+    "-f",
+    "--format",
+    default=JSON_FORMAT,
+    type=click.Choice([VALUE_FORMAT, TABLE_FORMAT, JSON_FORMAT, JSON_INDENT_FORMAT]),
+    help="Output format",
+)
 def list_nics(format: str):
     """List nics that are candidates for use by OVN/OVS subsystem.
 
     This nic will be used by OVS to provide external connectivity to the VMs.
+
+    The output specifies which adapters are SR-IOV capable, including PCI
+    information that can be used to identify and expose SR-IOV devices.
+
+    It also specifies whether the adapters support hardware offloading
+    (switchdev), which allows SR-IOV VFs to be connected to the OVS
+    bridge, offloading the flows to the adapter.
     """
     with pyroute2.NDB() as ndb:
         nics = get_interfaces(ndb)

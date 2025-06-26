@@ -76,6 +76,7 @@ apps:
       - network
       - network-observe
       - epa-info
+      - hardware-observe
 
   # Libvirt
   libvirtd:

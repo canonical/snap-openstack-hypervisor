@@ -87,6 +87,19 @@ Amount of memory reserved for host in MB. nova-compute service deducts this
 memory from the available memory in the usage report sent to the placement
 service.
 
+* `compute.pci-passthrough-whitelist` PCI passthrough whitelist
+
+Sets the pci_passthrough_whitelist option in nova.conf which allows PCI
+passthrough of specific devices to VMs.
+
+Example applications: GPU processing, SR-IOV networking, etc.
+
+NOTE: For PCI passthrough to work IOMMU must be enabled on the machine
+deployed to. This can be accomplished by setting kernel parameters on
+capable machines in MAAS, tagging them and using these tags as
+constraints in the model.
+
+
 ### identity
 
 Configuration of options related to identity (Keystone):

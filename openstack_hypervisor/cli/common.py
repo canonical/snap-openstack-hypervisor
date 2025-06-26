@@ -21,6 +21,8 @@ JSON_FORMAT = "json"
 JSON_INDENT_FORMAT = "json-indent"
 SOCKET_FILENAME = "epa.sock"
 SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "data", SOCKET_FILENAME)
+TABLE_FORMAT = "table"
+
 click_option_format = click.option(
     "-f",
     "--format",
