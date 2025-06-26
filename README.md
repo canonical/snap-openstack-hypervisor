@@ -87,10 +87,10 @@ Amount of memory reserved for host in MB. nova-compute service deducts this
 memory from the available memory in the usage report sent to the placement
 service.
 
-* `compute.pci-passthrough-whitelist` PCI passthrough whitelist
+* `compute.pci-device-specs` PCI passthrough whitelist
 
-Sets the pci_passthrough_whitelist option in nova.conf which allows PCI
-passthrough of specific devices to VMs.
+A list of device specs used to set the `pci.device_spec` option in
+nova.conf, which allows PCI passthrough of specific devices to VMs.
 
 Example applications: GPU processing, SR-IOV networking, etc.
 
@@ -98,6 +98,11 @@ NOTE: For PCI passthrough to work IOMMU must be enabled on the machine
 deployed to. This can be accomplished by setting kernel parameters on
 capable machines in MAAS, tagging them and using these tags as
 constraints in the model.
+
+* `compute.pci-aliases` PCI device alias
+
+Sets the `pci-alias` option in nova.conf, defining aliases for assignable
+PCI devices that can be requested through flavor extra specs.
 
 
 ### identity
@@ -149,6 +154,13 @@ TLS configuration for OVN can also be supplied via snap configuration:
 * `network.ovn-cacert` CA certificate (and chain) for certificate validation
 
 All of the above options must be provided as base64 encoded strings.
+
+SR-IOV agent settings:
+
+* `network.sriov-nic-exclude-devices`: SR-IOV excluded VFs
+
+Comma-separated list of `<network_device>:<vfs_to_exclude>` tuples, mapping interfaces
+to PCI address of excluded SR-IOV VFs, which will not be handled by the SR-IOV agent.
 
 ### rabbitmq
 
