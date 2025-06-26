@@ -87,9 +87,9 @@ Amount of memory reserved for host in MB. nova-compute service deducts this
 memory from the available memory in the usage report sent to the placement
 service.
 
-* `compute.pci-passthrough-whitelist` PCI passthrough whitelist
+* `compute.pci.device-spec` PCI passthrough whitelist
 
-Sets the pci_passthrough_whitelist option in nova.conf which allows PCI
+Sets the `pci.device_spec` option in nova.conf which allows PCI
 passthrough of specific devices to VMs.
 
 Example applications: GPU processing, SR-IOV networking, etc.

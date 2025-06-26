@@ -260,7 +260,7 @@ DEFAULT_CONFIG = {
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
     "compute.flavors": UNSET,
-    "compute.pci-passthrough-whitelist": UNSET,
+    "compute.pci.device-spec": UNSET,
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
     "network.physnet-name": "physnet1",

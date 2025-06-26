@@ -64,8 +64,8 @@ hw_machine_type = x86_64=q35
 {% endif %}
 
 [pci]
-{% if compute.pci_passthrough_whitelist -%}
-pci_passthrough_whitelist = {{ compute.pci_passthrough_whitelist }}
+{% if compute.pci.device_spec -%}
+device_spec = {{ compute.pci.device_spec }}
 {% endif -%}
 
 [oslo_concurrency]
