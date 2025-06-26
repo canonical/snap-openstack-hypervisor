@@ -275,6 +275,8 @@ DEFAULT_CONFIG = {
     "network.enable-gateway": False,
     "network.ip-address": _get_local_ip_by_default_route,  # noqa: F821
     "network.external-nic": UNSET,
+    "network.sriov_nic.exclude-devices": UNSET,
+    "network.sriov_nic.physical-device-mappings": UNSET,
     # Monitoring
     "monitoring.enable": False,
     # General
@@ -386,6 +388,10 @@ TEMPLATES = {
     Path("etc/neutron/neutron_ovn_metadata_agent.ini"): {
         "template": "neutron_ovn_metadata_agent.ini.j2",
         "services": ["neutron-ovn-metadata-agent"],
+    },
+    Path("etc/neutron/neutron_sriov_nic_agent.ini"): {
+        "template": "neutron_sriov_nic_agent.ini.j2",
+        "services": ["neutron-sriov-nic-agent"],
     },
     Path("etc/libvirt/libvirtd.conf"): {"template": "libvirtd.conf.j2", "services": ["libvirtd"]},
     Path("etc/libvirt/qemu.conf"): {
@@ -1520,6 +1526,39 @@ def _add_compute_flavor(snap: Snap, flavor: str) -> None:
     snap.config.set({"compute.flavors": updated_flavors})
 
 
+def _determine_sriov_device_mappings(snap: Snap) -> str:
+    return ""
+
+
+def _configure_sriov(snap: Snap) -> None:
+    """Configure SRIOV.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: None
+    """
+    logging.info("Checking SR-IOV configuration.")
+
+
+    if config.get("network.sriov_nic.physical-device-mappings"):
+        logging.info(
+            "SR-IOV physical device mappings already provided, skipping discovery.")
+    else:
+        logging.info("Determining SR-IOV physical device mappings.")
+
+        physical_device_mappings = _determine_sriov_device_mappings(snap)
+        snap.config.set({"network.sriov_nic.physical-device-mappings": physical_device_mappings})
+
+        sriov_service = snap.services.list()["neutron_sriov_nic_agent"]
+        if physical_device_mappings:
+            logging.info("SR-IOV mappings detected, enabling SR-IOV agent.")
+            sriov_service.start(enable=True)
+        else:
+            logging.info("No SR-IOV mappings detected, disabling SR-IOV agent.")
+            sriov_service.stop(disable=True)
+
+
+
 def configure(snap: Snap) -> None:
     """Runs the `configure` hook for the snap.
 
@@ -1597,3 +1636,4 @@ def configure(snap: Snap) -> None:
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
     _configure_masakari_services(snap)
+    _configure_sriov(snap)
