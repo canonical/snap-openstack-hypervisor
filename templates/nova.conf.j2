@@ -67,6 +67,9 @@ hw_machine_type = x86_64=q35
 {% if compute.pci.device_spec -%}
 device_spec = {{ compute.pci.device_spec }}
 {% endif -%}
+{% if compute.pci.alias -%}
+alias = {{ compute.pci.alias }}
+{% endif -%}
 
 [oslo_concurrency]
 # Oslo Concurrency lock path

@@ -261,6 +261,7 @@ DEFAULT_CONFIG = {
     "compute.resume-on-boot": True,
     "compute.flavors": UNSET,
     "compute.pci.device-spec": UNSET,
+    "compute.pci.alias": UNSET,
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
     "network.physnet-name": "physnet1",
