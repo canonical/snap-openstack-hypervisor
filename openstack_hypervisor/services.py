@@ -116,6 +116,23 @@ class NeutronOVNMetadataAgentService(OpenStackService):
 neutron_ovn_metadata_agent = partial(entry_point, NeutronOVNMetadataAgentService)
 
 
+class NeutronSRIOVNicAgentService(OpenStackService):
+    """A python service object used to run the neutron-sriov-nic-agent daemon."""
+
+    conf_files = [
+        Path("etc/neutron/neutron.conf"),
+        Path("etc/neutron/neutron_sriov_nic_agent.ini"),
+    ]
+    conf_dirs = [
+        Path("etc/neutron/neutron.conf.d"),
+    ]
+
+    executable = Path("usr/bin/neutron-sriov-nic-agent")
+
+
+neutron_sriov_nic_agent = partial(entry_point, NeutronSRIOVNicAgentService)
+
+
 class CeilometerComputeAgentService(OpenStackService):
     """A python service object used to run the ceilometer-agent-compute daemon."""
 

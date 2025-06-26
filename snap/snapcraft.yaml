@@ -240,6 +240,17 @@ apps:
       - network-observe
       - microstack-support
 
+  neutron-sriov-nic-agent:
+    command: 'bin/neutron-sriov-nic-agent-service'
+    daemon: simple
+    plugs:
+      - network
+      - network-bind
+      - network-control
+      - network-observe
+      - hardware-observe
+      - microstack-support
+
   nova-api-metadata:
     command: 'bin/nova-api-metadata-service'
     daemon: simple
@@ -716,6 +727,7 @@ hooks:
     plugs:
       - network
       - network-control
+      - hardware-observe
       - firewall-control
       - microstack-support
       - kvm
