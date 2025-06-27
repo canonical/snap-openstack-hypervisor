@@ -292,20 +292,21 @@ def to_output_schema(nics: list[Interface]) -> NicList:
             pci_whitelisted=False,
         )
 
-        for spec_dict in pci_spec_cfg:
-            pci_spec = devspec.PciDeviceSpec(spec_dict)
-            match = pci_spec.match(
-                {
-                    "vendor_id": out.vendor_id,
-                    "product_id": out.product_id,
-                    "address": out.pci_address,
-                    "parent_addr": out.pf_pci_address,
-                }
-            )
-            if match:
-                out.pci_whitelisted = True
-                if not out.pci_physnet:
-                    out.pci_physnet = spec_dict.get("physical_network")
+        if out.pci_address and out.vendor_id and out.product_id:
+            for spec_dict in pci_spec_cfg:
+                pci_spec = devspec.PciDeviceSpec(spec_dict)
+                match = pci_spec.match(
+                    {
+                        "vendor_id": out.vendor_id,
+                        "product_id": out.product_id,
+                        "address": out.pci_address,
+                        "parent_addr": out.pf_pci_address,
+                    }
+                )
+                if match:
+                    out.pci_whitelisted = True
+                    if not out.pci_physnet:
+                        out.pci_physnet = spec_dict.get("physical_network")
 
         nics_.append(out)
     return NicList(nics_)
