@@ -87,9 +87,9 @@ Amount of memory reserved for host in MB. nova-compute service deducts this
 memory from the available memory in the usage report sent to the placement
 service.
 
-* `compute.pci.device-spec` PCI passthrough whitelist
+* `compute.pci-device-spec` PCI passthrough whitelist
 
-Sets the `pci.device_spec` option in nova.conf which allows PCI
+Sets the `pci-device_spec` option in nova.conf which allows PCI
 passthrough of specific devices to VMs.
 
 Example applications: GPU processing, SR-IOV networking, etc.
@@ -99,9 +99,9 @@ deployed to. This can be accomplished by setting kernel parameters on
 capable machines in MAAS, tagging them and using these tags as
 constraints in the model.
 
-* `compute.pci.alias` PCI device alias
+* `compute.pci-alias` PCI device alias
 
-Sets the `pci.alias` option in nova.conf, defining aliases for assignable
+Sets the `pci-alias` option in nova.conf, defining aliases for assignable
 PCI devices that can be requested through flavor extra specs.
 
 
@@ -157,18 +157,18 @@ All of the above options must be provided as base64 encoded strings.
 
 SR-IOV agent settings:
 
-* `network.sriov_nic.physical-device-mappings` SR-IOV agent device mappings
+* `network.sriov-nic-physical-device-mappings` SR-IOV agent device mappings
 
 Comma-separated list of `<physical_network>:<network_device>` tuples mapping physical
 network names to the network device interfaces of SR-IOV physical function.
 
 If unspecified, it will be determined automatically by the snap based on the list of
-SR-IOV devices provided through the `compute.pci.device-spec` setting.
+SR-IOV devices provided through the `compute.pci-device-spec` setting.
 
 The network adapters that support hardware offloading (switchdev) are expected to be
 processed by the OVN mechanism driver and will not be included in this list.
 
-* `network.sriov_nic.exclude-devices`: SR-IOV excluded VFs
+* `network.sriov-nic-exclude-devices`: SR-IOV excluded VFs
 
 Comma-separated list of `<network_device>:<vfs_to_exclude>` tuples, mapping interfaces
 to PCI address of excluded SR-IOV VFs, which will not be handled by the SR-IOV agent.

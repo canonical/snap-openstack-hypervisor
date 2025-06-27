@@ -65,11 +65,11 @@ hw_machine_type = x86_64=q35
 
 [pci]
 report_in_placement = True
-{% if compute.pci.device_spec -%}
-device_spec = {{ compute.pci.device_spec }}
+{% if compute.pci_device_spec -%}
+device_spec = {{ compute.pci_device_spec }}
 {% endif -%}
-{% if compute.pci.alias -%}
-alias = {{ compute.pci.alias }}
+{% if compute.pci_alias -%}
+alias = {{ compute.pci_alias }}
 {% endif -%}
 
 [oslo_concurrency]

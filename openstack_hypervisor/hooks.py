@@ -261,8 +261,8 @@ DEFAULT_CONFIG = {
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
     "compute.flavors": UNSET,
-    "compute.pci.device-spec": UNSET,
-    "compute.pci.alias": UNSET,
+    "compute.pci-device-spec": UNSET,
+    "compute.pci-alias": UNSET,
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
     "network.physnet-name": "physnet1",
@@ -276,8 +276,8 @@ DEFAULT_CONFIG = {
     "network.enable-gateway": False,
     "network.ip-address": _get_local_ip_by_default_route,  # noqa: F821
     "network.external-nic": UNSET,
-    "network.sriov_nic.exclude-devices": UNSET,
-    "network.sriov_nic.physical-device-mappings": UNSET,
+    "network.sriov-nic-exclude-devices": UNSET,
+    "network.sriov-nic-physical-device-mappings": UNSET,
     # Monitoring
     "monitoring.enable": False,
     # General
@@ -1541,15 +1541,15 @@ def _configure_sriov(snap: Snap) -> None:
     """
     logging.info("Checking SR-IOV configuration.")
 
-    if snap.config.get("network.sriov_nic.physical-device-mappings"):
+    if snap.config.get("network.sriov_nic-physical-device-mappings"):
         logging.info("SR-IOV physical device mappings already provided, skipping discovery.")
     else:
         logging.info("Determining SR-IOV physical device mappings.")
 
         physical_device_mappings = _determine_sriov_device_mappings(snap)
-        snap.config.set({"network.sriov_nic.physical-device-mappings": physical_device_mappings})
+        snap.config.set({"network.sriov_nic-physical-device-mappings": physical_device_mappings})
 
-        sriov_service = snap.services.list()["neutron_sriov_nic_agent"]
+        sriov_service = snap.services.list()["neutron-sriov-nic-agent"]
         if physical_device_mappings:
             logging.info("SR-IOV mappings detected, enabling SR-IOV agent.")
             sriov_service.start(enable=True)

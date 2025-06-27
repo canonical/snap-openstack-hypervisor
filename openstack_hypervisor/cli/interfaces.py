@@ -254,7 +254,7 @@ def to_output_schema(nics: list[Interface]) -> NicList:
     nics_ = []
 
     snap = Snap()
-    pci_spec_cfg = snap.config.get("compute.pci.device-spec")
+    pci_spec_cfg = snap.config.get("compute.pci-device-spec")
     # TODO: convert to a list if needed.
 
     for nic in nics:
