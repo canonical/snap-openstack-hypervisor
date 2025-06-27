@@ -330,7 +330,7 @@ class PciDeviceSpec(PciAddressSpec):
         self.dev_spec_conf = copy.deepcopy(dev_spec)
         # the non tag fields (i.e. address, devname) will be removed by
         # _init_dev_details
-        self.tags = dev_spec
+        self.tags = copy.deepcopy(dev_spec)
         self._init_dev_details()
 
     def _address_obj(self) -> ty.Optional[WhitelistPciAddress]:
