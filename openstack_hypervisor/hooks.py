@@ -1541,21 +1541,27 @@ def _configure_sriov(snap: Snap) -> None:
     """
     logging.info("Checking SR-IOV configuration.")
 
-    if snap.config.get("network.sriov_nic-physical-device-mappings"):
-        logging.info("SR-IOV physical device mappings already provided, skipping discovery.")
-    else:
+    try:
+        mappings = snap.config.get("network.sriov-nic-physical-device-mappings")
+        if mappings:
+            logging.info("SR-IOV physical device mappings already provided, skipping discovery.")
+            return
+    except UnknownConfigKey:
+        # Unfortunately snap.config.get doesn't take a default value...
+        pass
+
         logging.info("Determining SR-IOV physical device mappings.")
 
-        physical_device_mappings = _determine_sriov_device_mappings(snap)
-        snap.config.set({"network.sriov_nic-physical-device-mappings": physical_device_mappings})
+    physical_device_mappings = _determine_sriov_device_mappings(snap)
+    snap.config.set({"network.sriov-nic-physical-device-mappings": physical_device_mappings})
 
-        sriov_service = snap.services.list()["neutron-sriov-nic-agent"]
-        if physical_device_mappings:
-            logging.info("SR-IOV mappings detected, enabling SR-IOV agent.")
-            sriov_service.start(enable=True)
-        else:
-            logging.info("No SR-IOV mappings detected, disabling SR-IOV agent.")
-            sriov_service.stop(disable=True)
+    sriov_service = snap.services.list()["neutron-sriov-nic-agent"]
+    if physical_device_mappings:
+        logging.info("SR-IOV mappings detected, enabling SR-IOV agent.")
+        sriov_service.start(enable=True)
+    else:
+        logging.info("No SR-IOV mappings detected, disabling SR-IOV agent.")
+        sriov_service.stop(disable=True)
 
 
 def configure(snap: Snap) -> None:

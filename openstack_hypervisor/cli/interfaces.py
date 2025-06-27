@@ -14,6 +14,7 @@ import pydantic
 import pyroute2
 from pyroute2.ndb.objects.interface import Interface
 from snaphelpers import Snap
+from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import devspec
 from openstack_hypervisor.cli.common import (
@@ -254,8 +255,12 @@ def to_output_schema(nics: list[Interface]) -> NicList:
     nics_ = []
 
     snap = Snap()
-    pci_spec_cfg = snap.config.get("compute.pci-device-spec")
-    # TODO: convert to a list if needed.
+    try:
+        pci_spec_cfg = snap.config.get("compute.pci-device-spec")
+    except UnknownConfigKey:
+        # Unfortunately snap.config.get doesn't take a default value...
+        pci_spec_cfg = []
+        # TODO: convert to a list if needed.
 
     for nic in nics:
         ifname = nic["ifname"]
