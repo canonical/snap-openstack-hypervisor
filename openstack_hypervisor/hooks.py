@@ -33,7 +33,7 @@ from pyroute2.netlink.exceptions import NetlinkError
 from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
-# from openstack_hypervisor.cli import interfaces
+from openstack_hypervisor.cli import interfaces
 from openstack_hypervisor.log import setup_logging
 
 UNSET = ""
@@ -1530,8 +1530,28 @@ def _add_compute_flavor(snap: Snap, flavor: str) -> None:
 
 
 def _determine_sriov_device_mappings(snap: Snap) -> str:
-    # TODO
-    return ""
+    nics = interfaces.get_nics().root
+    # Retrieve SR-IOV PFs that have been whitelisted, including
+    # those that have whitelisted VFs.
+    mappings = []
+
+    def _should_manage(nic):
+        # Devices that support hw offload are expected to be managed by ovn.
+        return nic.pci_physnet and nic.name and not nic.hw_offload_available
+
+    for nic in nics:
+        if nic.sriov_available and nic.pci_whitelisted and _should_manage(nic):
+            mappings.append(f"{nic.pci_physnet}:{nic.name}")
+
+    # Get PFs containing whitelisted VFs.
+    for nic in nics:
+        if nic.pci_whitelisted and nic.pf_pci_address:
+            # The VF is whitelisted, look up the PF.
+            for pf in nics:
+                if pf.pci_address == nic.pf_pci_address and _should_manage(pf):
+                    mappings.append(f"{pf.pci_physnet}:{pf.name}")
+
+    return ",".join(list(set(mappings)))
 
 
 def _configure_sriov(snap: Snap) -> None:
@@ -1541,18 +1561,7 @@ def _configure_sriov(snap: Snap) -> None:
     :type snap: Snap
     :return: None
     """
-    logging.info("Checking SR-IOV configuration.")
-
-    try:
-        mappings = snap.config.get("network.sriov-nic-physical-device-mappings")
-        if mappings:
-            logging.info("SR-IOV physical device mappings already provided, skipping discovery.")
-            return
-    except UnknownConfigKey:
-        # Unfortunately snap.config.get doesn't take a default value...
-        pass
-
-        logging.info("Determining SR-IOV physical device mappings.")
+    logging.info("Determining SR-IOV physical device mappings.")
 
     physical_device_mappings = _determine_sriov_device_mappings(snap)
     snap.config.set({"network.sriov-nic-physical-device-mappings": physical_device_mappings})

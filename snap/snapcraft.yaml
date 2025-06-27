@@ -748,6 +748,7 @@ hooks:
     plugs:
       - network
       - network-control
+      - hardware-observe
       - firewall-control
       - microstack-support
       - kvm

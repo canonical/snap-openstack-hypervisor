@@ -52,7 +52,8 @@ class InterfaceOutput(pydantic.BaseModel):
         description="Whether Nova is configured to expose this PCI device."
     )
     pci_physnet: str = pydantic.Field(
-        description="The Neutron physical network associated with this PCI device.")
+        description="The Neutron physical network associated with this PCI device."
+    )
 
 
 class NicList(pydantic.RootModel[list[InterfaceOutput]]):
@@ -262,7 +263,6 @@ def to_output_schema(nics: list[Interface]) -> NicList:
     except UnknownConfigKey:
         # Unfortunately snap.config.get doesn't take a default value...
         pci_spec_cfg = []
-        # TODO: convert to a list if needed.
 
     for nic in nics:
         ifname = nic["ifname"]
@@ -366,3 +366,11 @@ def list_nics(format: str):
         candidate_nics = filter_candidate_nics(nics)
         nics_ = to_output_schema(nics)
     display_nics(nics_, candidate_nics, format)
+
+
+def get_nics() -> NicList:
+    """List nics that are candidates for use by OVN/OVS subsystem."""
+    # TODO: consider moving out reusable functions.
+    with pyroute2.NDB() as ndb:
+        nics = get_interfaces(ndb)
+        return to_output_schema(nics)
