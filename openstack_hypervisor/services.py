@@ -127,7 +127,7 @@ class NeutronSRIOVNicAgentService(OpenStackService):
         Path("etc/neutron/neutron.conf.d"),
     ]
 
-    executable = Path("neutron-sriov-nic-agent")
+    executable = Path("usr/bin/neutron-sriov-nic-agent")
 
 
 neutron_sriov_nic_agent = partial(entry_point, NeutronSRIOVNicAgentService)

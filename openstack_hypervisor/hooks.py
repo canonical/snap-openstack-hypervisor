@@ -1504,6 +1504,8 @@ def _services_not_enabled_by_config(context: dict) -> List[str]:
     if not context.get("masakari", {}).get("enable"):
         not_enabled.append("masakari-instancemonitor")
 
+    # TODO: handle sriov agent here.
+
     return not_enabled
 
 
