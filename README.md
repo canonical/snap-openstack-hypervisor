@@ -87,10 +87,10 @@ Amount of memory reserved for host in MB. nova-compute service deducts this
 memory from the available memory in the usage report sent to the placement
 service.
 
-* `compute.pci-device-spec` PCI passthrough whitelist
+* `compute.pci-device-specs` PCI passthrough whitelist
 
-Sets the `pci-device_spec` option in nova.conf which allows PCI
-passthrough of specific devices to VMs.
+A list of device specs used to set the `pci.device_spec` option in
+nova.conf, which allows PCI passthrough of specific devices to VMs.
 
 Example applications: GPU processing, SR-IOV networking, etc.
 
@@ -163,7 +163,7 @@ Comma-separated list of `<physical_network>:<network_device>` tuples mapping phy
 network names to the network device interfaces of SR-IOV physical function.
 
 If unspecified, it will be determined automatically by the snap based on the list of
-SR-IOV devices provided through the `compute.pci-device-spec` setting.
+SR-IOV devices provided through the `compute.pci-device-specs` setting.
 
 The network adapters that support hardware offloading (switchdev) are expected to be
 processed by the OVN mechanism driver and will not be included in this list.

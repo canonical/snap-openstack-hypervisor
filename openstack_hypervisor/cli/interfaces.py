@@ -258,7 +258,7 @@ def to_output_schema(nics: list[Interface]) -> NicList:
 
     snap = Snap()
     try:
-        pci_spec_cfg = snap.config.get("compute.pci-device-spec")
+        pci_spec_cfg = snap.config.get("compute.pci-device-specs")
     except UnknownConfigKey:
         # Unfortunately snap.config.get doesn't take a default value...
         pci_spec_cfg = []
@@ -298,7 +298,7 @@ def to_output_schema(nics: list[Interface]) -> NicList:
                 {
                     "vendor_id": out.vendor_id,
                     "product_id": out.product_id,
-                    "address": out.address,
+                    "address": out.pci_address,
                     "parent_addr": out.pf_pci_address,
                 }
             )

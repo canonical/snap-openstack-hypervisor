@@ -261,7 +261,7 @@ DEFAULT_CONFIG = {
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
     "compute.flavors": UNSET,
-    "compute.pci-device-spec": UNSET,
+    "compute.pci-device-specs": [],
     "compute.pci-alias": UNSET,
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
