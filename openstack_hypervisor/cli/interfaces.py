@@ -48,9 +48,11 @@ class InterfaceOutput(pydantic.BaseModel):
     vendor_id: str = pydantic.Field(description="The PCI vendor id of the interface")
 
     pf_pci_address: str = pydantic.Field(description="The PF PCI address of a given SR-IOV VF")
-    pci_whitelisted: str = pydantic.Field(
+    pci_whitelisted: bool = pydantic.Field(
         description="Whether Nova is configured to expose this PCI device."
     )
+    pci_physnet: str = pydantic.Field(
+        description="The Neutron physical network associated with this PCI device.")
 
 
 class NicList(pydantic.RootModel[list[InterfaceOutput]]):
@@ -116,7 +118,7 @@ def get_pci_address(ifname: str) -> str:
 
 def get_pf_pci_address(ifname: str) -> str:
     """Get the corresponding PF PCI address for a given VF."""
-    pf_path = f"/sys/class/net/{ifname}/physfn"
+    pf_path = f"/sys/class/net/{ifname}/device/physfn"
     if not (os.path.exists(pf_path) and os.path.islink(pf_path)):
         # Not a VF.
         return ""
@@ -286,6 +288,8 @@ def to_output_schema(nics: list[Interface]) -> NicList:
             product_id=get_pci_product_id(ifname),
             vendor_id=get_pci_vendor_id(ifname),
             pf_pci_address=get_pf_pci_address(ifname),
+            pci_physnet="",
+            pci_whitelisted=False,
         )
 
         for spec_dict in pci_spec_cfg:
