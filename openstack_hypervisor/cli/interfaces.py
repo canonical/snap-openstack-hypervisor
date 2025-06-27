@@ -6,13 +6,14 @@ import json
 import logging
 import os
 import pathlib
-from typing import Any, Dict, Iterable, Optional
+from typing import Iterable
 
 import click
 import prettytable
 import pydantic
 import pyroute2
 from pyroute2.ndb.objects.interface import Interface
+from snaphelpers import Snap
 
 from openstack_hypervisor import devspec
 from openstack_hypervisor.cli.common import (
@@ -44,6 +45,11 @@ class InterfaceOutput(pydantic.BaseModel):
     pci_address: str = pydantic.Field(description="The PCI address of the interface")
     product_id: str = pydantic.Field(description="The PCI product id of the interface")
     vendor_id: str = pydantic.Field(description="The PCI vendor id of the interface")
+
+    pf_pci_address: str = pydantic.Field(description="The PF PCI address of a given SR-IOV VF")
+    pci_whitelisted: str = pydantic.Field(
+        description="Whether Nova is configured to expose this PCI device."
+    )
 
 
 class NicList(pydantic.RootModel[list[InterfaceOutput]]):
@@ -105,6 +111,16 @@ def get_pci_address(ifname: str) -> str:
     if "virtio" in parts[-1]:
         return parts[-2]
     return parts[-1]
+
+
+def get_pf_pci_address(ifname: str) -> str:
+    """Get the corresponding PF PCI address for a given VF."""
+    pf_path = f"/sys/class/net/{ifname}/physfn"
+    if not (os.path.exists(pf_path) and os.path.islink(pf_path)):
+        # Not a VF.
+        return ""
+    resolved_path = os.path.realpath(pf_path)
+    return resolved_path.split("/")[-1]
 
 
 def get_pci_product_id(ifname: str) -> str:
@@ -236,6 +252,11 @@ def filter_candidate_nics(nics: Iterable[Interface]) -> list[str]:
 def to_output_schema(nics: list[Interface]) -> NicList:
     """Convert the interfaces to the output schema."""
     nics_ = []
+
+    snap = Snap()
+    pci_spec_cfg = snap.config.get("compute.pci.device-spec")
+    # TODO: convert to a list if needed.
+
     for nic in nics:
         ifname = nic["ifname"]
 
@@ -247,21 +268,37 @@ def to_output_schema(nics: list[Interface]) -> NicList:
             sriov_totalvfs = 0
             sriov_numvfs = 0
 
-        nics_.append(
-            InterfaceOutput(
-                name=ifname,
-                configured=is_interface_configured(nic),
-                up=is_nic_up(nic),
-                connected=is_nic_connected(nic),
-                sriov_available=sriov_available,
-                sriov_totalvfs=sriov_totalvfs,
-                sriov_numvfs=sriov_numvfs,
-                hw_offload_available=is_hw_offload_available(ifname),
-                pci_address=get_pci_address(ifname),
-                product_id=get_pci_product_id(ifname),
-                vendor_id=get_pci_vendor_id(ifname),
-            )
+        out = InterfaceOutput(
+            name=ifname,
+            configured=is_interface_configured(nic),
+            up=is_nic_up(nic),
+            connected=is_nic_connected(nic),
+            sriov_available=sriov_available,
+            sriov_totalvfs=sriov_totalvfs,
+            sriov_numvfs=sriov_numvfs,
+            hw_offload_available=is_hw_offload_available(ifname),
+            pci_address=get_pci_address(ifname),
+            product_id=get_pci_product_id(ifname),
+            vendor_id=get_pci_vendor_id(ifname),
+            pf_pci_address=get_pf_pci_address(ifname),
         )
+
+        for spec_dict in pci_spec_cfg:
+            pci_spec = devspec.PciDeviceSpec(spec_dict)
+            match = pci_spec.match(
+                {
+                    "vendor_id": out.vendor_id,
+                    "product_id": out.product_id,
+                    "address": out.address,
+                    "parent_addr": out.pf_pci_address,
+                }
+            )
+            if match:
+                out.pci_whitelisted = True
+                if not out.pci_physnet:
+                    out.pci_physnet = spec_dict.get("physical_network")
+
+        nics_.append(out)
     return NicList(nics_)
 
 
@@ -321,77 +358,3 @@ def list_nics(format: str):
         candidate_nics = filter_candidate_nics(nics)
         nics_ = to_output_schema(nics)
     display_nics(nics_, candidate_nics, format)
-
-
-def get_sriov_pf_physnet(
-    nic: InterfaceOutput, pci_device_spec: list[Dict[Any, Any]]
-) -> Optional[str]:
-    """Obtain the corresponding Neutron physnet of an SR-IOV PF."""
-    if not nic.sriov_available:
-        logger.debug("Not an SR-IOV device: %s", nic.name)
-        return ""
-
-    for spec_dict in pci_device_spec:
-        physical_network = spec_dict.get("physical_network")
-        if not physical_network:
-            logger.debug("The pci spec doesn't contain a physical network, continuing.")
-            continue
-
-        pci_spec = devspec.PciDeviceSpec(spec_dict)
-        if not pci_spec.match(
-            {
-                "vendor_id": nic.vendor_id,
-                "product_id": nic.product_id,
-                "address": nic.address,
-                "parent_addr": None,  # we only care about PFs.
-            }
-        ):
-            continue
-
-        return physical_network
-
-
-def get_assignable_sriov_nics(pci_device_spec: list[Dict[Any, Any]]) -> list[dict]:
-    """Obtain the list of SR-IOV PFs that can expose VFs to Nova instances.
-
-    Discovers the local SR-IOV capable devices and checks the Nova PCI
-    passthrough whitelist that was provided through the `compute.pci.device-spec`
-    config option.
-
-    :param: pci_device_spec: a list of dictionaries as defined by Nova:
-            https://docs.openstack.org/nova/latest/configuration/config.html#pci.device_spec
-    :type: list[dict]
-    :returns: A list of dictionaries containing assignable PFs and corresponding physnet.
-    :rtype: list[dict]
-
-    Device spec example:
-    [
-        {
-            "vendor_id":"a2d6",
-            "product_id":"15b3",
-            "address": "0000:82:00.0",
-            "physical_network":"physnet1",
-            "remote_managed": "true"
-        },
-    ]
-    """
-    with pyroute2.NDB() as ndb:
-        nics = get_interfaces(ndb)
-
-    out_list = []
-    for nic in nics:
-        physnet = get_sriov_pf_physnet(to_output_schema(nic))
-        if not physnet:
-            logging.debug("No physical network associated with nic: %s", nic.name)
-            continue
-
-        assignable_nic = {
-            "vendor_id": nic.vendor_id,
-            "product_id": nic.product_id,
-            "address": nic.address,
-            "physical_network": physnet,
-            "name": nic.name,
-        }
-        out_list.append(assignable_nic)
-
-    return out_list
