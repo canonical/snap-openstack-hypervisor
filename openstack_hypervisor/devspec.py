@@ -160,7 +160,7 @@ class PhysicalPciAddress(PciAddressSpec):
             self._set_pci_dev_info("bus", MAX_BUS, "%02x")
             self._set_pci_dev_info("slot", MAX_SLOT, "%02x")
         except (KeyError, ValueError):
-            raise Exception("Wrong address format: %s", pci_addr)
+            raise Exception("Wrong address format: %s" % pci_addr)
 
     def match(self, phys_pci_addr: PciAddressSpec) -> bool:
         """Exact PCI address match."""
@@ -197,7 +197,7 @@ class PciAddressGlobSpec(PciAddressSpec):
         if dbs:
             dbs_fields = dbs.split(":")
             if len(dbs_fields) > 3:
-                raise Exception("Wrong address format: %s", pci_addr)
+                raise Exception("Wrong address format: %s" % pci_addr)
             # If we got a partial address like ":00.", we need to turn this
             # into a domain of ANY, a bus of ANY, and a slot of 00. This code
             # allows the address bus and/or domain to be left off
@@ -239,7 +239,7 @@ class PciAddressRegexSpec(PciAddressSpec):
             self.slot_regex = re.compile(self.slot)
             self.func_regex = re.compile(self.func)
         except re.error:
-            raise Exception("Wrong address format: %s", pci_addr)
+            raise Exception("Wrong address format: %s" % pci_addr)
 
     def match(self, phys_pci_addr: PciAddressSpec) -> bool:
         """Regex match PCI address."""
@@ -292,7 +292,7 @@ class WhitelistPciAddress(object):
             elif isinstance(pci_addr, dict):
                 self.pci_address_spec = PciAddressRegexSpec(pci_addr)
             else:
-                raise Exception("Wrong address format: %s", pci_addr)
+                raise Exception("Wrong address format: %s" % pci_addr)
             self._check_physical_function()
         else:
             self.pci_address_spec = PhysicalPciAddress(pci_addr)
