@@ -1535,9 +1535,10 @@ def _determine_sriov_device_mappings(snap: Snap) -> str:
     # those that have whitelisted VFs.
     mappings = []
 
-    def _should_manage(nic):
+    def _should_manage(nic, physnet=None):
         # Devices that support hw offload are expected to be managed by ovn.
-        return nic.sriov_available and nic.pci_physnet and nic.name and not nic.hw_offload_available
+        physnet = physnet or nic.pci_physnet
+        return nic.sriov_available and physnet and nic.name and not nic.hw_offload_available
 
     for nic in nics:
         if nic.pci_whitelisted and _should_manage(nic):
@@ -1547,9 +1548,12 @@ def _determine_sriov_device_mappings(snap: Snap) -> str:
     for nic in nics:
         if nic.pci_whitelisted and nic.pf_pci_address:
             # The VF is whitelisted, look up the PF.
+            #
+            # We'll use the physnet of the VF.
+            physnet = nic.pci_physnet
             for pf in nics:
-                if pf.pci_address == nic.pf_pci_address and _should_manage(pf):
-                    mappings.append(f"{pf.pci_physnet}:{pf.name}")
+                if pf.pci_address == nic.pf_pci_address and _should_manage(pf, physnet=physnet):
+                    mappings.append(f"{physnet}:{pf.name}")
 
     return ",".join(list(set(mappings)))
 
