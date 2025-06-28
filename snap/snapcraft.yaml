@@ -253,6 +253,7 @@ apps:
       - network-bind
       - network-control
       - network-observe
+      - hardware-observe
       - microstack-support
 
   nova-api-metadata:
