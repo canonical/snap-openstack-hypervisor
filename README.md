@@ -99,7 +99,7 @@ deployed to. This can be accomplished by setting kernel parameters on
 capable machines in MAAS, tagging them and using these tags as
 constraints in the model.
 
-* `compute.pci-alias` PCI device alias
+* `compute.pci-aliases` PCI device alias
 
 Sets the `pci-alias` option in nova.conf, defining aliases for assignable
 PCI devices that can be requested through flavor extra specs.
