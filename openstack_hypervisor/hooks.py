@@ -33,6 +33,7 @@ from pyroute2.netlink.exceptions import NetlinkError
 from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
+from openstack_hypervisor.cli import interfaces
 from openstack_hypervisor.log import setup_logging
 
 UNSET = ""
@@ -260,7 +261,8 @@ DEFAULT_CONFIG = {
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
     "compute.flavors": UNSET,
-    "compute.pci-passthrough-whitelist": UNSET,
+    "compute.pci-device-specs": [],
+    "compute.pci-aliases": [],
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
     "network.physnet-name": "physnet1",
@@ -274,6 +276,8 @@ DEFAULT_CONFIG = {
     "network.enable-gateway": False,
     "network.ip-address": _get_local_ip_by_default_route,  # noqa: F821
     "network.external-nic": UNSET,
+    "network.sriov-nic-exclude-devices": UNSET,
+    "network.sriov-nic-physical-device-mappings": UNSET,
     # Monitoring
     "monitoring.enable": False,
     # General
@@ -385,6 +389,10 @@ TEMPLATES = {
     Path("etc/neutron/neutron_ovn_metadata_agent.ini"): {
         "template": "neutron_ovn_metadata_agent.ini.j2",
         "services": ["neutron-ovn-metadata-agent"],
+    },
+    Path("etc/neutron/neutron_sriov_nic_agent.ini"): {
+        "template": "neutron_sriov_nic_agent.ini.j2",
+        "services": ["neutron-sriov-nic-agent"],
     },
     Path("etc/libvirt/libvirtd.conf"): {"template": "libvirtd.conf.j2", "services": ["libvirtd"]},
     Path("etc/libvirt/qemu.conf"): {
@@ -1496,6 +1504,8 @@ def _services_not_enabled_by_config(context: dict) -> List[str]:
     if not context.get("masakari", {}).get("enable"):
         not_enabled.append("masakari-instancemonitor")
 
+    # TODO: handle sriov agent here.
+
     return not_enabled
 
 
@@ -1517,6 +1527,56 @@ def _add_compute_flavor(snap: Snap, flavor: str) -> None:
     updated_flavors = ",".join(flavors)
     logging.info(f"Setting snap config compute.flavor {updated_flavors}")
     snap.config.set({"compute.flavors": updated_flavors})
+
+
+def _determine_sriov_device_mappings(snap: Snap) -> str:
+    nics = interfaces.get_nics().root
+    # Retrieve SR-IOV PFs that have been whitelisted, including
+    # those that have whitelisted VFs.
+    mappings = []
+
+    def _should_manage(nic, physnet=None):
+        # Devices that support hw offload are expected to be managed by ovn.
+        physnet = physnet or nic.pci_physnet
+        return nic.sriov_available and physnet and nic.name and not nic.hw_offload_available
+
+    for nic in nics:
+        if nic.pci_whitelisted and _should_manage(nic):
+            mappings.append(f"{nic.pci_physnet}:{nic.name}")
+
+    # Get PFs containing whitelisted VFs.
+    for nic in nics:
+        if nic.pci_whitelisted and nic.pf_pci_address:
+            # The VF is whitelisted, look up the PF.
+            #
+            # We'll use the physnet of the VF.
+            physnet = nic.pci_physnet
+            for pf in nics:
+                if pf.pci_address == nic.pf_pci_address and _should_manage(pf, physnet=physnet):
+                    mappings.append(f"{physnet}:{pf.name}")
+
+    return ",".join(list(set(mappings)))
+
+
+def _configure_sriov(snap: Snap) -> None:
+    """Configure SRIOV.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: None
+    """
+    logging.info("Determining SR-IOV physical device mappings.")
+
+    physical_device_mappings = _determine_sriov_device_mappings(snap)
+    snap.config.set({"network.sriov-nic-physical-device-mappings": physical_device_mappings})
+
+    sriov_service = snap.services.list()["neutron-sriov-nic-agent"]
+    if physical_device_mappings:
+        logging.info("SR-IOV mappings detected, enabling SR-IOV agent.")
+        sriov_service.start(enable=True)
+    else:
+        logging.info("No SR-IOV mappings detected, disabling SR-IOV agent.")
+        sriov_service.stop(disable=True)
 
 
 def configure(snap: Snap) -> None:
@@ -1596,3 +1656,4 @@ def configure(snap: Snap) -> None:
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
     _configure_masakari_services(snap)
+    _configure_sriov(snap)
