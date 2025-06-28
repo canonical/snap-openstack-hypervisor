@@ -65,7 +65,7 @@ hw_machine_type = x86_64=q35
 
 [pci]
 report_in_placement = True
-{% for spec in compute.pci_device_spec -%}
+{% for spec in compute.pci_device_specs -%}
   device_spec = {{ spec }}
 {% endfor -%}
 {% if compute.pci_alias -%}
