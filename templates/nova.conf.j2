@@ -64,9 +64,13 @@ hw_machine_type = x86_64=q35
 {% endif %}
 
 [pci]
-{% if compute.pci_passthrough_whitelist -%}
-pci_passthrough_whitelist = {{ compute.pci_passthrough_whitelist }}
-{% endif -%}
+report_in_placement = True
+{% for spec in compute.pci_device_specs -%}
+  device_spec = {{ spec }}
+{% endfor -%}
+{% for alias in compute.pci_aliases -%}
+alias = {{ alias }}
+{% endfor -%}
 
 [oslo_concurrency]
 # Oslo Concurrency lock path

@@ -13,7 +13,10 @@ import prettytable
 import pydantic
 import pyroute2
 from pyroute2.ndb.objects.interface import Interface
+from snaphelpers import Snap
+from snaphelpers._conf import UnknownConfigKey
 
+from openstack_hypervisor import devspec
 from openstack_hypervisor.cli.common import (
     JSON_FORMAT,
     JSON_INDENT_FORMAT,
@@ -43,6 +46,14 @@ class InterfaceOutput(pydantic.BaseModel):
     pci_address: str = pydantic.Field(description="The PCI address of the interface")
     product_id: str = pydantic.Field(description="The PCI product id of the interface")
     vendor_id: str = pydantic.Field(description="The PCI vendor id of the interface")
+
+    pf_pci_address: str = pydantic.Field(description="The PF PCI address of a given SR-IOV VF")
+    pci_whitelisted: bool = pydantic.Field(
+        description="Whether Nova is configured to expose this PCI device."
+    )
+    pci_physnet: str = pydantic.Field(
+        description="The Neutron physical network associated with this PCI device."
+    )
 
 
 class NicList(pydantic.RootModel[list[InterfaceOutput]]):
@@ -104,6 +115,16 @@ def get_pci_address(ifname: str) -> str:
     if "virtio" in parts[-1]:
         return parts[-2]
     return parts[-1]
+
+
+def get_pf_pci_address(ifname: str) -> str:
+    """Get the corresponding PF PCI address for a given VF."""
+    pf_path = f"/sys/class/net/{ifname}/device/physfn"
+    if not (os.path.exists(pf_path) and os.path.islink(pf_path)):
+        # Not a VF.
+        return ""
+    resolved_path = os.path.realpath(pf_path)
+    return resolved_path.split("/")[-1]
 
 
 def get_pci_product_id(ifname: str) -> str:
@@ -232,9 +253,26 @@ def filter_candidate_nics(nics: Iterable[Interface]) -> list[str]:
     return configured_nics
 
 
+def _get_pci_spec_cfg():
+    snap = Snap()
+
+    try:
+        pci_spec_cfg = snap.config.get("compute.pci-device-specs") or []
+        if isinstance(pci_spec_cfg, str):
+            pci_spec_cfg = json.loads(pci_spec_cfg)
+    except UnknownConfigKey:
+        # Unfortunately snap.config.get doesn't take a default value...
+        pci_spec_cfg = []
+
+    return pci_spec_cfg
+
+
 def to_output_schema(nics: list[Interface]) -> NicList:
     """Convert the interfaces to the output schema."""
     nics_ = []
+
+    pci_spec_cfg = _get_pci_spec_cfg()
+
     for nic in nics:
         ifname = nic["ifname"]
 
@@ -246,21 +284,41 @@ def to_output_schema(nics: list[Interface]) -> NicList:
             sriov_totalvfs = 0
             sriov_numvfs = 0
 
-        nics_.append(
-            InterfaceOutput(
-                name=ifname,
-                configured=is_interface_configured(nic),
-                up=is_nic_up(nic),
-                connected=is_nic_connected(nic),
-                sriov_available=sriov_available,
-                sriov_totalvfs=sriov_totalvfs,
-                sriov_numvfs=sriov_numvfs,
-                hw_offload_available=is_hw_offload_available(ifname),
-                pci_address=get_pci_address(ifname),
-                product_id=get_pci_product_id(ifname),
-                vendor_id=get_pci_vendor_id(ifname),
-            )
+        out = InterfaceOutput(
+            name=ifname,
+            configured=is_interface_configured(nic),
+            up=is_nic_up(nic),
+            connected=is_nic_connected(nic),
+            sriov_available=sriov_available,
+            sriov_totalvfs=sriov_totalvfs,
+            sriov_numvfs=sriov_numvfs,
+            hw_offload_available=is_hw_offload_available(ifname),
+            pci_address=get_pci_address(ifname),
+            product_id=get_pci_product_id(ifname),
+            vendor_id=get_pci_vendor_id(ifname),
+            pf_pci_address=get_pf_pci_address(ifname),
+            pci_physnet="",
+            pci_whitelisted=False,
         )
+
+        if out.pci_address and out.vendor_id and out.product_id:
+            for spec_dict in pci_spec_cfg:
+                if not isinstance(spec_dict, dict):
+                    raise ValueError("Invalid device spec, expecting a dict: %s." % spec_dict)
+
+                pci_spec = devspec.PciDeviceSpec(spec_dict)
+                dev = {
+                    "vendor_id": out.vendor_id.lstrip("0x"),
+                    "product_id": out.product_id.lstrip("0x"),
+                    "address": out.pci_address,
+                    "parent_addr": out.pf_pci_address,
+                }
+                match = pci_spec.match(dev)
+                if match:
+                    out.pci_whitelisted = True
+                    if not out.pci_physnet:
+                        out.pci_physnet = spec_dict.get("physical_network")
+        nics_.append(out)
     return NicList(nics_)
 
 
@@ -320,3 +378,11 @@ def list_nics(format: str):
         candidate_nics = filter_candidate_nics(nics)
         nics_ = to_output_schema(nics)
     display_nics(nics_, candidate_nics, format)
+
+
+def get_nics() -> NicList:
+    """List nics that are candidates for use by OVN/OVS subsystem."""
+    # TODO: consider moving out reusable functions.
+    with pyroute2.NDB() as ndb:
+        nics = get_interfaces(ndb)
+        return to_output_schema(nics)
