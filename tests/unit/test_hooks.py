@@ -530,6 +530,11 @@ class TestHooks:
             pf_pci_address=pf_pci_address,
             pci_physnet=pci_physnet,
             pci_whitelisted=pci_whitelisted,
+            class_name="mock class name",
+            vendor_name="mock vendor name",
+            product_name="mock product name",
+            subsystem_vendor_name="mock subsystem vendor name",
+            subsystem_product_name="mock subsystem product name",
         )
 
     @mock.patch.object(interfaces, "get_nics")
