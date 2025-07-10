@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import subprocess
 from typing import Iterable
 
 import click
@@ -44,8 +45,20 @@ class InterfaceOutput(pydantic.BaseModel):
         description="Whether switchdev hardware offload is supported"
     )
     pci_address: str = pydantic.Field(description="The PCI address of the interface")
-    product_id: str = pydantic.Field(description="The PCI product id of the interface")
+    # We're using "product" instead of "device" to stay consistent with the Openstack naming.
+    product_id: str = pydantic.Field(description="The PCI device id of the interface")
     vendor_id: str = pydantic.Field(description="The PCI vendor id of the interface")
+
+    # Human readable PCI names
+    class_name: str = pydantic.Field(description="The PCI class name of the interface")
+    vendor_name: str = pydantic.Field(description="The PCI vendor name of the interface")
+    product_name: str = pydantic.Field(description="The PCI product name of the interface")
+    subsystem_vendor_name: str = pydantic.Field(
+        description="The PCI subsystem vendor name of the interface"
+    )
+    subsystem_product_name: str = pydantic.Field(
+        description="The PCI subsystem device name of the interface"
+    )
 
     pf_pci_address: str = pydantic.Field(description="The PF PCI address of a given SR-IOV VF")
     pci_whitelisted: bool = pydantic.Field(
@@ -140,6 +153,33 @@ def get_pci_product_id(ifname: str) -> str:
         return ""
     with open(path, "r") as f:
         return f.read().strip()
+
+
+def get_pci_description(pci_address: str) -> dict:
+    """Obtain human readable PCI information.
+
+    Leverages "lspci -vmm" to obtain human readable PCI
+    vendor and product names as opposed to parsing
+    /usr/share/misc/pci.ids directly.
+    """
+    result = subprocess.run(
+        ["lspci", "-s", pci_address, "-vmm"], capture_output=True, check=True, text=True
+    )
+    lines = result.stdout.replace("\t", "").split("\n")
+    raw_dict = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        raw_dict[key] = val
+
+    return {
+        "class_name": raw_dict.get("Class"),
+        "vendor_name": raw_dict.get("Vendor"),
+        "device_name": raw_dict.get("Device"),
+        "subsystem_vendor_name": raw_dict.get("SVendor"),
+        "subsystem_device_name": raw_dict.get("SDevice"),
+    }
 
 
 def get_pci_vendor_id(ifname: str) -> str:
@@ -267,7 +307,7 @@ def _get_pci_spec_cfg():
     return pci_spec_cfg
 
 
-def to_output_schema(nics: list[Interface]) -> NicList:
+def to_output_schema(nics: list[Interface]) -> NicList:  # noqa: C901
     """Convert the interfaces to the output schema."""
     nics_ = []
 
@@ -284,6 +324,17 @@ def to_output_schema(nics: list[Interface]) -> NicList:
             sriov_totalvfs = 0
             sriov_numvfs = 0
 
+        pci_address = get_pci_address(ifname)
+        # Human readable PCI names.
+        pci_description = {}
+        if pci_address:
+            try:
+                pci_description = get_pci_description(pci_address)
+            except Exception as ex:
+                logger.warning(
+                    "Unable to retrieve PCI human readable names: %s, error: %s", pci_address, ex
+                )
+
         out = InterfaceOutput(
             name=ifname,
             configured=is_interface_configured(nic),
@@ -297,6 +348,11 @@ def to_output_schema(nics: list[Interface]) -> NicList:
             product_id=get_pci_product_id(ifname),
             vendor_id=get_pci_vendor_id(ifname),
             pf_pci_address=get_pf_pci_address(ifname),
+            class_name=pci_description.get("class_name", ""),
+            vendor_name=pci_description.get("vendor_name", ""),
+            product_name=pci_description.get("device_name", ""),
+            subsystem_vendor_name=pci_description.get("subsystem_vendor_name", ""),
+            subsystem_product_name=pci_description.get("subsystem_device_name", ""),
             pci_physnet="",
             pci_whitelisted=False,
         )
