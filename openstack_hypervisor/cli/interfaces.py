@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import pathlib
-import subprocess
 from typing import Iterable
 
 import click
@@ -17,7 +16,7 @@ from pyroute2.ndb.objects.interface import Interface
 from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
-from openstack_hypervisor import devspec
+from openstack_hypervisor import devspec, pci
 from openstack_hypervisor.cli.common import (
     JSON_FORMAT,
     JSON_INDENT_FORMAT,
@@ -130,73 +129,6 @@ def get_pci_address(ifname: str) -> str:
     return parts[-1]
 
 
-def get_pf_pci_address(ifname: str) -> str:
-    """Get the corresponding PF PCI address for a given VF."""
-    pf_path = f"/sys/class/net/{ifname}/device/physfn"
-    if not (os.path.exists(pf_path) and os.path.islink(pf_path)):
-        # Not a VF.
-        return ""
-    resolved_path = os.path.realpath(pf_path)
-    return resolved_path.split("/")[-1]
-
-
-def get_pci_product_id(ifname: str) -> str:
-    """Determine the PCI product id of the specified interface.
-
-    :param: ifname: interface name
-    :type: str
-    :returns: the PCI product id of the device.
-    :rtype: str
-    """
-    path = f"/sys/class/net/{ifname}/device/device"
-    if not os.path.exists(path):
-        return ""
-    with open(path, "r") as f:
-        return f.read().strip()
-
-
-def get_pci_description(pci_address: str) -> dict:
-    """Obtain human readable PCI information.
-
-    Leverages "lspci -vmm" to obtain human readable PCI
-    vendor and product names as opposed to parsing
-    /usr/share/misc/pci.ids directly.
-    """
-    result = subprocess.run(
-        ["lspci", "-s", pci_address, "-vmm"], capture_output=True, check=True, text=True
-    )
-    lines = result.stdout.replace("\t", "").split("\n")
-    raw_dict = {}
-    for line in lines:
-        if ":" not in line:
-            continue
-        key, val = line.split(":", 1)
-        raw_dict[key] = val
-
-    return {
-        "class_name": raw_dict.get("Class"),
-        "vendor_name": raw_dict.get("Vendor"),
-        "device_name": raw_dict.get("Device"),
-        "subsystem_vendor_name": raw_dict.get("SVendor"),
-        "subsystem_device_name": raw_dict.get("SDevice"),
-    }
-
-
-def get_pci_vendor_id(ifname: str) -> str:
-    """Determine the PCI product id of the specified interface.
-
-    :param: ifname: interface name
-    :type: str
-    :returns: the PCI product id of the device.
-    :rtype: str
-    """
-    path = f"/sys/class/net/{ifname}/device/vendor"
-    if not os.path.exists(path):
-        return ""
-    with open(path, "r") as f:
-        return f.read().strip()
-
-
 def is_sriov_capable(ifname: str) -> bool:
     """Determine whether a device is SR-IOV capable.
 
@@ -304,7 +236,14 @@ def _get_pci_spec_cfg():
         # Unfortunately snap.config.get doesn't take a default value...
         pci_spec_cfg = []
 
-    return pci_spec_cfg
+    try:
+        pci_excluded_devices = snap.config.get("compute.pci-excluded-devices") or []
+        if isinstance(pci_spec_cfg, str):
+            pci_excluded_devices = json.loads(pci_excluded_devices)
+    except UnknownConfigKey:
+        pci_excluded_devices = []
+
+    return pci.apply_exclusion_list(pci_spec_cfg, pci_excluded_devices)
 
 
 def to_output_schema(nics: list[Interface]) -> NicList:  # noqa: C901
@@ -329,7 +268,7 @@ def to_output_schema(nics: list[Interface]) -> NicList:  # noqa: C901
         pci_description = {}
         if pci_address:
             try:
-                pci_description = get_pci_description(pci_address)
+                pci_description = pci.get_pci_description(pci_address)
             except Exception as ex:
                 logger.warning(
                     "Unable to retrieve PCI human readable names: %s, error: %s", pci_address, ex
@@ -344,10 +283,10 @@ def to_output_schema(nics: list[Interface]) -> NicList:  # noqa: C901
             sriov_totalvfs=sriov_totalvfs,
             sriov_numvfs=sriov_numvfs,
             hw_offload_available=is_hw_offload_available(ifname),
-            pci_address=get_pci_address(ifname),
-            product_id=get_pci_product_id(ifname),
-            vendor_id=get_pci_vendor_id(ifname),
-            pf_pci_address=get_pf_pci_address(ifname),
+            pci_address=pci_address,
+            product_id=pci.get_pci_product_id(pci_address),
+            vendor_id=pci.get_pci_vendor_id(pci_address),
+            pf_pci_address=pci.get_physfn_address(pci_address),
             class_name=pci_description.get("class_name", ""),
             vendor_name=pci_description.get("vendor_name", ""),
             product_name=pci_description.get("device_name", ""),
