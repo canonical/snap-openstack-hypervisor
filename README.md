@@ -99,6 +99,27 @@ deployed to. This can be accomplished by setting kernel parameters on
 capable machines in MAAS, tagging them and using these tags as
 constraints in the model.
 
+* `compute.pci-excluded-devices` PCI excluded devices
+
+A list of PCI addresses that will be excluded from the Nova PCI device whitelist.
+The main purpose of this setting is to accommodate per-node exclusion lists.
+
+For example, let's say that the user whitelisted all Intel x550 devices and then
+excluded one out of 4 such interfaces:
+    pci_device_specs = [{"vendor_id": "8086", "product_id": "1563"}]
+    excluded_devices = ["0000:1b:00.1"]
+
+The updated device spec will contain the vendor/product and pci address of the remaining
+3 Intel x550 devies.
+
+    [
+        {"vendor_id": "8086", "product_id": "1563", "address": "0000:19:00.0"},
+        {"vendor_id": "8086", "product_id": "1563", "address": "0000:19:00.1"},
+        {"vendor_id": "8086", "product_id": "1563", "address": "0000:1b:00.0"},
+    ]
+
+A device spec that doesn't contain any excluded devices will not be modified.
+
 * `compute.pci-aliases` PCI device alias
 
 Sets the `pci-alias` option in nova.conf, defining aliases for assignable
