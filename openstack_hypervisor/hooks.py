@@ -33,6 +33,7 @@ from pyroute2.netlink.exceptions import NetlinkError
 from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
+from openstack_hypervisor import pci
 from openstack_hypervisor.cli import interfaces
 from openstack_hypervisor.log import setup_logging
 
@@ -262,6 +263,7 @@ DEFAULT_CONFIG = {
     "compute.resume-on-boot": True,
     "compute.flavors": UNSET,
     "compute.pci-device-specs": [],
+    "compute.pci-excluded-devices": [],
     "compute.pci-aliases": [],
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
@@ -1679,6 +1681,14 @@ def configure(snap: Snap) -> None:
     )
 
     pci_device_specs = context.get("compute", {}).get("pci_device_specs")
+    pci_excluded_devices = context.get("compute", {}).get("pci_excluded_devices")
+    if isinstance(pci_device_specs, str):
+        pci_device_specs = json.loads(pci_device_specs) or []
+    if isinstance(pci_excluded_devices, str):
+        pci_excluded_devices = json.loads(pci_excluded_devices) or []
+
+    pci_device_specs = pci.apply_exclusion_list(pci_device_specs, pci_excluded_devices)
+
     _set_config_context(context, "compute", "pci_device_specs", _to_json_list(pci_device_specs))
 
     pci_aliases = context.get("compute", {}).get("pci_aliases")
