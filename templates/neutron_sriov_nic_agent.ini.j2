@@ -1,0 +1,9 @@
+[DEFAULT]
+host = {{ node.fqdn }}
+
+[securitygroup]
+firewall_driver = noop
+
+[sriov_nic]
+physical_device_mappings = {{ network.sriov_nic_physical_device_mappings }}
+exclude_devices = {{ network.sriov_nic_exclude_devices }}
