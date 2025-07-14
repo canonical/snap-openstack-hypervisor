@@ -5,14 +5,16 @@ import json
 import logging
 import os
 import socket as pysocket
+from typing import TypeVar, Union
 
 import click
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .schemas import (
     ActionType,
+    AllocateCoresRequest,
     AllocateCoresResponse,
-    EpaRequest,
+    ListAllocationsRequest,
     ListAllocationsResponse,
 )
 
@@ -31,62 +33,122 @@ click_option_format = click.option(
     help="Output format",
 )
 
+T = TypeVar("T", bound=BaseModel)
+
+
+class SocketCommunicationError(Exception):
+    """Exception raised when socket communication fails."""
+
+    pass
+
+
+class EPAOrchestratorError(Exception):
+    """Exception raised when the EPA orchestrator returns an error."""
+
+    pass
+
+
+def _communicate_with_socket(
+    request: Union[AllocateCoresRequest, ListAllocationsRequest],
+    response_model: type[T],
+    socket_path: str = SOCKET_PATH,
+) -> T:
+    """Helper function for socket communication with EPA orchestrator.
+
+    Args:
+        request: The request to send to the EPA orchestrator
+        response_model: The expected response model type
+        socket_path: Path to the Unix socket
+
+    Returns:
+        The parsed response from the EPA orchestrator
+
+    Raises:
+        SocketCommunicationError: If socket communication fails (connection,
+                                 data transmission, or validation errors)
+        EPAOrchestratorError: If the EPA orchestrator returns an error response
+    """
+    try:
+        with pysocket.socket(pysocket.AF_UNIX, pysocket.SOCK_STREAM) as s:
+            s.connect(socket_path)
+            s.sendall(request.json().encode())
+            data = s.recv(4096)
+            response_dict = json.loads(data.decode())
+            if "error" in response_dict:
+                raise EPAOrchestratorError(response_dict["error"])
+            response = response_model(**response_dict)
+            return response
+    except (ValidationError, json.JSONDecodeError, pysocket.error, OSError) as e:
+        raise SocketCommunicationError("Socket communication failed: {}".format(e))
+    except EPAOrchestratorError:
+        raise
+    except Exception as e:
+        raise SocketCommunicationError(
+            "Unexpected error during socket communication: {}".format(e)
+        )
+
 
 def get_cpu_pinning_from_socket(
-    snap_name: str,
+    service_name: str,
     cores_requested: int = 0,
     socket_path: str = SOCKET_PATH,
 ) -> tuple[str, str]:
-    """Get CPU pinning info from the epa-orchestrator snap via Unix socket."""
-    request = EpaRequest(
-        snap_name=snap_name, action=ActionType.ALLOCATE_CORES, cores_requested=cores_requested
+    """Get CPU pinning info from the epa-orchestrator snap via Unix socket.
+
+    This function communicates with the EPA orchestrator to request CPU core allocation
+    and returns the shared and allocated CPU sets for the requesting snap.
+
+    Args:
+        service_name: Name of the service requesting CPU allocation
+        cores_requested: Number of dedicated cores requested (0 means default allocation)
+        socket_path: Path to the Unix socket for EPA orchestrator communication
+
+    Returns:
+        A tuple containing (shared_cpus, allocated_cores) where both are
+        comma-separated CPU range strings
+
+    Raises:
+        SocketCommunicationError: If socket communication fails (connection issues,
+            data transmission errors, or validation failures)
+        EPAOrchestratorError: If the EPA orchestrator returns an error response
+    """
+    request = AllocateCoresRequest(
+        service_name=service_name,
+        action=ActionType.ALLOCATE_CORES,
+        cores_requested=cores_requested,
     )
-
     try:
-        with pysocket.socket(pysocket.AF_UNIX, pysocket.SOCK_STREAM) as s:
-            s.connect(socket_path)
-            s.sendall(request.json().encode())
-            data = s.recv(4096)
-            response = AllocateCoresResponse(**json.loads(data.decode()))
-
-            if response.error:
-                raise RuntimeError(f"EPA orchestrator error: {response.error}")
-
-            return response.shared_cpus, response.allocated_cores
-
-    except (ValidationError, Exception) as e:
-        logging.error(f"Failed to get CPU pinning info from socket: {e}")
-        return "", ""
+        response = _communicate_with_socket(request, AllocateCoresResponse, socket_path)
+        return (response.shared_cpus, response.allocated_cores)
+    except (SocketCommunicationError, EPAOrchestratorError) as e:
+        logging.error("Failed to get CPU pinning info from socket: {}".format(e))
+        raise
 
 
 def get_allocations_from_socket(
+    service_name: str = "",
     socket_path: str = SOCKET_PATH,
 ) -> ListAllocationsResponse:
-    """Get current allocations from the epa-orchestrator snap via Unix socket."""
-    request = EpaRequest(
-        snap_name="",  # Not needed for list action
-        action=ActionType.LIST_ALLOCATIONS,
-        cores_requested=None,
-    )
+    """Get current allocations from the epa-orchestrator snap via Unix socket.
 
+    This function communicates with the EPA orchestrator to retrieve the current
+    state of CPU allocations across all entities.
+
+    Args:
+        service_name: Name of the service requesting allocations (optional)
+        socket_path: Path to the Unix socket for EPA orchestrator communication
+
+    Returns:
+        ListAllocationsResponse containing allocation information
+
+    Raises:
+        SocketCommunicationError: If socket communication fails (connection issues,
+            data transmission errors, or validation failures)
+        EPAOrchestratorError: If the EPA orchestrator returns an error response
+    """
+    request = ListAllocationsRequest(service_name=service_name, action=ActionType.LIST_ALLOCATIONS)
     try:
-        with pysocket.socket(pysocket.AF_UNIX, pysocket.SOCK_STREAM) as s:
-            s.connect(socket_path)
-            s.sendall(request.json().encode())
-            data = s.recv(4096)
-            response = ListAllocationsResponse(**json.loads(data.decode()))
-
-            if response.error:
-                raise RuntimeError(f"EPA orchestrator error: {response.error}")
-
-            return response
-
-    except (ValidationError, Exception) as e:
-        logging.error(f"Failed to get allocations from socket: {e}")
-        return ListAllocationsResponse(
-            total_allocations=0,
-            total_allocated_cpus=0,
-            total_available_cpus=0,
-            remaining_available_cpus=0,
-            allocations=[],
-        )
+        return _communicate_with_socket(request, ListAllocationsResponse, socket_path)
+    except (SocketCommunicationError, EPAOrchestratorError) as e:
+        logging.error("Failed to get allocations from socket: {}".format(e))
+        raise

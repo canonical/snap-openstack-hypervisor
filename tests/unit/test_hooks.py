@@ -106,9 +106,11 @@ class TestHooks:
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mock_write_text = mocker.patch.object(hooks.Path, "write_text")
         mock_chmod = mocker.patch.object(hooks.Path, "chmod")
-
+        mocker.patch(
+            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
+            return_value=("0-3", "4-7")
+        )
         hooks.configure(snap)
-
         mock_template.render.assert_called()
         mock_write_text.assert_called()
         mock_chmod.assert_called()
@@ -119,7 +121,10 @@ class TestHooks:
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mocker.patch.object(hooks.Path, "write_text")
         mocker.patch.object(hooks.Path, "chmod")
-
+        mocker.patch(
+            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
+            return_value=("0-3", "4-7")
+        )
         with pytest.raises(FileNotFoundError):
             hooks.configure(snap)
 

@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2024 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
-
 """Pydantic schemas for socket communication."""
 from enum import Enum
-from typing import List, Literal, Optional
+from typing import Annotated, List, Literal, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
-API_VERSION = "1.0"
+API_VERSION: Literal["1.0"] = "1.0"
 
 
 class ActionType(str, Enum):
@@ -17,38 +16,38 @@ class ActionType(str, Enum):
     LIST_ALLOCATIONS = "list_allocations"
 
 
-class EpaRequest(BaseModel):
-    """Pydantic model for epa request."""
+class AllocateCoresRequest(BaseModel):
+    """Request model for allocating cores."""
 
     version: Literal["1.0"] = Field(default=API_VERSION)
-    snap_name: str = Field(description="Name of the requesting snap")
-    action: ActionType = Field(description="Type of action to perform")
-    cores_requested: Optional[int] = Field(
-        default=None,
+    action: Literal[ActionType.ALLOCATE_CORES]
+    service_name: str = Field(description="Name of the requesting service")
+    cores_requested: int = Field(
+        default=0,
         ge=0,
-        description=("Number of dedicated cores requested " "(only for allocate_cores)"),
+        description="Number of dedicated cores requested (0 means default allocation)",
     )
 
-    @field_validator("cores_requested")
-    @classmethod
-    def validate_cores_requested(cls, v, info):
-        """Validate and adjust the value of cores_requested based on the action type."""
-        action = info.data.get("action")
-        if action == ActionType.ALLOCATE_CORES and v is None:
-            # For allocate_cores, if cores_requested is None, set it to 0
-            # (which means 80% allocation)
-            return 0
-        elif action == ActionType.LIST_ALLOCATIONS and v is not None:
-            # For list_allocations, cores_requested should be None or ignored
-            return None
-        return v
+
+class ListAllocationsRequest(BaseModel):
+    """Request model for listing allocations."""
+
+    version: Literal["1.0"] = Field(default=API_VERSION)
+    action: Literal[ActionType.LIST_ALLOCATIONS]
+    service_name: str = Field(description="Name of the requesting service")
+
+
+EpaRequest = Annotated[
+    Union[AllocateCoresRequest, ListAllocationsRequest],
+    Field(discriminator="action"),
+]
 
 
 class AllocateCoresResponse(BaseModel):
     """Pydantic model for allocate cores response."""
 
     version: Literal["1.0"] = Field(default=API_VERSION)
-    snap_name: str = Field(description="Name of the snap that was allocated cores")
+    service_name: str = Field(description="Name of the service that was allocated cores")
     cores_requested: int = Field(description="Number of cores that were requested")
     cores_allocated: int = Field(description="Number of cores that were actually allocated")
     allocated_cores: str = Field(description="Comma-separated list of allocated CPU ranges")
@@ -57,28 +56,33 @@ class AllocateCoresResponse(BaseModel):
     remaining_available_cpus: int = Field(
         description="Number of CPUs still available for allocation"
     )
-    error: str = ""
 
 
 class SnapAllocation(BaseModel):
-    """Model for snap allocation information."""
+    """Model for service allocation information."""
 
-    snap_name: str = Field(description="Name of the snap")
+    service_name: str = Field(description="Name of the service")
     allocated_cores: str = Field(description="Comma-separated list of allocated CPU ranges")
-    cores_count: int = Field(description="Number of cores allocated to this snap")
+    cores_count: int = Field(description="Number of cores allocated to this service")
 
 
 class ListAllocationsResponse(BaseModel):
     """Pydantic model for list allocations response."""
 
     version: Literal["1.0"] = Field(default=API_VERSION)
-    total_allocations: int = Field(description="Total number of snap allocations")
+    total_allocations: int = Field(description="Total number of service allocations")
     total_allocated_cpus: int = Field(
-        description="Total number of CPUs allocated across all snaps"
+        description="Total number of CPUs allocated across all services"
     )
     total_available_cpus: int = Field(description="Total number of CPUs available in the system")
     remaining_available_cpus: int = Field(
         description="Number of CPUs still available for allocation"
     )
-    allocations: List[SnapAllocation] = Field(description="List of all snap allocations")
-    error: str = ""
+    allocations: List[SnapAllocation] = Field(description="List of all service allocations")
+
+
+class ErrorResponse(BaseModel):
+    """Pydantic model for error responses."""
+
+    version: Literal["1.0"] = Field(default=API_VERSION)
+    error: str
