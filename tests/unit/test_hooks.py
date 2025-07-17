@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import random
 import textwrap
 from unittest import mock
 
@@ -9,6 +10,7 @@ import pytest
 from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import hooks
+from openstack_hypervisor.cli import interfaces
 
 
 class TestHooks:
@@ -130,6 +132,7 @@ class TestHooks:
             "libvirtd",
             "masakari-instancemonitor",
             "neutron-ovn-metadata-agent",
+            "neutron-sriov-nic-agent",
             "nova-api-metadata",
             "nova-compute",
             "virtlogd",
@@ -489,3 +492,124 @@ class TestHooks:
         mock_os_path_exists.return_value = False
         mock_builtins_open = mocker.patch("builtins.open", mock.mock_open(read_data="N"))
         mock_builtins_open.assert_not_called()
+
+    def _get_mock_nic(
+        self,
+        name,
+        configured=False,
+        up=False,
+        connected=True,
+        sriov_available=False,
+        sriov_totalvfs=0,
+        sriov_numvfs=0,
+        hw_offload_available=False,
+        pci_address="",
+        product_id="8086",
+        vendor_id="1563",
+        pf_pci_address="",
+        pci_physnet="",
+        pci_whitelisted=True,
+    ):
+        if not pci_address:
+            pci_address = "0000:%s:%s.0" % (
+                hex(random.randint(0, 0xFF)).strip("0x"),
+                hex(random.randint(0, 0xFF)).strip("0x"),
+            )
+        return interfaces.InterfaceOutput(
+            name=name,
+            configured=configured,
+            up=up,
+            connected=connected,
+            sriov_available=sriov_available,
+            sriov_totalvfs=sriov_totalvfs,
+            sriov_numvfs=sriov_numvfs,
+            hw_offload_available=hw_offload_available,
+            pci_address=pci_address,
+            product_id=product_id,
+            vendor_id=vendor_id,
+            pf_pci_address=pf_pci_address,
+            pci_physnet=pci_physnet,
+            pci_whitelisted=pci_whitelisted,
+            class_name="mock class name",
+            vendor_name="mock vendor name",
+            product_name="mock product name",
+            subsystem_vendor_name="mock subsystem vendor name",
+            subsystem_product_name="mock subsystem product name",
+        )
+
+    @mock.patch.object(interfaces, "get_nics")
+    def test_determine_sriov_device_mappings(self, mock_get_nics):
+        sriov_pf_specs = dict(
+            sriov_available=True,
+            sriov_numvfs=32,
+            sriov_totalvfs=32,
+        )
+        nic_list = [
+            # Not whitelisted
+            self._get_mock_nic("eno0", pci_whitelisted=False, **sriov_pf_specs),
+            # SR-IOV not available
+            self._get_mock_nic("eno1", pci_whitelisted=True, pci_physnet="physnet1"),
+            # No physnet
+            self._get_mock_nic("eno2", pci_whitelisted=True, **sriov_pf_specs),
+            # HW offload available, should be skipped.
+            self._get_mock_nic(
+                "eno3",
+                pci_whitelisted=True,
+                pci_physnet="physnet1",
+                hw_offload_available=True,
+                **sriov_pf_specs,
+            ),
+            # PF whitelisted
+            self._get_mock_nic(
+                "eno4",
+                pci_whitelisted=True,
+                pci_physnet="physnet1",
+                hw_offload_available=False,
+                **sriov_pf_specs,
+            ),
+            # Contains whitelisted VF
+            self._get_mock_nic(
+                "eno5",
+                pci_whitelisted=False,
+                hw_offload_available=False,
+                pci_address="0000:1b:00.0",
+                **sriov_pf_specs,
+            ),
+            # Whitelisted VF
+            self._get_mock_nic(
+                "eno5v0",
+                pci_whitelisted=True,
+                pci_physnet="physnet2",
+                hw_offload_available=False,
+                pf_pci_address="0000:1b:00.0",
+            ),
+            # VF not whitelisted
+            self._get_mock_nic(
+                "eno5v1",
+                pci_whitelisted=False,
+                hw_offload_available=False,
+                pf_pci_address="0000:1b:00.0",
+            ),
+            # Contains whitelisted VF, hw offload available
+            self._get_mock_nic(
+                "eno5",
+                pci_whitelisted=False,
+                hw_offload_available=True,
+                pci_address="0000:1c:00.0",
+                **sriov_pf_specs,
+            ),
+            # Whitelisted VF
+            self._get_mock_nic(
+                "eno5v0",
+                pci_whitelisted=True,
+                pci_physnet="physnet1",
+                hw_offload_available=True,
+                pf_pci_address="0000:1c:00.0",
+            ),
+        ]
+        mock_get_nics.return_value = mock.Mock(root=nic_list)
+
+        bridge_mappings = hooks._determine_sriov_device_mappings()
+        expected_bridge_mappings = "physnet1:eno4,physnet2:eno5"
+
+        assert sorted(expected_bridge_mappings.split(",")) == sorted(bridge_mappings.split(","))

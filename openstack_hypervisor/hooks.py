@@ -33,6 +33,8 @@ from pyroute2.netlink.exceptions import NetlinkError
 from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
+from openstack_hypervisor import pci
+from openstack_hypervisor.cli import interfaces
 from openstack_hypervisor.log import setup_logging
 
 UNSET = ""
@@ -260,6 +262,9 @@ DEFAULT_CONFIG = {
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
     "compute.flavors": UNSET,
+    "compute.pci-device-specs": [],
+    "compute.pci-excluded-devices": [],
+    "compute.pci-aliases": [],
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
     "network.physnet-name": "physnet1",
@@ -273,6 +278,7 @@ DEFAULT_CONFIG = {
     "network.enable-gateway": False,
     "network.ip-address": _get_local_ip_by_default_route,  # noqa: F821
     "network.external-nic": UNSET,
+    "network.sriov-nic-exclude-devices": UNSET,
     # Monitoring
     "monitoring.enable": False,
     # General
@@ -384,6 +390,10 @@ TEMPLATES = {
     Path("etc/neutron/neutron_ovn_metadata_agent.ini"): {
         "template": "neutron_ovn_metadata_agent.ini.j2",
         "services": ["neutron-ovn-metadata-agent"],
+    },
+    Path("etc/neutron/neutron_sriov_nic_agent.ini"): {
+        "template": "neutron_sriov_nic_agent.ini.j2",
+        "services": ["neutron-sriov-nic-agent"],
     },
     Path("etc/libvirt/libvirtd.conf"): {"template": "libvirtd.conf.j2", "services": ["libvirtd"]},
     Path("etc/libvirt/qemu.conf"): {
@@ -1518,6 +1528,102 @@ def _add_compute_flavor(snap: Snap, flavor: str) -> None:
     snap.config.set({"compute.flavors": updated_flavors})
 
 
+def _should_sriov_agent_manage_nic(nic, physnet=None):
+    physnet = physnet or nic.pci_physnet
+    if not nic.name:
+        logging.warning("Missing nic name, ignoring. PCI address: %s", nic.pci_address)
+        return False
+    if not nic.sriov_available:
+        logging.info("nic %s: SR-IOV not available, ignoring.", nic.name)
+        return False
+    if not physnet:
+        logging.info("nic %s: no physnet specified, ignoring.", nic.name)
+        return False
+    if nic.hw_offload_available:
+        logging.info(
+            "nic %s: hw offload available, ignoring. OVN is expected to handle this device.",
+            nic.name,
+        )
+        return False
+    return True
+
+
+def _determine_sriov_device_mappings() -> str:
+    logging.info("Determining SR-IOV physical device mappings.")
+    nics = interfaces.get_nics().root
+    # Retrieve SR-IOV PFs that have been whitelisted, including
+    # those that have whitelisted VFs.
+    mappings = []
+
+    for nic in nics:
+        if not nic.pci_whitelisted:
+            logging.info("nic %s: not whitelisted, ignoring.", nic.name)
+            continue
+        if _should_sriov_agent_manage_nic(nic):
+            logging.info("nic %s: PF whitelisted, adding to SR-IOV agent mappings.", nic.name)
+            mappings.append(f"{nic.pci_physnet}:{nic.name}")
+
+    # Get PFs containing whitelisted VFs.
+    for nic in nics:
+        if not nic.pci_whitelisted:
+            logging.info("nic %s: not whitelisted, ignoring.", nic.name)
+            continue
+        if not nic.pf_pci_address:
+            logging.info("nic %s: no parent PF address", nic.name)
+            continue
+
+        # The VF is whitelisted, look up the PF.
+        #
+        # We'll use the physnet of the VF.
+        physnet = nic.pci_physnet
+        for pf in nics:
+            if pf.pci_address != nic.pf_pci_address:
+                continue
+
+            logging.info("nic %s: found parent PF: %s", nic.name, nic.pf_pci_address)
+            if _should_sriov_agent_manage_nic(pf, physnet=physnet):
+                logging.info(
+                    "nic %s: found whiteliested VFs, adding to SR-IOV agent mappings.", nic.name
+                )
+                mappings.append(f"{physnet}:{pf.name}")
+
+    mappings_str = ",".join(list(set(mappings)))
+    logging.info("SR-IOV agent mappings: %s", mappings_str)
+
+    return mappings_str
+
+
+def _configure_sriov_agent_service(snap: Snap, enabled: bool) -> None:
+    sriov_service = snap.services.list()["neutron-sriov-nic-agent"]
+    if enabled:
+        logging.info("SR-IOV mappings detected, enabling SR-IOV agent.")
+        sriov_service.start(enable=True)
+    else:
+        logging.info("No SR-IOV mappings detected, disabling SR-IOV agent.")
+        sriov_service.stop(disable=True)
+
+
+def _set_config_context(context, group, key, val):
+    if group not in context:
+        context[group] = {}
+    context[group][key] = val
+
+
+def _to_json_list(val):
+    """Convert a list of dictionaries (optionally as a string) to a list of JSONs.
+
+    Examples:
+    >>> _to_json_list([{'address': '00:00:00:00.0'}])
+    ['{"address": "00:00:00:00.0"}']
+    >>> _to_json_list('[{"address": "00:00:00:00.0"}]')
+    ['{"address": "00:00:00:00.0"}']
+    """
+    val = val or []
+    if isinstance(val, str):
+        val = json.loads(val) or []
+    return [json.dumps(element) for element in val]
+
+
 def configure(snap: Snap) -> None:
     """Runs the `configure` hook for the snap.
 
@@ -1569,6 +1675,25 @@ def configure(snap: Snap) -> None:
     for service in exclude_services:
         services[service].stop()
 
+    physical_device_mappings = _determine_sriov_device_mappings()
+    _set_config_context(
+        context, "network", "sriov_nic_physical_device_mappings", physical_device_mappings
+    )
+
+    pci_device_specs = context.get("compute", {}).get("pci_device_specs")
+    pci_excluded_devices = context.get("compute", {}).get("pci_excluded_devices")
+    if isinstance(pci_device_specs, str):
+        pci_device_specs = json.loads(pci_device_specs) or []
+    if isinstance(pci_excluded_devices, str):
+        pci_excluded_devices = json.loads(pci_excluded_devices) or []
+
+    pci_device_specs = pci.apply_exclusion_list(pci_device_specs, pci_excluded_devices)
+
+    _set_config_context(context, "compute", "pci_device_specs", _to_json_list(pci_device_specs))
+
+    pci_aliases = context.get("compute", {}).get("pci_aliases")
+    _set_config_context(context, "compute", "pci_aliases", _to_json_list(pci_aliases))
+
     with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         for config_file, template in TEMPLATES.items():
             tpl_name = template.get("template")
@@ -1595,3 +1720,4 @@ def configure(snap: Snap) -> None:
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
     _configure_masakari_services(snap)
+    _configure_sriov_agent_service(snap, bool(physical_device_mappings))

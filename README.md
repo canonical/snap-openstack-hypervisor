@@ -87,6 +87,45 @@ Amount of memory reserved for host in MB. nova-compute service deducts this
 memory from the available memory in the usage report sent to the placement
 service.
 
+* `compute.pci-device-specs` PCI passthrough whitelist
+
+A list of device specs used to set the `pci.device_spec` option in
+nova.conf, which allows PCI passthrough of specific devices to VMs.
+
+Example applications: GPU processing, SR-IOV networking, etc.
+
+NOTE: For PCI passthrough to work IOMMU must be enabled on the machine
+deployed to. This can be accomplished by setting kernel parameters on
+capable machines in MAAS, tagging them and using these tags as
+constraints in the model.
+
+* `compute.pci-excluded-devices` PCI excluded devices
+
+A list of PCI addresses that will be excluded from the Nova PCI device whitelist.
+The main purpose of this setting is to accommodate per-node exclusion lists.
+
+For example, let's say that the user whitelisted all Intel x550 devices and then
+excluded one out of 4 such interfaces:
+    pci_device_specs = [{"vendor_id": "8086", "product_id": "1563"}]
+    excluded_devices = ["0000:1b:00.1"]
+
+The updated device spec will contain the vendor/product and pci address of the remaining
+3 Intel x550 devies.
+
+    [
+        {"vendor_id": "8086", "product_id": "1563", "address": "0000:19:00.0"},
+        {"vendor_id": "8086", "product_id": "1563", "address": "0000:19:00.1"},
+        {"vendor_id": "8086", "product_id": "1563", "address": "0000:1b:00.0"},
+    ]
+
+A device spec that doesn't contain any excluded devices will not be modified.
+
+* `compute.pci-aliases` PCI device alias
+
+Sets the `pci-alias` option in nova.conf, defining aliases for assignable
+PCI devices that can be requested through flavor extra specs.
+
+
 ### identity
 
 Configuration of options related to identity (Keystone):
@@ -136,6 +175,13 @@ TLS configuration for OVN can also be supplied via snap configuration:
 * `network.ovn-cacert` CA certificate (and chain) for certificate validation
 
 All of the above options must be provided as base64 encoded strings.
+
+SR-IOV agent settings:
+
+* `network.sriov-nic-exclude-devices`: SR-IOV excluded VFs
+
+Comma-separated list of `<network_device>:<vfs_to_exclude>` tuples, mapping interfaces
+to PCI address of excluded SR-IOV VFs, which will not be handled by the SR-IOV agent.
 
 ### rabbitmq
 

@@ -37,6 +37,7 @@ dependencies = [
     "cryptography>=38.0.0,<42,!=40.0.0,!=40.0.1",  # PyOpenSSL requirements
     "pyroute2==0.7.11",  # matched to caracal cloud-archive
     "click",
+    "prettytable",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +57,7 @@ nova-compute-service = "openstack_hypervisor.services:nova_compute"
 nova-api-metadata-service = "openstack_hypervisor.services:nova_api_metadata"
 ovsdb-server-service = "openstack_hypervisor.services:ovsdb_server"
 neutron-ovn-metadata-agent-service = "openstack_hypervisor.services:neutron_ovn_metadata_agent"
+neutron-sriov-nic-agent-service = "openstack_hypervisor.services:neutron_sriov_nic_agent"
 ceilometer-compute-agent-service = "openstack_hypervisor.services:ceilometer_compute_agent"
 ovs-exporter-service = "openstack_hypervisor.services:ovs_exporter"
 masakari-instancemonitor-service = "openstack_hypervisor.services:masakari_instancemonitor"
