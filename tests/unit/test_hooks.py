@@ -649,7 +649,7 @@ def test_nova_conf_cpu_pinning_injection(
 
     class ConfigOptionsDict(dict):
         def as_dict(self):
-            return self
+            return dict(self)
 
     config_dict = {
         k: {}

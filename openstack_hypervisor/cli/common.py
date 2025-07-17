@@ -8,14 +8,13 @@ import socket as pysocket
 from typing import TypeVar, Union
 
 import click
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from .schemas import (
     ActionType,
     AllocateCoresRequest,
     AllocateCoresResponse,
     ListAllocationsRequest,
-    ListAllocationsResponse,
 )
 
 VALUE_FORMAT = "value"
@@ -78,14 +77,8 @@ def _communicate_with_socket(
                 raise EPAOrchestratorError(response_dict["error"])
             response = response_model(**response_dict)
             return response
-    except (ValidationError, json.JSONDecodeError, pysocket.error, OSError) as e:
-        raise SocketCommunicationError("Socket communication failed: {}".format(e))
-    except EPAOrchestratorError:
-        raise
-    except Exception as e:
-        raise SocketCommunicationError(
-            "Unexpected error during socket communication: {}".format(e)
-        )
+    except (pysocket.error, OSError) as e:
+        raise SocketCommunicationError(f"Socket communication failed: {e}")
 
 
 def get_cpu_pinning_from_socket(
@@ -122,33 +115,4 @@ def get_cpu_pinning_from_socket(
         return (response.shared_cpus, response.allocated_cores)
     except (SocketCommunicationError, EPAOrchestratorError) as e:
         logging.error("Failed to get CPU pinning info from socket: {}".format(e))
-        raise
-
-
-def get_allocations_from_socket(
-    service_name: str = "",
-    socket_path: str = SOCKET_PATH,
-) -> ListAllocationsResponse:
-    """Get current allocations from the epa-orchestrator snap via Unix socket.
-
-    This function communicates with the EPA orchestrator to retrieve the current
-    state of CPU allocations across all entities.
-
-    Args:
-        service_name: Name of the service requesting allocations (optional)
-        socket_path: Path to the Unix socket for EPA orchestrator communication
-
-    Returns:
-        ListAllocationsResponse containing allocation information
-
-    Raises:
-        SocketCommunicationError: If socket communication fails (connection issues,
-            data transmission errors, or validation failures)
-        EPAOrchestratorError: If the EPA orchestrator returns an error response
-    """
-    request = ListAllocationsRequest(service_name=service_name, action=ActionType.LIST_ALLOCATIONS)
-    try:
-        return _communicate_with_socket(request, ListAllocationsResponse, socket_path)
-    except (SocketCommunicationError, EPAOrchestratorError) as e:
-        logging.error("Failed to get allocations from socket: {}".format(e))
         raise

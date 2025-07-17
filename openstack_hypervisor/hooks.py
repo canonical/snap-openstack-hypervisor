@@ -1648,17 +1648,11 @@ def configure(snap: Snap) -> None:
     _setup_secrets(snap)
     _detect_compute_flavors(snap)
 
-    cpu_shared_set, allocated_cores = _get_cpu_pinning_context(snap)
-    context = _get_configure_context(snap, cpu_shared_set, allocated_cores)
+    context = _get_configure_context(snap)
     exclude_services = _get_exclude_services(context)
     services = snap.services.list()
     for service in exclude_services:
         services[service].stop()
-
-    physical_device_mappings = _determine_sriov_device_mappings()
-    _set_config_context(
-        context, "network", "sriov_nic_physical_device_mappings", physical_device_mappings
-    )
 
     _set_pci_context(context)
 
@@ -1672,22 +1666,23 @@ def configure(snap: Snap) -> None:
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
     _configure_masakari_services(snap)
-    _configure_sriov_agent_service(snap, bool(physical_device_mappings))
+    _configure_sriov_agent_service(
+        snap, bool(context.get("network", {}).get("sriov_nic_physical_device_mappings"))
+    )
 
 
-def _get_cpu_pinning_context(snap: Snap) -> tuple[str, str]:
+def _get_configure_context(snap: Snap) -> dict:
     try:
-        return get_cpu_pinning_from_socket(service_name=snap.name, cores_requested=0)
+        cpu_shared_set, allocated_cores = get_cpu_pinning_from_socket(
+            service_name=snap.name, cores_requested=0
+        )
     except (SocketCommunicationError, EPAOrchestratorError) as e:
         if "No Isolated CPUs configured" in str(e):
             logging.info("No Isolated CPUs configured, continuing without CPU pinning.")
-            return "", ""
+            cpu_shared_set, allocated_cores = "", ""
         else:
             logging.warning(f"Failed to get CPU pinning info from EPA orchestrator: {e}")
-            raise
-
-
-def _get_configure_context(snap: Snap, cpu_shared_set: str, allocated_cores: str) -> dict:
+            cpu_shared_set, allocated_cores = "", ""
     context = snap.config.get_options(
         "compute",
         "network",
@@ -1704,6 +1699,10 @@ def _get_configure_context(snap: Snap, cpu_shared_set: str, allocated_cores: str
     ).as_dict()
     context["compute"]["allocated_cores"] = allocated_cores
     context["compute"]["cpu_shared_set"] = cpu_shared_set
+    physical_device_mappings = _determine_sriov_device_mappings()
+    if "network" not in context:
+        context["network"] = {}
+    context["network"]["sriov_nic_physical_device_mappings"] = physical_device_mappings
     context.update(
         {
             "snap_common": str(snap.paths.common),

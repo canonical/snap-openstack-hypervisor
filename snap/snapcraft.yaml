@@ -1,12 +1,12 @@
 name: openstack-hypervisor
-version: '2025.1'
+version: "2025.1"
 base: core24
 summary: OpenStack Hypervisor
 description: |
   The OpenStack Hypervisor snap provides the requires components
   to operate a cloud hypervisor as part of an OpenStack deployment.
 assumes:
-- snapd2.68
+  - snapd2.68
 grade: stable
 confinement: strict
 environment:
@@ -103,7 +103,6 @@ apps:
       - block-devices
       - microstack-support
       - system-observe
-      - epa-info
     # Make sure KillMode=process is set in the resulting systemd unit instead of
     # the default KillMode=control-group to avoid the situation where stopping
     # libvirtd causes the forced power off scenario for all VMs; it also affects
@@ -223,7 +222,7 @@ apps:
       - microstack-support
 
   nova-compute:
-    command: 'bin/nova-compute-service'
+    command: "bin/nova-compute-service"
     after: [libvirtd]
     daemon: simple
     plugs:
@@ -238,7 +237,7 @@ apps:
       - block-devices
 
   neutron-ovn-metadata-agent:
-    command: 'bin/neutron-ovn-metadata-agent-service'
+    command: "bin/neutron-ovn-metadata-agent-service"
     daemon: simple
     plugs:
       - network
@@ -248,7 +247,7 @@ apps:
       - microstack-support
 
   neutron-sriov-nic-agent:
-    command: 'bin/neutron-sriov-nic-agent-service'
+    command: "bin/neutron-sriov-nic-agent-service"
     daemon: simple
     plugs:
       - network
@@ -259,7 +258,7 @@ apps:
       - microstack-support
 
   nova-api-metadata:
-    command: 'bin/nova-api-metadata-service'
+    command: "bin/nova-api-metadata-service"
     daemon: simple
     plugs:
       - network
@@ -268,7 +267,7 @@ apps:
       - microstack-support
 
   ceilometer-compute-agent:
-    command: 'bin/ceilometer-compute-agent-service'
+    command: "bin/ceilometer-compute-agent-service"
     after: [libvirtd]
     daemon: simple
     plugs:
@@ -278,7 +277,7 @@ apps:
       - microstack-support
 
   masakari-instancemonitor:
-    command: 'bin/masakari-instancemonitor-service'
+    command: "bin/masakari-instancemonitor-service"
     after: [libvirtd]
     daemon: simple
     plugs:
@@ -288,7 +287,7 @@ apps:
       - microstack-support
 
   pre-evacuation-setup:
-    command: 'bin/pre-evacuation-setup-service'
+    command: "bin/pre-evacuation-setup-service"
     after: [libvirtd]
     daemon: simple
     plugs:
@@ -301,13 +300,13 @@ apps:
     daemon: simple
     install-mode: disable
     restart-condition: on-abnormal
-    command: 'bin/libvirt-exporter --web.listen-address :9177 --web.telemetry-path /metrics --libvirt.uri qemu:///system'
+    command: "bin/libvirt-exporter --web.listen-address :9177 --web.telemetry-path /metrics --libvirt.uri qemu:///system"
     plugs:
       - libvirt
       - network-bind
 
   ovs-exporter:
-    command: 'bin/ovs-exporter-service'
+    command: "bin/ovs-exporter-service"
     plugs:
       - network-bind
     daemon: simple
@@ -317,8 +316,8 @@ parts:
   kvm-support:
     plugin: nil
     stage-packages:
-    - on amd64:
-      - msr-tools
+      - on amd64:
+          - msr-tools
 
   ovs-exporter:
     plugin: go
@@ -366,12 +365,12 @@ parts:
       - ipxe-qemu
       # UEFI Support, required on arm64
       - on arm64:
-        - qemu-efi-aarch64
-        - qemu-efi-arm
-        - libspice-server1
+          - qemu-efi-aarch64
+          - qemu-efi-arm
+          - libspice-server1
       - on amd64:
-        - ovmf
-        - libspice-server1
+          - ovmf
+          - libspice-server1
       - libglut3.12 # provides libglut.so.3
       - libnuma1
       - libasound2t64
@@ -456,13 +455,13 @@ parts:
       - libjpeg-dev
       - libpng-dev
       - on amd64:
-        - libspice-server-dev
-        - libpmem-dev
-        - acpica-tools
+          - libspice-server-dev
+          - libpmem-dev
+          - acpica-tools
       - on arm64:
-        - libspice-server-dev
-        - libpmem-dev
-        - acpica-tools
+          - libspice-server-dev
+          - libpmem-dev
+          - acpica-tools
       - nettle-dev
       - gcc
       - meson
@@ -497,103 +496,103 @@ parts:
       - qemu
     plugin: meson
     build-packages:
-    - libxml2-dev
-    - libxml-libxml-perl
-    - libcurl4-gnutls-dev
-    - libncurses-dev
-    - libreadline-dev
-    - zlib1g-dev
-    - libgcrypt20-dev
-    - libgnutls28-dev
-    - libyajl-dev
-    - libpcap0.8-dev
-    - libaudit-dev
-    - libdevmapper-dev
-    - libpciaccess-dev
-    - libnl-3-dev
-    - libnl-route-3-dev
-    - libtirpc-dev
-    - libxml2-utils
-    - uuid-dev
-    - libnuma-dev
-    - python3-all
-    - python3-six
-    - wget
-    - dpkg-dev
-    - xsltproc
-    - libapparmor-dev
-    - rsync
-    - open-iscsi
-    - python3-docutils
-    - gettext
-    - meson
-    - ninja-build
+      - libxml2-dev
+      - libxml-libxml-perl
+      - libcurl4-gnutls-dev
+      - libncurses-dev
+      - libreadline-dev
+      - zlib1g-dev
+      - libgcrypt20-dev
+      - libgnutls28-dev
+      - libyajl-dev
+      - libpcap0.8-dev
+      - libaudit-dev
+      - libdevmapper-dev
+      - libpciaccess-dev
+      - libnl-3-dev
+      - libnl-route-3-dev
+      - libtirpc-dev
+      - libxml2-utils
+      - uuid-dev
+      - libnuma-dev
+      - python3-all
+      - python3-six
+      - wget
+      - dpkg-dev
+      - xsltproc
+      - libapparmor-dev
+      - rsync
+      - open-iscsi
+      - python3-docutils
+      - gettext
+      - meson
+      - ninja-build
     stage-packages:
-    - on amd64:
-      - dmidecode
-    - on arm64:
-      - dmidecode
-    - dnsmasq
-    - iptables
-    - genisoimage
-    - libxml2
-    - libyajl2
-    - libnuma1
-    - libcurl3-gnutls
-    - libpcap0.8
-    - libpciaccess0
-    # libvirt uses the pm-is-supported tool.
-    - pm-utils
-    - ebtables
-    - apparmor
-    - libapparmor1
+      - on amd64:
+          - dmidecode
+      - on arm64:
+          - dmidecode
+      - dnsmasq
+      - iptables
+      - genisoimage
+      - libxml2
+      - libyajl2
+      - libnuma1
+      - libcurl3-gnutls
+      - libpcap0.8
+      - libpciaccess0
+      # libvirt uses the pm-is-supported tool.
+      - pm-utils
+      - ebtables
+      - apparmor
+      - libapparmor1
     meson-parameters:
-    # Hypervisors
-    - -Ddriver_qemu=enabled
-    - -Ddriver_libvirtd=enabled
-    - -Ddriver_remote=enabled
-    - -Ddriver_ch=disabled
-    - -Ddriver_bhyve=disabled
-    - -Ddriver_openvz=disabled
-    - -Ddriver_vmware=disabled
-    - -Ddriver_esx=disabled
-    - -Ddriver_hyperv=disabled
-    - -Ddriver_lxc=disabled
-    - -Ddriver_vz=disabled
-    - -Ddriver_vbox=disabled
-    # QEMU options
-    - -Dqemu_user=root
-    - -Dqemu_group=root
-    # Security Features
-    - -Dsasl=disabled
-    - -Dselinux=disabled
-    - -Dsecdriver_selinux=disabled
-    - -Dapparmor=disabled
-    - -Dapparmor_profiles=disabled
-    - -Dsecdriver_apparmor=disabled
-    # Storage Drivers
-    - -Dstorage_iscsi=enabled
-    - -Dstorage_rbd=enabled
-    - -Dstorage_lvm=disabled
-    - -Dstorage_vstorage=disabled
-    - -Dstorage_zfs=disabled
-    - -Dstorage_scsi=disabled
-    - -Dglusterfs=disabled
-    # General
-    - -Ddocs=disabled
-    - -Dbuildtype=release
-    - -Dstrip=true
-    - -Dtests=disabled
-    # Installation
-    - -Dchrdev_lock_files=/run/lock
-    - -Dprefix=/snap/$CRAFT_PROJECT_NAME/current/usr
-    - -Dbindir=/snap/$CRAFT_PROJECT_NAME/current/usr/bin
-    - -Dsbindir=/snap/$CRAFT_PROJECT_NAME/current/usr/sbin
-    - -Dlibexecdir=/snap/$CRAFT_PROJECT_NAME/current/usr/libexec
-    - -Dlibdir=/snap/$CRAFT_PROJECT_NAME/current/usr/lib
-    - -Dincludedir=/snap/$CRAFT_PROJECT_NAME/current/usr/include
-    - -Dlocalstatedir=/var/snap/$CRAFT_PROJECT_NAME/common
-    - -Dsysconfdir=/var/snap/$CRAFT_PROJECT_NAME/common/etc
+      # Hypervisors
+      - -Ddriver_qemu=enabled
+      - -Ddriver_libvirtd=enabled
+      - -Ddriver_remote=enabled
+      - -Ddriver_ch=disabled
+      - -Ddriver_bhyve=disabled
+      - -Ddriver_openvz=disabled
+      - -Ddriver_vmware=disabled
+      - -Ddriver_esx=disabled
+      - -Ddriver_hyperv=disabled
+      - -Ddriver_lxc=disabled
+      - -Ddriver_vz=disabled
+      - -Ddriver_vbox=disabled
+      # QEMU options
+      - -Dqemu_user=root
+      - -Dqemu_group=root
+      # Security Features
+      - -Dsasl=disabled
+      - -Dselinux=disabled
+      - -Dsecdriver_selinux=disabled
+      - -Dapparmor=disabled
+      - -Dapparmor_profiles=disabled
+      - -Dsecdriver_apparmor=disabled
+      # Storage Drivers
+      - -Dstorage_iscsi=enabled
+      - -Dstorage_rbd=enabled
+      - -Dstorage_lvm=disabled
+      - -Dstorage_vstorage=disabled
+      - -Dstorage_zfs=disabled
+      - -Dstorage_scsi=disabled
+      - -Dglusterfs=disabled
+      # General
+      - -Ddocs=disabled
+      - -Dbuildtype=release
+      - -Dstrip=true
+      - -Dtests=disabled
+      # Installation
+      - -Dchrdev_lock_files=/run/lock
+      - -Dprefix=/snap/$CRAFT_PROJECT_NAME/current/usr
+      - -Dbindir=/snap/$CRAFT_PROJECT_NAME/current/usr/bin
+      - -Dsbindir=/snap/$CRAFT_PROJECT_NAME/current/usr/sbin
+      - -Dlibexecdir=/snap/$CRAFT_PROJECT_NAME/current/usr/libexec
+      - -Dlibdir=/snap/$CRAFT_PROJECT_NAME/current/usr/lib
+      - -Dincludedir=/snap/$CRAFT_PROJECT_NAME/current/usr/include
+      - -Dlocalstatedir=/var/snap/$CRAFT_PROJECT_NAME/common
+      - -Dsysconfdir=/var/snap/$CRAFT_PROJECT_NAME/common/etc
     override-build: |
       dpkg-source --before-build $CRAFT_PART_SRC
       echo "
@@ -633,22 +632,22 @@ parts:
     source: templates/
     plugin: dump
     organize:
-      '*': templates/
+      "*": templates/
 
   bin:
     source: bin/
     plugin: dump
     organize:
-      '*': bin/
+      "*": bin/
 
   networking:
     plugin: nil
     stage-packages:
       - openvswitch-switch
       - on amd64:
-        - openvswitch-switch-dpdk
+          - openvswitch-switch-dpdk
       - on arm64:
-        - openvswitch-switch-dpdk
+          - openvswitch-switch-dpdk
       - ovn-host
     override-build: |
       craftctl default
@@ -715,7 +714,6 @@ parts:
       uv export --frozen --no-hashes --format=requirements-txt -o requirements.txt
       craftctl default
       snap-helpers write-hooks
-    
 
   libvirt-exporter:
     plugin: go
@@ -747,7 +745,7 @@ slots:
 
 hooks:
   install:
-    plugs: [ network, microstack-support]
+    plugs: [network, microstack-support]
   configure:
     plugs:
       - network
