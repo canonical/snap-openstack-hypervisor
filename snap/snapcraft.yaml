@@ -91,6 +91,7 @@ apps:
       - hardware-observe
       - hugepages-control
       - kvm
+      - kernel-module-control
       - kernel-module-observe
       - process-control
       - mount-observe
