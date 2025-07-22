@@ -303,8 +303,8 @@ def to_output_schema(nics: list[Interface]) -> NicList:  # noqa: C901
 
                 pci_spec = devspec.PciDeviceSpec(spec_dict)
                 dev = {
-                    "vendor_id": out.vendor_id.lstrip("0x"),
-                    "product_id": out.product_id.lstrip("0x"),
+                    "vendor_id": out.vendor_id.replace("0x", ""),
+                    "product_id": out.product_id.replace("0x", ""),
                     "address": out.pci_address,
                     "parent_addr": out.pf_pci_address,
                 }

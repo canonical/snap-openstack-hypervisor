@@ -1593,6 +1593,53 @@ def _determine_sriov_device_mappings() -> str:
     return mappings_str
 
 
+def process_whitelisted_sriov_pfs(pci_device_specs: list[dict], excluded_devices: list[str]):
+    """Replace whitelisted PFs with their corresponding VFs."""
+    logging.info("Processing SR-IOV whitelist, replacing PFs with VFs")
+    nics = interfaces.get_nics().root
+    # The following dict contains a list of VFs for each whitelisted PF address.
+    whitelisted_pfs = {}
+
+    # Get whitelisted PFs.
+    for nic in nics:
+        if nic.pci_whitelisted and nic.sriov_available and nic.pci_address:
+            logging.info("whitelisted PF: %s", nic.name)
+            whitelisted_pfs[nic.pci_address] = {
+                "physnet": nic.pci_physnet,
+                "vfs": [],
+            }
+
+    # Get VFs to whitelist.
+    for nic in nics:
+        if not nic.pf_pci_address:
+            logging.info("nic %s: no parent PF address", nic.name)
+            continue
+
+        if nic.pf_pci_address in whitelisted_pfs:
+            whitelisted_pfs[nic.pf_pci_address]["vfs"].append(nic)
+
+    for pf_addr in whitelisted_pfs:
+        physnet = whitelisted_pfs[pf_addr]["physnet"]
+        vfs = whitelisted_pfs[pf_addr]["vfs"]
+        if not vfs:
+            logging.info("whitelisted PF contains no VFs, leaving as-is: %s", pf_addr)
+            continue
+
+        logging.info("excluding PF %s and whitelisting its vfs", pf_addr)
+        excluded_devices.append(pf_addr)
+
+        for vf in vfs:
+            logging.info("whitelisting VF: %s, physnet: %s", vf.name, physnet)
+            pci_device_specs.append(
+                {
+                    "address": vf.pci_address,
+                    "vendor_id": vf.vendor_id.replace("0x", ""),
+                    "product_id": vf.product_id.replace("0x", ""),
+                    "physical_network": physnet,
+                }
+            )
+
+
 def _configure_sriov_agent_service(snap: Snap, enabled: bool) -> None:
     sriov_service = snap.services.list()["neutron-sriov-nic-agent"]
     if enabled:
@@ -1687,6 +1734,12 @@ def configure(snap: Snap) -> None:
     if isinstance(pci_excluded_devices, str):
         pci_excluded_devices = json.loads(pci_excluded_devices) or []
 
+    # Replace whitelisted PFs with its VFs. The Sunbeam interactive menu lets users pick
+    # individual PFs, however Nova no longer allows a PF *and* its VFs to be whitelisted:
+    # https://github.com/openstack/nova/blob/2010536d12b684a425ff00068da4317b4efd4951/doc/source/admin/pci-passthrough.rst?plain=1#L58-L61
+    # At the same time, Nova picks child VFs implicitly only when specifying a PF by name
+    # (deprecated) or PCI address but not when the vendor/product id is passed.
+    process_whitelisted_sriov_pfs(pci_device_specs, pci_excluded_devices)
     pci_device_specs = pci.apply_exclusion_list(pci_device_specs, pci_excluded_devices)
 
     _set_config_context(context, "compute", "pci_device_specs", _to_json_list(pci_device_specs))
