@@ -133,8 +133,8 @@ def apply_exclusion_list(pci_device_specs: list[dict], excluded_devices: list[st
         for device in all_pci_devices:
             match = pci_spec.match(
                 {
-                    "vendor_id": device["vendor_id"].lstrip("0x"),
-                    "product_id": device["product_id"].lstrip("0x"),
+                    "vendor_id": device["vendor_id"].replace("0x", ""),
+                    "product_id": device["product_id"].replace("0x", ""),
                     "address": device["address"],
                     "parent_addr": device["physfn_address"],
                 }
