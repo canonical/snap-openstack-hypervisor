@@ -35,6 +35,11 @@ from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import pci
 from openstack_hypervisor.cli import interfaces
+from openstack_hypervisor.cli.common import (
+    EPAOrchestratorError,
+    SocketCommunicationError,
+    get_cpu_pinning_from_socket,
+)
 from openstack_hypervisor.log import setup_logging
 
 UNSET = ""
@@ -1690,6 +1695,41 @@ def configure(snap: Snap) -> None:
     _setup_secrets(snap)
     _detect_compute_flavors(snap)
 
+    context = _get_configure_context(snap)
+    exclude_services = _get_exclude_services(context)
+    services = snap.services.list()
+    for service in exclude_services:
+        services[service].stop()
+
+    _set_pci_context(context)
+
+    with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
+        _render_templates(snap, context)
+        _configure_tls(snap)
+
+    _configure_ovn_base(snap)
+    _configure_ovn_external_networking(snap)
+    _configure_kvm(snap)
+    _configure_monitoring_services(snap)
+    _configure_ceph(snap)
+    _configure_masakari_services(snap)
+    _configure_sriov_agent_service(
+        snap, bool(context.get("network", {}).get("sriov_nic_physical_device_mappings"))
+    )
+
+
+def _get_configure_context(snap: Snap) -> dict:
+    try:
+        cpu_shared_set, allocated_cores = get_cpu_pinning_from_socket(
+            service_name=snap.name, cores_requested=0
+        )
+    except (SocketCommunicationError, EPAOrchestratorError) as e:
+        if "No Isolated CPUs configured" in str(e):
+            logging.info("No Isolated CPUs configured, continuing without CPU pinning.")
+            cpu_shared_set, allocated_cores = "", ""
+        else:
+            logging.warning(f"Failed to get CPU pinning info from EPA orchestrator: {e}")
+            cpu_shared_set, allocated_cores = "", ""
     context = snap.config.get_options(
         "compute",
         "network",
@@ -1704,8 +1744,12 @@ def configure(snap: Snap) -> None:
         "masakari",
         "sev",
     ).as_dict()
-
-    # Add some general snap path information
+    context["compute"]["allocated_cores"] = allocated_cores
+    context["compute"]["cpu_shared_set"] = cpu_shared_set
+    physical_device_mappings = _determine_sriov_device_mappings()
+    if "network" not in context:
+        context["network"] = {}
+    context["network"]["sriov_nic_physical_device_mappings"] = physical_device_mappings
     context.update(
         {
             "snap_common": str(snap.paths.common),
@@ -1715,18 +1759,17 @@ def configure(snap: Snap) -> None:
     )
     context = _context_compat(context)
     logging.info(context)
+    return context
+
+
+def _get_exclude_services(context: dict) -> list:
     exclude_services = _services_not_ready(context)
     exclude_services.extend(_services_not_enabled_by_config(context))
     logging.warning(f"{exclude_services} are missing required config, stopping")
-    services = snap.services.list()
-    for service in exclude_services:
-        services[service].stop()
+    return exclude_services
 
-    physical_device_mappings = _determine_sriov_device_mappings()
-    _set_config_context(
-        context, "network", "sriov_nic_physical_device_mappings", physical_device_mappings
-    )
 
+def _set_pci_context(context: dict) -> None:
     pci_device_specs = context.get("compute", {}).get("pci_device_specs")
     pci_excluded_devices = context.get("compute", {}).get("pci_excluded_devices")
     if isinstance(pci_device_specs, str):
@@ -1741,36 +1784,26 @@ def configure(snap: Snap) -> None:
     # (deprecated) or PCI address but not when the vendor/product id is passed.
     process_whitelisted_sriov_pfs(pci_device_specs, pci_excluded_devices)
     pci_device_specs = pci.apply_exclusion_list(pci_device_specs, pci_excluded_devices)
-
     _set_config_context(context, "compute", "pci_device_specs", _to_json_list(pci_device_specs))
-
     pci_aliases = context.get("compute", {}).get("pci_aliases")
     _set_config_context(context, "compute", "pci_aliases", _to_json_list(pci_aliases))
 
-    with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
-        for config_file, template in TEMPLATES.items():
-            tpl_name = template.get("template")
-            if tpl_name is None:
-                continue
-            template = _get_template(snap, tpl_name)
-            config_file = snap.paths.common / config_file
-            logging.info(f"Rendering {config_file}")
-            try:
-                output = template.render(context)
-                config_file.write_text(output)
-                config_file.chmod(DEFAULT_PERMS)
-            except Exception:  # noqa
-                logging.exception(
-                    "An error occurred when attempting to render the configuration file: %s",
-                    config_file,
-                )
-                raise
-        _configure_tls(snap)
 
-    _configure_ovn_base(snap)
-    _configure_ovn_external_networking(snap)
-    _configure_kvm(snap)
-    _configure_monitoring_services(snap)
-    _configure_ceph(snap)
-    _configure_masakari_services(snap)
-    _configure_sriov_agent_service(snap, bool(physical_device_mappings))
+def _render_templates(snap: Snap, context: dict) -> None:
+    for config_file, template in TEMPLATES.items():
+        tpl_name = template.get("template")
+        if tpl_name is None:
+            continue
+        template = _get_template(snap, tpl_name)
+        config_file = snap.paths.common / config_file
+        logging.info(f"Rendering {config_file}")
+        try:
+            output = template.render(context)
+            config_file.write_text(output)
+            config_file.chmod(DEFAULT_PERMS)
+        except Exception:  # noqa
+            logging.exception(
+                "An error occurred when attempting to render the configuration file: %s",
+                config_file,
+            )
+            raise

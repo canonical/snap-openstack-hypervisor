@@ -53,6 +53,19 @@ live_migration_scheme = tls
 live_migration_inbound_addr = {{ compute.migration_address }}
 {% endif -%}
 
+# The following [compute] section controls CPU pinning for dedicated and shared vCPUs.
+# Setting cpu_dedicated_set and cpu_shared_set determines which host CPUs are used for
+# dedicated (pinned) and shared (overcommitted) vCPUs, respectively. This also affects
+# how emulator threads (such as QEMU I/O threads) are placed: by default, emulator threads
+# are placed on the shared set, but this can be customized in Nova. For more details on
+# emulator thread pinning policies and their impact, see:
+# https://docs.openstack.org/nova/latest/admin/cpu-topologies.html#customizing-instance-emulator-thread-pinning-policy
+{% if compute.allocated_cores and compute.cpu_shared_set -%}
+[compute]
+cpu_dedicated_set = {{ compute.allocated_cores }}
+cpu_shared_set = {{ compute.cpu_shared_set }}
+{% endif %}
+
 {% if compute.rbd_secret_uuid -%}
 rbd_user = {{ compute.rbd_user }}
 rbd_secret_uuid = {{ compute.rbd_secret_uuid }}
