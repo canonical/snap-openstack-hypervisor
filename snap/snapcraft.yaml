@@ -754,8 +754,15 @@ hooks:
       - firewall-control
       - microstack-support
       - kvm
+      - epa-info
   connect-slot-hypervisor-config:
     plugs:
       - network
       - network-bind
       - microstack-support
+
+plugs:
+  epa-info:
+    interface: content
+    content: epa-info
+    target: $SNAP_DATA
