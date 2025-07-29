@@ -30,41 +30,56 @@ logger = logging.getLogger(__name__)
 class InterfaceOutput(pydantic.BaseModel):
     """Output schema for an interface."""
 
-    name: str = pydantic.Field(description="Main name of the interface")
+    name: str = pydantic.Field(description="Main name of the interface", default="")
     configured: bool = pydantic.Field(
-        description="Whether the interface has an IP address configured"
+        description="Whether the interface has an IP address configured",
+        default=False,
     )
-    up: bool = pydantic.Field(description="Whether the interface is up")
-    connected: bool = pydantic.Field(description="Whether the interface is connected")
+    up: bool = pydantic.Field(description="Whether the interface is up", default=False)
+    connected: bool = pydantic.Field(
+        description="Whether the interface is connected", default=False
+    )
 
-    sriov_available: bool = pydantic.Field(description="Whether SR-IOV is supported")
-    sriov_totalvfs: int = pydantic.Field(description="Total number of SR-IOV VFs")
-    sriov_numvfs: int = pydantic.Field(description="Number of enabled SR-IOV VFs")
-    hw_offload_available: bool = pydantic.Field(
-        description="Whether switchdev hardware offload is supported"
+    sriov_available: bool = pydantic.Field(
+        description="Whether SR-IOV is supported", default=False
     )
-    pci_address: str = pydantic.Field(description="The PCI address of the interface")
+    sriov_totalvfs: int = pydantic.Field(description="Total number of SR-IOV VFs", default=0)
+    sriov_numvfs: int = pydantic.Field(description="Number of enabled SR-IOV VFs", default=0)
+    hw_offload_available: bool = pydantic.Field(
+        description="Whether switchdev hardware offload is supported",
+        default=False,
+    )
+    pci_address: str = pydantic.Field(description="The PCI address of the interface", default="")
     # We're using "product" instead of "device" to stay consistent with the Openstack naming.
-    product_id: str = pydantic.Field(description="The PCI device id of the interface")
-    vendor_id: str = pydantic.Field(description="The PCI vendor id of the interface")
+    product_id: str = pydantic.Field(description="The PCI device id of the interface", default="")
+    vendor_id: str = pydantic.Field(description="The PCI vendor id of the interface", default="")
 
     # Human readable PCI names
-    class_name: str = pydantic.Field(description="The PCI class name of the interface")
-    vendor_name: str = pydantic.Field(description="The PCI vendor name of the interface")
-    product_name: str = pydantic.Field(description="The PCI product name of the interface")
+    class_name: str = pydantic.Field(description="The PCI class name of the interface", default="")
+    vendor_name: str = pydantic.Field(
+        description="The PCI vendor name of the interface", default=""
+    )
+    product_name: str = pydantic.Field(
+        description="The PCI product name of the interface", default=""
+    )
     subsystem_vendor_name: str = pydantic.Field(
-        description="The PCI subsystem vendor name of the interface"
+        description="The PCI subsystem vendor name of the interface", default=""
     )
     subsystem_product_name: str = pydantic.Field(
-        description="The PCI subsystem device name of the interface"
+        description="The PCI subsystem device name of the interface",
+        default="",
     )
 
-    pf_pci_address: str = pydantic.Field(description="The PF PCI address of a given SR-IOV VF")
-    pci_whitelisted: bool = pydantic.Field(
-        description="Whether Nova is configured to expose this PCI device."
+    pf_pci_address: str = pydantic.Field(
+        description="The PF PCI address of a given SR-IOV VF", default=""
     )
-    pci_physnet: str = pydantic.Field(
-        description="The Neutron physical network associated with this PCI device."
+    pci_whitelisted: bool = pydantic.Field(
+        description="Whether Nova is configured to expose this PCI device.",
+        default="",
+    )
+    pci_physnet: str | None = pydantic.Field(
+        description="The Neutron physical network associated with this PCI device.",
+        default=None,
     )
 
 
@@ -129,18 +144,6 @@ def get_pci_address(ifname: str) -> str:
     return parts[-1]
 
 
-def is_sriov_capable(ifname: str) -> bool:
-    """Determine whether a device is SR-IOV capable.
-
-    :param: ifname: interface name
-    :type: str
-    :returns: whether device is SR-IOV capable or not
-    :rtype: bool
-    """
-    sriov_totalvfs_file = f"/sys/class/net/{ifname}/device/sriov_totalvfs"
-    return os.path.exists(sriov_totalvfs_file)
-
-
 def is_hw_offload_available(ifname: str) -> bool:
     """Determine whether a devices supports switchdev hardware offload.
 
@@ -159,34 +162,6 @@ def is_hw_offload_available(ifname: str) -> bool:
             return phys_port_name != ""
     except (OSError, IOError):
         return False
-
-
-def get_sriov_totalvfs(ifname: str) -> int:
-    """Read total VF capacity for a device.
-
-    :param: ifname: interface name
-    :type: str
-    :returns: number of VF's the device supports
-    :rtype: int
-    """
-    sriov_totalvfs_file = f"/sys/class/net/{ifname}/device/sriov_totalvfs"
-    with open(sriov_totalvfs_file, "r") as f:
-        read_data = f.read()
-    return int(read_data.strip())
-
-
-def get_sriov_numvfs(ifname: str) -> int:
-    """Read configured VF capacity for a device.
-
-    :param: ifname: interface name
-    :type: str
-    :returns: number of VF's the device is configured with
-    :rtype: int
-    """
-    sriov_numvfs_file = f"/sys/class/net/{ifname}/device/sriov_numvfs"
-    with open(sriov_numvfs_file, "r") as f:
-        read_data = f.read()
-    return int(read_data.strip())
 
 
 def filter_candidate_nics(nics: Iterable[Interface]) -> list[str]:
@@ -246,73 +221,106 @@ def _get_pci_spec_cfg():
     return pci.apply_exclusion_list(pci_spec_cfg, pci_excluded_devices)
 
 
+def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
+    if not pci_address:
+        return {}
+
+    # Human readable PCI names.
+    pci_description = {}
+    try:
+        pci_description = pci.get_pci_description(pci_address)
+    except Exception as ex:
+        logger.warning(
+            "Unable to retrieve PCI human readable names: %s, error: %s", pci_address, ex
+        )
+
+    sriov_available = pci.is_sriov_capable(pci_address)
+    if sriov_available:
+        sriov_totalvfs = pci.get_sriov_totalvfs(pci_address)
+        sriov_numvfs = pci.get_sriov_numvfs(pci_address)
+    else:
+        sriov_totalvfs = 0
+        sriov_numvfs = 0
+
+    out = dict(
+        sriov_available=sriov_available,
+        sriov_totalvfs=sriov_totalvfs,
+        sriov_numvfs=sriov_numvfs,
+        pci_address=pci_address,
+        product_id=pci.get_pci_product_id(pci_address),
+        vendor_id=pci.get_pci_vendor_id(pci_address),
+        pf_pci_address=pci.get_physfn_address(pci_address),
+        class_name=pci_description.get("class_name", ""),
+        vendor_name=pci_description.get("vendor_name", ""),
+        product_name=pci_description.get("device_name", ""),
+        subsystem_vendor_name=pci_description.get("subsystem_vendor_name", ""),
+        subsystem_product_name=pci_description.get("subsystem_device_name", ""),
+        pci_physnet=None,
+        pci_whitelisted=False,
+    )
+
+    if pci_address and out["vendor_id"] and out["product_id"]:
+        for spec_dict in pci_spec_cfg:
+            if not isinstance(spec_dict, dict):
+                raise ValueError("Invalid device spec, expecting a dict: %s." % spec_dict)
+
+            pci_spec = devspec.PciDeviceSpec(spec_dict)
+            dev = {
+                "vendor_id": out["vendor_id"].replace("0x", ""),
+                "product_id": out["product_id"].replace("0x", ""),
+                "address": pci_address,
+                "parent_addr": out["pf_pci_address"],
+            }
+            match = pci_spec.match(dev)
+            if match:
+                out["pci_whitelisted"] = True
+                if not out["pci_physnet"]:
+                    out["pci_physnet"] = spec_dict.get("physical_network")
+
+    return out
+
+
 def to_output_schema(nics: list[Interface]) -> NicList:  # noqa: C901
     """Convert the interfaces to the output schema."""
     nics_ = []
 
     pci_spec_cfg = _get_pci_spec_cfg()
+    processed_pci_addresses = []
 
     for nic in nics:
         ifname = nic["ifname"]
-
-        sriov_available = is_sriov_capable(ifname)
-        if sriov_available:
-            sriov_totalvfs = get_sriov_totalvfs(ifname)
-            sriov_numvfs = get_sriov_numvfs(ifname)
-        else:
-            sriov_totalvfs = 0
-            sriov_numvfs = 0
-
         pci_address = get_pci_address(ifname)
-        # Human readable PCI names.
-        pci_description = {}
         if pci_address:
-            try:
-                pci_description = pci.get_pci_description(pci_address)
-            except Exception as ex:
-                logger.warning(
-                    "Unable to retrieve PCI human readable names: %s, error: %s", pci_address, ex
-                )
+            pci_info = _get_nic_pci_info(pci_address, pci_spec_cfg)
+            processed_pci_addresses.append(pci_address)
+        else:
+            pci_info = {}
 
         out = InterfaceOutput(
             name=ifname,
             configured=is_interface_configured(nic),
             up=is_nic_up(nic),
             connected=is_nic_connected(nic),
-            sriov_available=sriov_available,
-            sriov_totalvfs=sriov_totalvfs,
-            sriov_numvfs=sriov_numvfs,
             hw_offload_available=is_hw_offload_available(ifname),
-            pci_address=pci_address,
-            product_id=pci.get_pci_product_id(pci_address),
-            vendor_id=pci.get_pci_vendor_id(pci_address),
-            pf_pci_address=pci.get_physfn_address(pci_address),
-            class_name=pci_description.get("class_name", ""),
-            vendor_name=pci_description.get("vendor_name", ""),
-            product_name=pci_description.get("device_name", ""),
-            subsystem_vendor_name=pci_description.get("subsystem_vendor_name", ""),
-            subsystem_product_name=pci_description.get("subsystem_device_name", ""),
-            pci_physnet="",
-            pci_whitelisted=False,
+            **pci_info,
         )
 
-        if out.pci_address and out.vendor_id and out.product_id:
-            for spec_dict in pci_spec_cfg:
-                if not isinstance(spec_dict, dict):
-                    raise ValueError("Invalid device spec, expecting a dict: %s." % spec_dict)
+        nics_.append(out)
 
-                pci_spec = devspec.PciDeviceSpec(spec_dict)
-                dev = {
-                    "vendor_id": out.vendor_id.lstrip("0x"),
-                    "product_id": out.product_id.lstrip("0x"),
-                    "address": out.pci_address,
-                    "parent_addr": out.pf_pci_address,
-                }
-                match = pci_spec.match(dev)
-                if match:
-                    out.pci_whitelisted = True
-                    if not out.pci_physnet:
-                        out.pci_physnet = spec_dict.get("physical_network")
+    # Look for PCI devices that were not included in this list, for
+    # example PF/VF devices that were already attached to Openstack instances.
+    for pci_device in pci.list_pci_devices():
+        if not pci.is_network_device(pci_device["class"]):
+            continue
+
+        if pci_device["address"] in processed_pci_addresses:
+            continue
+
+        logger.debug(
+            "Adding disconnected PCI network device to the nic list: %s", pci_device["address"]
+        )
+        pci_info = _get_nic_pci_info(pci_device["address"], pci_spec_cfg)
+        out = InterfaceOutput(**pci_info)
         nics_.append(out)
     return NicList(nics_)
 

@@ -29,6 +29,37 @@ def get_pci_vendor_id(address: str) -> str:
         return f.read().strip()
 
 
+def get_pci_class(address: str) -> str:
+    """Determine the PCI class for the specified PCI address."""
+    path = f"/sys/bus/pci/devices/{address}/class"
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r") as f:
+        return f.read().strip()
+
+
+def is_sriov_capable(address: str) -> bool:
+    """Determine whether a device is SR-IOV capable."""
+    path = f"/sys/bus/pci/devices/{address}/sriov_totalvfs"
+    return os.path.exists(path)
+
+
+def get_sriov_totalvfs(address: str) -> int:
+    """Read total VF capacity for a device."""
+    path = f"/sys/bus/pci/devices/{address}/sriov_totalvfs"
+    with open(path, "r") as f:
+        read_data = f.read()
+    return int(read_data.strip())
+
+
+def get_sriov_numvfs(address: str) -> int:
+    """Read configured VF capacity for a device."""
+    path = f"/sys/bus/pci/devices/{address}/sriov_numvfs"
+    with open(path, "r") as f:
+        read_data = f.read()
+    return int(read_data.strip())
+
+
 def get_pci_description(address: str) -> dict:
     """Obtain human readable PCI information.
 
@@ -66,6 +97,15 @@ def get_physfn_address(address: str) -> str:
     return resolved_path.split("/")[-1]
 
 
+def is_network_device(pci_class: str) -> bool:
+    """Specifies whether the PCI class represents a network device."""
+    # PCI class format:
+    #   * class code (8 bytes)
+    #   * subclass code (8 bytes)
+    #   * vendor specific (8 bytes)
+    return pci_class.startswith("0x02")
+
+
 def list_pci_devices() -> list[dict]:
     """Enumerate PCI devices."""
     devices = []
@@ -76,6 +116,7 @@ def list_pci_devices() -> list[dict]:
             "product_id": get_pci_product_id(address),
             "vendor_id": get_pci_vendor_id(address),
             "physfn_address": get_physfn_address(address),
+            "class": get_pci_class(address),
         }
         devices.append(device)
     return devices
@@ -133,8 +174,8 @@ def apply_exclusion_list(pci_device_specs: list[dict], excluded_devices: list[st
         for device in all_pci_devices:
             match = pci_spec.match(
                 {
-                    "vendor_id": device["vendor_id"].lstrip("0x"),
-                    "product_id": device["product_id"].lstrip("0x"),
+                    "vendor_id": device["vendor_id"].replace("0x", ""),
+                    "product_id": device["product_id"].replace("0x", ""),
                     "address": device["address"],
                     "parent_addr": device["physfn_address"],
                 }
