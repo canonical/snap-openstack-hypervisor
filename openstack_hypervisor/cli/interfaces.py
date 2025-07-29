@@ -77,9 +77,9 @@ class InterfaceOutput(pydantic.BaseModel):
         description="Whether Nova is configured to expose this PCI device.",
         default="",
     )
-    pci_physnet: str = pydantic.Field(
+    pci_physnet: str | None = pydantic.Field(
         description="The Neutron physical network associated with this PCI device.",
-        default="",
+        default=None,
     )
 
 
@@ -255,7 +255,7 @@ def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
         product_name=pci_description.get("device_name", ""),
         subsystem_vendor_name=pci_description.get("subsystem_vendor_name", ""),
         subsystem_product_name=pci_description.get("subsystem_device_name", ""),
-        pci_physnet="",
+        pci_physnet=None,
         pci_whitelisted=False,
     )
 
