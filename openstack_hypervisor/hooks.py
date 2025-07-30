@@ -614,7 +614,7 @@ def _delete_iptable_postrouting_rule(comment: str) -> None:
         logging.info(f"Error in deletion of IPtable rule: {e.stderr}")
 
 
-def _configure_ovn_base(snap: Snap) -> None:
+def _configure_ovn_base(snap: Snap, context: dict) -> None:
     """Configure OVS/OVN.
 
     :param snap: the snap reference
@@ -669,6 +669,15 @@ def _configure_ovn_base(snap: Snap) -> None:
     subprocess.check_call(
         ["ovs-vsctl", "--retry", "set", "open", ".", f"external_ids:ovn-remote={sb_conn}"]
     )
+
+    hw_offloading = context.get("network", {}).get("hw_offloading")
+    if hw_offloading:
+        logging.info("Configuring Open vSwitch hardware offloading.")
+        subprocess.check_call(
+            ["ovs-vsctl", "--retry", "set", "open", ".", "other_config:hw-offload=true"]
+        )
+    else:
+        logging.info("No whitelisted SR-IOV devices with hardware offloading.")
 
 
 def _list_bridge_ifaces(bridge_name: str) -> list:
@@ -1553,12 +1562,13 @@ def _should_sriov_agent_manage_nic(nic, physnet=None):
     return True
 
 
-def _determine_sriov_device_mappings() -> str:
-    logging.info("Determining SR-IOV physical device mappings.")
+def _set_sriov_context(context: dict):  # noqa: C901
+    logging.info("Determining SR-IOV configuration.")
     nics = interfaces.get_nics().root
     # Retrieve SR-IOV PFs that have been whitelisted, including
     # those that have whitelisted VFs.
     mappings = []
+    hw_offloading = False
 
     for nic in nics:
         if not nic.pci_whitelisted:
@@ -1567,6 +1577,9 @@ def _determine_sriov_device_mappings() -> str:
         if _should_sriov_agent_manage_nic(nic):
             logging.info("nic %s: PF whitelisted, adding to SR-IOV agent mappings.", nic.name)
             mappings.append(f"{nic.pci_physnet}:{nic.name}")
+        if nic.hw_offload_available:
+            # Whitelisted PF has hardware offloading.
+            hw_offloading = True
 
     # Get PFs containing whitelisted VFs.
     for nic in nics:
@@ -1591,11 +1604,17 @@ def _determine_sriov_device_mappings() -> str:
                     "nic %s: found whiteliested VFs, adding to SR-IOV agent mappings.", nic.name
                 )
                 mappings.append(f"{physnet}:{pf.name}")
+            if pf.hw_offload_available:
+                # Whitelisted VF has hardware offloading.
+                hw_offloading = True
 
     mappings_str = ",".join(list(set(mappings)))
-    logging.info("SR-IOV agent mappings: %s", mappings_str)
+    logging.info("SR-IOV agent mappings: %s, hw offloading: %s", mappings_str, hw_offloading)
 
-    return mappings_str
+    if "network" not in context:
+        context["network"] = {}
+    context["network"]["sriov_nic_physical_device_mappings"] = mappings_str
+    context["network"]["hw_offloading"] = hw_offloading
 
 
 def _configure_sriov_agent_service(snap: Snap, enabled: bool) -> None:
@@ -1654,13 +1673,11 @@ def configure(snap: Snap) -> None:
     for service in exclude_services:
         services[service].stop()
 
-    _set_pci_context(context)
-
     with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         _render_templates(snap, context)
         _configure_tls(snap)
 
-    _configure_ovn_base(snap)
+    _configure_ovn_base(snap, context)
     _configure_ovn_external_networking(snap)
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
@@ -1699,10 +1716,7 @@ def _get_configure_context(snap: Snap) -> dict:
     ).as_dict()
     context["compute"]["allocated_cores"] = allocated_cores
     context["compute"]["cpu_shared_set"] = cpu_shared_set
-    physical_device_mappings = _determine_sriov_device_mappings()
-    if "network" not in context:
-        context["network"] = {}
-    context["network"]["sriov_nic_physical_device_mappings"] = physical_device_mappings
+
     context.update(
         {
             "snap_common": str(snap.paths.common),
@@ -1712,6 +1726,10 @@ def _get_configure_context(snap: Snap) -> dict:
     )
     context = _context_compat(context)
     logging.info(context)
+
+    _set_sriov_context(context)
+    _set_pci_context(context)
+
     return context
 
 
@@ -1723,8 +1741,8 @@ def _get_exclude_services(context: dict) -> list:
 
 
 def _set_pci_context(context: dict) -> None:
-    pci_device_specs = context.get("compute", {}).get("pci_device_specs")
-    pci_excluded_devices = context.get("compute", {}).get("pci_excluded_devices")
+    pci_device_specs = context.get("compute", {}).get("pci_device_specs") or []
+    pci_excluded_devices = context.get("compute", {}).get("pci_excluded_devices") or []
     if isinstance(pci_device_specs, str):
         pci_device_specs = json.loads(pci_device_specs) or []
     if isinstance(pci_excluded_devices, str):
