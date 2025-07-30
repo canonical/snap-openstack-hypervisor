@@ -541,7 +541,7 @@ class TestHooks:
         )
 
     @mock.patch.object(interfaces, "get_nics")
-    def test_determine_sriov_device_mappings(self, mock_get_nics):
+    def test_set_sriov_context(self, mock_get_nics):
         sriov_pf_specs = dict(
             sriov_available=True,
             sriov_numvfs=32,
@@ -612,10 +612,14 @@ class TestHooks:
         ]
         mock_get_nics.return_value = mock.Mock(root=nic_list)
 
-        bridge_mappings = hooks._determine_sriov_device_mappings()
+        context = {}
+        hooks._set_sriov_context(context)
         expected_bridge_mappings = "physnet1:eno4,physnet2:eno5"
 
-        assert sorted(expected_bridge_mappings.split(",")) == sorted(bridge_mappings.split(","))
+        assert sorted(expected_bridge_mappings.split(",")) == sorted(
+            context["network"]["sriov_nic_physical_device_mappings"].split(",")
+        )
+        assert context["network"]["hw_offloading"]
 
 
 @pytest.mark.parametrize(
