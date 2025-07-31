@@ -147,6 +147,30 @@ class TestDevspec:
                 },
                 False,
             ),
+            (
+                {
+                    "address": "0000:1b:10.0",
+                },
+                {
+                    "vendor_id": "8086",
+                    "product_id": "aaff",
+                    "address": "0000:1b:10.6",
+                    "parent_addr": "0000:1b:10.0",
+                },
+                True,
+            ),
+            (
+                {
+                    "address": "0000:1b:10.0",
+                },
+                {
+                    "vendor_id": "8086",
+                    "product_id": "aaff",
+                    "address": "0000:1b:10.6",
+                    "parent_addr": "0000:1b:10.1",
+                },
+                False,
+            ),
         ],
     )
     def test_pci_device_match(self, device_spec: dict, matched_device: dict, expect_match: bool):
