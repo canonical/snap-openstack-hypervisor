@@ -108,9 +108,10 @@ class TestHooks:
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mock_write_text = mocker.patch.object(hooks.Path, "write_text")
         mock_chmod = mocker.patch.object(hooks.Path, "chmod")
-
+        mocker.patch(
+            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket", return_value=("0-3", "4-7")
+        )
         hooks.configure(snap)
-
         mock_template.render.assert_called()
         mock_write_text.assert_called()
         mock_chmod.assert_called()
@@ -121,7 +122,9 @@ class TestHooks:
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mocker.patch.object(hooks.Path, "write_text")
         mocker.patch.object(hooks.Path, "chmod")
-
+        mocker.patch(
+            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket", return_value=("0-3", "4-7")
+        )
         with pytest.raises(FileNotFoundError):
             hooks.configure(snap)
 
@@ -538,7 +541,7 @@ class TestHooks:
         )
 
     @mock.patch.object(interfaces, "get_nics")
-    def test_determine_sriov_device_mappings(self, mock_get_nics):
+    def test_set_sriov_context(self, mock_get_nics):
         sriov_pf_specs = dict(
             sriov_available=True,
             sriov_numvfs=32,
@@ -609,7 +612,77 @@ class TestHooks:
         ]
         mock_get_nics.return_value = mock.Mock(root=nic_list)
 
-        bridge_mappings = hooks._determine_sriov_device_mappings()
+        context = {}
+        hooks._set_sriov_context(context)
         expected_bridge_mappings = "physnet1:eno4,physnet2:eno5"
 
-        assert sorted(expected_bridge_mappings.split(",")) == sorted(bridge_mappings.split(","))
+        assert sorted(expected_bridge_mappings.split(",")) == sorted(
+            context["network"]["sriov_nic_physical_device_mappings"].split(",")
+        )
+        assert context["network"]["hw_offloading"]
+
+
+@pytest.mark.parametrize(
+    "cpu_shared_set,allocated_cores,should_include",
+    [
+        ("0-3", "4-7", True),
+        ("", "", False),
+    ],
+)
+def test_nova_conf_cpu_pinning_injection(
+    mocker, snap, cpu_shared_set, allocated_cores, should_include, check_call, check_output
+):
+    mocker.patch(
+        "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
+        return_value=(cpu_shared_set, allocated_cores),
+    )
+    mock_template = mock.Mock()
+    mocker.patch("openstack_hypervisor.hooks._get_template", return_value=mock_template)
+    mocker.patch("openstack_hypervisor.hooks.Path.write_text")
+    mocker.patch("openstack_hypervisor.hooks.Path.chmod")
+    for fn in [
+        "_configure_ovn_base",
+        "_configure_ovn_external_networking",
+        "_configure_kvm",
+        "_configure_monitoring_services",
+        "_configure_ceph",
+        "_configure_masakari_services",
+        "_configure_sriov_agent_service",
+    ]:
+        mocker.patch(f"openstack_hypervisor.hooks.{fn}")
+
+    class ConfigOptionsDict(dict):
+        def as_dict(self):
+            return dict(self)
+
+    config_dict = {
+        k: {}
+        for k in [
+            "compute",
+            "network",
+            "identity",
+            "logging",
+            "node",
+            "rabbitmq",
+            "credentials",
+            "telemetry",
+            "monitoring",
+            "ca",
+            "masakari",
+            "sev",
+        ]
+    }
+    mocker.patch.object(snap.config, "get_options", return_value=ConfigOptionsDict(config_dict))
+    mocker.patch.object(snap.config, "get", return_value="dummy")
+
+    import openstack_hypervisor.hooks as hooks
+
+    hooks.configure(snap)
+
+    context = mock_template.render.call_args_list[0][0][0]
+    if should_include:
+        assert context["compute"]["allocated_cores"] == allocated_cores
+        assert context["compute"]["cpu_shared_set"] == cpu_shared_set
+    else:
+        assert context["compute"]["allocated_cores"] == ""
+        assert context["compute"]["cpu_shared_set"] == ""
