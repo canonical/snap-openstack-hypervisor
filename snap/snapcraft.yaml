@@ -6,7 +6,7 @@ description: |
   The OpenStack Hypervisor snap provides the requires components
   to operate a cloud hypervisor as part of an OpenStack deployment.
 assumes:
-- snapd2.68
+- snapd2.72
 grade: stable
 confinement: strict
 environment:
