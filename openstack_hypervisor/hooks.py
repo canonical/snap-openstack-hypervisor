@@ -16,6 +16,7 @@ import socket
 import stat
 import string
 import subprocess
+import time
 import uuid
 import xml.etree.ElementTree
 from pathlib import Path
@@ -493,6 +494,23 @@ def _update_default_config(snap: Snap) -> None:
         snap.config.set(missing_options)
 
 
+def _wait_for_interface(interface: str) -> None:
+    """Wait for the interface to be created.
+
+    :param interface: Name of the interface.
+    :type interface: str
+    :return: None
+    """
+    logging.debug(f"Waiting for {interface} to be created")
+    ipr = IPRoute()
+    start = time.monotonic()
+    while not ipr.link_lookup(ifname=interface):
+        if time.monotonic() - start > 30:
+            raise TimeoutError(f"Timed out waiting for {interface} to be created")
+        logging.debug(f"{interface} not found, waiting...")
+        time.sleep(1)
+
+
 def _add_ip_to_interface(interface: str, cidr: str) -> None:
     """Add IP to interface and set link to up.
 
@@ -829,6 +847,7 @@ def _configure_ovn_external_networking(snap: Snap) -> None:
             f"external_ids:ovn-bridge-mappings={physnet_name}:{external_bridge}",
         ]
     )
+    _wait_for_interface(external_bridge)
 
     external_bridge_address = snap.config.get("network.external-bridge-address")
     comment = "openstack-hypervisor external network rule"
