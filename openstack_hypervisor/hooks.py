@@ -329,6 +329,48 @@ REQUIRED_CONFIG = {
 }
 
 
+def start_service(snap: Snap, service_name: str, enable: bool = False) -> None:
+    """Start a service and optionally enable it.
+
+    :param snap: the snap instance
+    :type snap: Snap
+    :param service_name: name of the service to start
+    :type service_name: str
+    :param enable: whether to enable the service after starting it
+    :type enable: bool
+    """
+    services = snap.services.list()
+    if service_name not in services:
+        logging.warning(f"Service {service_name} not found.")
+        return
+
+    svc = services[service_name]
+    svc.refresh_status()
+    if not svc.active or (not svc.enabled and enable):
+        svc.start(enable=enable)
+
+
+def stop_service(snap: Snap, service_name: str, disable: bool = False) -> None:
+    """Stop a service and optionally disable it.
+
+    :param snap: the snap instance
+    :type snap: Snap
+    :param service_name: name of the service to stop
+    :type service_name: str
+    :param disable: whether to disable the service after stopping it
+    :type disable: bool
+    """
+    services = snap.services.list()
+    if service_name not in services:
+        logging.warning(f"Service {service_name} not found.")
+        return
+
+    svc = services[service_name]
+    svc.refresh_status()
+    if svc.active or (svc.enabled and disable):
+        svc.stop(disable=disable)
+
+
 def install(snap: Snap) -> None:
     """Runs the 'install' hook for the snap.
 
@@ -465,11 +507,10 @@ class RestartOnChange(object):
                         restart_services.extend(self.files[file].get("services", []))
 
         restart_services = set([s for s in restart_services if s not in self.exclude_services])
-        services = self.snap.services.list()
         for service in restart_services:
             logging.info(f"Restarting {service}")
-            services[service].stop()
-            services[service].start(enable=True)
+            stop_service(self.snap, service)
+            start_service(self.snap, service, enable=True)
 
 
 def _update_default_config(snap: Snap) -> None:
@@ -1460,16 +1501,15 @@ def _configure_monitoring_services(snap: Snap) -> None:
     :type snap: Snap
     :return: None
     """
-    services = snap.services.list()
     enable_monitoring = snap.config.get("monitoring.enable")
     if enable_monitoring:
         logging.info("Enabling all exporter services.")
         for service in MONITORING_SERVICES:
-            services[service].start(enable=True)
+            start_service(snap, service, enable=True)
     else:
         logging.info("Disabling all exporter services.")
         for service in MONITORING_SERVICES:
-            services[service].stop(disable=True)
+            stop_service(snap, service, disable=True)
 
 
 def _configure_masakari_services(snap: Snap) -> None:
@@ -1479,16 +1519,15 @@ def _configure_masakari_services(snap: Snap) -> None:
     :type snap: Snap
     :return: None
     """
-    services = snap.services.list()
     enable_masakari = snap.config.get("masakari.enable")
     if enable_masakari:
         logging.info("Enabling all masakari services.")
         for service in MASAKARI_SERVICES:
-            services[service].start(enable=True)
+            start_service(snap, service, enable=True)
     else:
         logging.info("Disabling all masakari services.")
         for service in MASAKARI_SERVICES:
-            services[service].stop(disable=True)
+            stop_service(snap, service, disable=True)
 
 
 def services() -> List[str]:
@@ -1687,13 +1726,12 @@ def process_whitelisted_sriov_pfs(
 
 
 def _configure_sriov_agent_service(snap: Snap, enabled: bool) -> None:
-    sriov_service = snap.services.list()["neutron-sriov-nic-agent"]
     if enabled:
         logging.info("SR-IOV mappings detected, enabling SR-IOV agent.")
-        sriov_service.start(enable=True)
+        start_service(snap, "neutron-sriov-nic-agent", enable=True)
     else:
         logging.info("No SR-IOV mappings detected, disabling SR-IOV agent.")
-        sriov_service.stop(disable=True)
+        stop_service(snap, "neutron-sriov-nic-agent", disable=True)
 
 
 def _set_config_context(context, group, key, val):
@@ -1738,9 +1776,8 @@ def configure(snap: Snap) -> None:
 
     context = _get_configure_context(snap)
     exclude_services = _get_exclude_services(context)
-    services = snap.services.list()
     for service in exclude_services:
-        services[service].stop()
+        stop_service(snap, service)
 
     with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         _render_templates(snap, context)
