@@ -1672,7 +1672,8 @@ def _set_sriov_context(snap: Snap, context: dict):  # noqa: C901
 
     if "network" not in context:
         context["network"] = {}
-    context["network"]["sriov_nic_physical_device_mappings"] = mappings_str
+    if mappings_str:
+        context["network"]["sriov_nic_physical_device_mappings"] = mappings_str
     context["network"]["hw_offloading"] = hw_offloading
 
 
