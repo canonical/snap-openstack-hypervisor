@@ -688,3 +688,59 @@ def test_nova_conf_cpu_pinning_injection(
     else:
         assert context["compute"]["allocated_cores"] == ""
         assert context["compute"]["cpu_shared_set"] == ""
+
+
+@pytest.mark.parametrize(
+    "active,enabled,enable,should_start",
+    [
+        (False, False, False, True),  # Not active, not enabled, don't enable: should start
+        (False, False, True, True),  # Not active, not enabled, enable: should start
+        (True, False, True, True),  # Active, not enabled, enable: should start
+        (True, True, False, False),  # Active, enabled, don't enable: should not start
+        (False, True, False, True),  # Not active, enabled, don't enable: should start
+    ],
+)
+def test_start_service_behavior(mocker, active, enabled, enable, should_start):
+    snap = mock.Mock()
+    service_name = "svc"
+    svc_mock = mock.Mock()
+    svc_mock.active = active
+    svc_mock.enabled = enabled
+    snap.services.list.return_value = {service_name: svc_mock}
+
+    hooks.start_service(snap, service_name, enable=enable)
+
+    svc_mock.refresh_status.assert_called_once()
+    if should_start:
+        svc_mock.start.assert_called_once_with(enable=enable)
+    else:
+        svc_mock.start.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "active,enabled,disable,should_stop,should_disable",
+    [
+        (True, False, False, True, False),  # Active, not enabled, don't disable: should stop
+        (True, True, False, True, False),  # Active, enabled, don't disable: should stop
+        (False, True, True, False, True),  # Not active, enabled, disable: should disable
+        (False, False, False, False, False),  # Not active, not enabled, don't disable: no action
+        (False, False, True, False, False),  # Not active, not enabled, disable: no action
+    ],
+)
+def test_stop_service_behavior(mocker, active, enabled, disable, should_stop, should_disable):
+    snap = mock.Mock()
+    service_name = "svc"
+    svc_mock = mock.Mock()
+    svc_mock.active = active
+    svc_mock.enabled = enabled
+    snap.services.list.return_value = {service_name: svc_mock}
+
+    import openstack_hypervisor.hooks as hooks
+
+    hooks.stop_service(snap, service_name, disable=disable)
+
+    svc_mock.refresh_status.assert_called_once()
+    if should_stop or should_disable:
+        svc_mock.stop.assert_called_once_with(disable=disable)
+    else:
+        svc_mock.stop.assert_not_called()
