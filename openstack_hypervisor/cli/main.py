@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import click
+from snaphelpers import Snap
 
 from openstack_hypervisor.cli.hypervisor import hypervisor
 from openstack_hypervisor.cli.interfaces import list_nics
@@ -16,14 +17,14 @@ def cli(verbose: bool):
     """Set of utilities for managing the hypervisor."""
 
 
-def main():
+def main(snap: Snap):
     """Register commands and run the CLI."""
     setup_root_logging()
     cli.add_command(list_nics)
     cli.add_command(hypervisor)
 
-    cli()
+    cli(obj=snap)
 
 
 if __name__ == "__main__":
-    main()
+    main(Snap())
