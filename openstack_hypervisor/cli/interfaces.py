@@ -89,7 +89,15 @@ class NicList(pydantic.RootModel[list[InterfaceOutput]]):
 
 def get_interfaces(ndb) -> list[Interface]:
     """Get all interfaces from the system."""
-    return list(ndb.interfaces.values())
+    interfaces = []
+    iface_view = ndb.interfaces
+    for key in iface_view.keys():
+        try:
+            interfaces.append(iface_view[key])
+        except KeyError:
+            # Happens when interfaces are deleted while we are iterating.
+            logger.debug("Interface %s not found in the NDB view", key)
+    return interfaces
 
 
 def is_link_local(address: str) -> bool:
@@ -200,9 +208,8 @@ def filter_candidate_nics(nics: Iterable[Interface]) -> list[str]:
     return configured_nics
 
 
-def _get_pci_spec_cfg():
-    snap = Snap()
-
+def _get_pci_spec_cfg(snap: Snap):
+    """Get the PCI spec configuration from the snap config."""
     try:
         pci_spec_cfg = snap.config.get("compute.pci-device-specs") or []
         if isinstance(pci_spec_cfg, str):
@@ -280,11 +287,11 @@ def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
     return out
 
 
-def to_output_schema(nics: list[Interface]) -> NicList:  # noqa: C901
+def to_output_schema(snap: Snap, nics: list[Interface]) -> NicList:  # noqa: C901
     """Convert the interfaces to the output schema."""
     nics_ = []
 
-    pci_spec_cfg = _get_pci_spec_cfg()
+    pci_spec_cfg = _get_pci_spec_cfg(snap)
     processed_pci_addresses = []
 
     for nic in nics:
@@ -364,7 +371,8 @@ def display_nics(nics: NicList, candidate_nics: list[str], format: str):
     type=click.Choice([VALUE_FORMAT, TABLE_FORMAT, JSON_FORMAT, JSON_INDENT_FORMAT]),
     help="Output format",
 )
-def list_nics(format: str):
+@click.pass_obj
+def list_nics(snap: Snap, format: str):
     """List nics that are candidates for use by OVN/OVS subsystem.
 
     This nic will be used by OVS to provide external connectivity to the VMs.
@@ -379,13 +387,13 @@ def list_nics(format: str):
     with pyroute2.NDB() as ndb:
         nics = get_interfaces(ndb)
         candidate_nics = filter_candidate_nics(nics)
-        nics_ = to_output_schema(nics)
+        nics_ = to_output_schema(snap, nics)
     display_nics(nics_, candidate_nics, format)
 
 
-def get_nics() -> NicList:
+def get_nics(snap: Snap) -> NicList:
     """List nics that are candidates for use by OVN/OVS subsystem."""
     # TODO: consider moving out reusable functions.
     with pyroute2.NDB() as ndb:
         nics = get_interfaces(ndb)
-        return to_output_schema(nics)
+        return to_output_schema(snap, nics)
