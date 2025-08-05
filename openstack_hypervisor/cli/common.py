@@ -3,12 +3,12 @@
 
 import json
 import logging
-import os
 import socket as pysocket
 from typing import TypeVar, Union
 
 import click
 from pydantic import BaseModel
+from snaphelpers import Snap
 
 from .schemas import (
     ActionType,
@@ -23,7 +23,6 @@ JSON_INDENT_FORMAT = "json-indent"
 TABLE_FORMAT = "table"
 
 SOCKET_FILENAME = "epa.sock"
-SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "data", SOCKET_FILENAME)
 click_option_format = click.option(
     "-f",
     "--format",
@@ -47,10 +46,15 @@ class EPAOrchestratorError(Exception):
     pass
 
 
+def socket_path(snap: Snap) -> str:
+    """Return the path to the socket file."""
+    return str(snap.paths.data / "data" / SOCKET_FILENAME)
+
+
 def _communicate_with_socket(
     request: Union[AllocateCoresRequest, ListAllocationsRequest],
     response_model: type[T],
-    socket_path: str = SOCKET_PATH,
+    socket_path: str,
 ) -> T:
     """Helper function for socket communication with EPA orchestrator.
 
@@ -83,8 +87,8 @@ def _communicate_with_socket(
 
 def get_cpu_pinning_from_socket(
     service_name: str,
+    socket_path: str,
     cores_requested: int = 0,
-    socket_path: str = SOCKET_PATH,
 ) -> tuple[str, str]:
     """Get CPU pinning info from the epa-orchestrator snap via Unix socket.
 
@@ -93,8 +97,8 @@ def get_cpu_pinning_from_socket(
 
     Args:
         service_name: Name of the service requesting CPU allocation
-        cores_requested: Number of dedicated cores requested (0 means default allocation)
         socket_path: Path to the Unix socket for EPA orchestrator communication
+        cores_requested: Number of dedicated cores requested (0 means default allocation)
 
     Returns:
         A tuple containing (shared_cpus, allocated_cores) where both are

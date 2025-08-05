@@ -541,7 +541,7 @@ class TestHooks:
         )
 
     @mock.patch.object(interfaces, "get_nics")
-    def test_set_sriov_context(self, mock_get_nics):
+    def test_set_sriov_context(self, mock_get_nics, snap):
         sriov_pf_specs = dict(
             sriov_available=True,
             sriov_numvfs=32,
@@ -613,7 +613,7 @@ class TestHooks:
         mock_get_nics.return_value = mock.Mock(root=nic_list)
 
         context = {}
-        hooks._set_sriov_context(context)
+        hooks._set_sriov_context(snap, context)
         expected_bridge_mappings = "physnet1:eno4,physnet2:eno5"
 
         assert sorted(expected_bridge_mappings.split(",")) == sorted(
@@ -648,6 +648,8 @@ def test_nova_conf_cpu_pinning_injection(
         "_configure_ceph",
         "_configure_masakari_services",
         "_configure_sriov_agent_service",
+        "_set_sriov_context",
+        "_set_pci_context",
     ]:
         mocker.patch(f"openstack_hypervisor.hooks.{fn}")
 

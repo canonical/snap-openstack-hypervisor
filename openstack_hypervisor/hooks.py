@@ -39,6 +39,7 @@ from openstack_hypervisor.cli.common import (
     EPAOrchestratorError,
     SocketCommunicationError,
     get_cpu_pinning_from_socket,
+    socket_path,
 )
 from openstack_hypervisor.log import setup_logging
 
@@ -1562,9 +1563,9 @@ def _should_sriov_agent_manage_nic(nic, physnet=None):
     return True
 
 
-def _set_sriov_context(context: dict):  # noqa: C901
+def _set_sriov_context(snap: Snap, context: dict):  # noqa: C901
     logging.info("Determining SR-IOV configuration.")
-    nics = interfaces.get_nics().root
+    nics = interfaces.get_nics(snap).root
     # Retrieve SR-IOV PFs that have been whitelisted, including
     # those that have whitelisted VFs.
     mappings = []
@@ -1617,10 +1618,12 @@ def _set_sriov_context(context: dict):  # noqa: C901
     context["network"]["hw_offloading"] = hw_offloading
 
 
-def process_whitelisted_sriov_pfs(pci_device_specs: list[dict], excluded_devices: list[str]):
+def process_whitelisted_sriov_pfs(
+    snap: Snap, pci_device_specs: list[dict], excluded_devices: list[str]
+):
     """Replace whitelisted PFs with their corresponding VFs."""
     logging.info("Processing SR-IOV whitelist, replacing PFs with VFs")
-    nics = interfaces.get_nics().root
+    nics = interfaces.get_nics(snap).root
     # The following dict contains a list of VFs for each whitelisted PF address.
     whitelisted_pfs = {}
 
@@ -1738,7 +1741,7 @@ def configure(snap: Snap) -> None:
 def _get_configure_context(snap: Snap) -> dict:
     try:
         cpu_shared_set, allocated_cores = get_cpu_pinning_from_socket(
-            service_name=snap.name, cores_requested=0
+            service_name=snap.name, socket_path=socket_path(snap), cores_requested=0
         )
     except (SocketCommunicationError, EPAOrchestratorError) as e:
         if "No Isolated CPUs configured" in str(e):
@@ -1774,8 +1777,8 @@ def _get_configure_context(snap: Snap) -> dict:
     context = _context_compat(context)
     logging.info(context)
 
-    _set_sriov_context(context)
-    _set_pci_context(context)
+    _set_sriov_context(snap, context)
+    _set_pci_context(snap, context)
 
     return context
 
@@ -1787,7 +1790,7 @@ def _get_exclude_services(context: dict) -> list:
     return exclude_services
 
 
-def _set_pci_context(context: dict) -> None:
+def _set_pci_context(snap: Snap, context: dict) -> None:
     pci_device_specs = context.get("compute", {}).get("pci_device_specs") or []
     pci_excluded_devices = context.get("compute", {}).get("pci_excluded_devices") or []
     if isinstance(pci_device_specs, str):
@@ -1800,7 +1803,7 @@ def _set_pci_context(context: dict) -> None:
     # https://github.com/openstack/nova/blob/2010536d12b684a425ff00068da4317b4efd4951/doc/source/admin/pci-passthrough.rst?plain=1#L58-L61
     # At the same time, Nova picks child VFs implicitly only when specifying a PF by name
     # (deprecated) or PCI address but not when the vendor/product id is passed.
-    process_whitelisted_sriov_pfs(pci_device_specs, pci_excluded_devices)
+    process_whitelisted_sriov_pfs(snap, pci_device_specs, pci_excluded_devices)
     pci_device_specs = pci.apply_exclusion_list(pci_device_specs, pci_excluded_devices)
     _set_config_context(context, "compute", "pci_device_specs", _to_json_list(pci_device_specs))
     pci_aliases = context.get("compute", {}).get("pci_aliases")
