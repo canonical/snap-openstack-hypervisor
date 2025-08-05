@@ -89,7 +89,15 @@ class NicList(pydantic.RootModel[list[InterfaceOutput]]):
 
 def get_interfaces(ndb) -> list[Interface]:
     """Get all interfaces from the system."""
-    return list(ndb.interfaces.values())
+    interfaces = []
+    iface_view = ndb.interfaces
+    for key in iface_view.keys():
+        try:
+            interfaces.append(iface_view[key])
+        except KeyError:
+            # Happens when interfaces are deleted while we are iterating.
+            logger.debug("Interface %s not found in the NDB view", key)
+    return interfaces
 
 
 def is_link_local(address: str) -> bool:
