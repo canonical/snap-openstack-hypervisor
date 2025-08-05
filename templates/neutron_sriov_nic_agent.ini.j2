@@ -7,5 +7,5 @@ firewall_driver = noop
 [sriov_nic]
 {%- if network.sriov_nic_physical_device_mappings is defined %}
 physical_device_mappings = {{ network.sriov_nic_physical_device_mappings }}
-{% endif -%}
+{%- endif %}
 exclude_devices = {{ network.sriov_nic_exclude_devices }}
