@@ -17,8 +17,9 @@ def cli(verbose: bool):
     """Set of utilities for managing the hypervisor."""
 
 
-def main(snap: Snap):
+def main():
     """Register commands and run the CLI."""
+    snap = Snap()
     setup_root_logging()
     cli.add_command(list_nics)
     cli.add_command(hypervisor)
@@ -27,4 +28,4 @@ def main(snap: Snap):
 
 
 if __name__ == "__main__":
-    main(Snap())
+    main()
