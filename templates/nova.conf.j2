@@ -77,10 +77,8 @@ hw_machine_type = x86_64=q35
 {% endif %}
 
 [pci]
-# TODO: consider enabling the following once Nova supports
-# tracking SR-IOV ports consumed by Neutron.
 # https://docs.openstack.org/nova/latest/admin/pci-passthrough.html
-# report_in_placement = True
+report_in_placement = True
 {% for spec in compute.pci_device_specs -%}
   device_spec = {{ spec }}
 {% endfor -%}
