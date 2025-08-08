@@ -458,7 +458,6 @@ parts:
       - --disable-user
       - --disable-linux-user
       - --disable-bsd-user
-      - --disable-vhost-user
       - --disable-xen
       - --disable-werror
       - --prefix=/usr
