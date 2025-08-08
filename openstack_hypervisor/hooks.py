@@ -665,9 +665,11 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
     if not ovn_encap_ip and system_id:
         logging.info("OVN IP and System ID not configured, skipping.")
         return
+    datapath_type = _get_datapath_type(context)
     logging.info(
         "Configuring Open vSwitch geneve tunnels and system id. "
-        f"ovn-encap-ip = {ovn_encap_ip}, system-id = {system_id}"
+        f"ovn-encap-ip = {ovn_encap_ip}, system-id = {system_id}, "
+        f"datapath-type = {datapath_type}"
     )
     _ovs_vsctl_set(
         "open",
@@ -677,6 +679,7 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
             "external_ids:ovn-encap-ip": ovn_encap_ip,
             "external_ids:system-id": system_id,
             "external_ids:ovn-match-northd-version": "true",
+            "external_ids:ovn-bridge-datapath-type": datapath_type,
         },
     )
 
@@ -819,7 +822,15 @@ def _del_external_nics_from_bridge(external_bridge: str) -> None:
         _del_interface_from_bridge(external_bridge, p)
 
 
-def _configure_ovn_external_networking(snap: Snap) -> None:
+def _get_datapath_type(context: dict) -> str:
+    ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
+    if ovs_dpdk_enabled:
+        return "netdev"
+    else:
+        return "system"
+
+
+def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:
     """Configure OVS/OVN external networking.
 
     :param snap: the snap reference
@@ -845,6 +856,8 @@ def _configure_ovn_external_networking(snap: Snap) -> None:
     if not external_bridge and physnet_name:
         logging.info("OVN external networking not configured, skipping.")
         return
+
+    datapath_type = _get_datapath_type(context)
     subprocess.check_call(
         [
             "ovs-vsctl",
@@ -856,7 +869,7 @@ def _configure_ovn_external_networking(snap: Snap) -> None:
             "set",
             "bridge",
             external_bridge,
-            "datapath_type=system",
+            f"datapath_type={datapath_type}",
             "protocols=OpenFlow13,OpenFlow15",
         ]
     )
@@ -1771,7 +1784,7 @@ def configure(snap: Snap) -> None:
         _configure_tls(snap)
 
     _configure_ovn_base(snap, context)
-    _configure_ovn_external_networking(snap)
+    _configure_ovn_external_networking(snap, context)
     _configure_ovs(context)
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
