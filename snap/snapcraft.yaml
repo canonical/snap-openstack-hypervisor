@@ -28,6 +28,7 @@ environment:
   OVS_PKGDATADIR: $SNAP/usr/share/openvswitch
   OVS_BINDIR: $SNAP/usr/bin
   OVS_SBINDIR: $SNAP/usr/sbin
+  RUNTIME_DIRECTORY: $SNAP_COMMON/run
 
 platforms:
   amd64:
