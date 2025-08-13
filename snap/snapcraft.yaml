@@ -241,6 +241,7 @@ apps:
       - network-control
       - network-observe
       - microstack-support
+      - firewall-control
 
   neutron-sriov-nic-agent:
     command: 'bin/neutron-sriov-nic-agent-service'
