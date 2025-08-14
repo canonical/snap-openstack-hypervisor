@@ -632,8 +632,10 @@ parts:
       - openvswitch-switch
       - on amd64:
         - openvswitch-switch-dpdk
+        - librte-meta-all
       - on arm64:
         - openvswitch-switch-dpdk
+        - librte-meta-all
       - ovn-host
     override-build: |
       craftctl default

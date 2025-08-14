@@ -694,7 +694,7 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
     _ovs_vsctl_set("open", ".", {"external_ids:ovn-remote": sb_conn})
 
 
-def _configure_ovs(context: dict) -> None:
+def _configure_ovs(snap: Snap, context: dict) -> None:
     hw_offloading = context.get("network", {}).get("hw_offloading")
     if hw_offloading:
         logging.info("Configuring Open vSwitch hardware offloading.")
@@ -711,6 +711,9 @@ def _configure_ovs(context: dict) -> None:
     if ovs_dpdk_enabled:
         logging.info("Configuring Open vSwitch to use DPDK.")
         dpdk_settings["other_config:dpdk-init"] = "try"
+        # Point DPDK to the right PMD plugin directory.
+        pmd_lib_dir = snap.paths.snap / Path("usr/lib/x86_64-linux-gnu/dpdk/pmds-25.0")
+        dpdk_settings["other_config:dpdk-extra"] = f"-d {pmd_lib_dir}"
     if ovs_memory:
         dpdk_settings["other_config:dpdk-socket-mem"] = ovs_memory
     if ovs_lcore_mask:
@@ -1785,7 +1788,13 @@ def configure(snap: Snap) -> None:
 
     _configure_ovn_base(snap, context)
     _configure_ovn_external_networking(snap, context)
-    _configure_ovs(context)
+    _configure_ovs(snap, context)
+
+    logging.info("Restarting ovs-vswitchd to apply changes.")
+    ovs_vswitchd_service = snap.services.list()["ovs-vswitchd"]
+    ovs_vswitchd_service.stop()
+    ovs_vswitchd_service.start(enable=True)
+
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
