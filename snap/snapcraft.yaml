@@ -28,6 +28,7 @@ environment:
   OVS_PKGDATADIR: $SNAP/usr/share/openvswitch
   OVS_BINDIR: $SNAP/usr/bin
   OVS_SBINDIR: $SNAP/usr/sbin
+  RUNTIME_DIRECTORY: $SNAP_COMMON/run
 
 platforms:
   amd64:
@@ -245,6 +246,7 @@ apps:
       - network-control
       - network-observe
       - microstack-support
+      - firewall-control
 
   neutron-sriov-nic-agent:
     command: 'bin/neutron-sriov-nic-agent-service'
@@ -473,7 +475,6 @@ parts:
       - --disable-user
       - --disable-linux-user
       - --disable-bsd-user
-      - --disable-vhost-user
       - --disable-xen
       - --disable-werror
       - --prefix=/usr
@@ -646,8 +647,10 @@ parts:
       - openvswitch-switch
       - on amd64:
         - openvswitch-switch-dpdk
+        - librte-meta-all
       - on arm64:
         - openvswitch-switch-dpdk
+        - librte-meta-all
       - ovn-host
     override-build: |
       craftctl default

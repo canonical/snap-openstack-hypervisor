@@ -176,6 +176,16 @@ TLS configuration for OVN can also be supplied via snap configuration:
 
 All of the above options must be provided as base64 encoded strings.
 
+OVS DPDK settings:
+
+* `network.ovs-dpdk-enabled`: specifies whether ovs should initialize DPDK support
+* `network.ovs-memory`: comma separated list of integers that represent the memory (in GB)
+  from each numa node to be used by OVS for DPDK
+* `network.ovs-pmd-cpu-mask` comma separated list of integers specifying which CPUs
+  should be used by OVS to run the PMD threads
+* `network.ovs-lcore-mask` comma separated list of integers specifying which CPUs
+  should be used by OVS to run the lcore threads
+
 SR-IOV agent settings:
 
 * `network.sriov-nic-exclude-devices`: SR-IOV excluded VFs
