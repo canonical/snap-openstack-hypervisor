@@ -5,11 +5,13 @@ import base64
 import binascii
 import datetime
 import errno
+import glob
 import hashlib
 import ipaddress
 import json
 import logging
 import os
+import platform
 import re
 import secrets
 import socket
@@ -694,15 +696,28 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
     _ovs_vsctl_set("open", ".", {"external_ids:ovn-remote": sb_conn})
 
 
-def _get_dpdk_pmd_dir(snap: Snap):
+def _dpdk_supported() -> bool:
+    supported_platforms = ["aarch64", "x86_64"]
+    this_platform = platform.machine()
+    if this_platform not in supported_platforms:
+        logging.warning(
+            "DPDK not supported on this platform: %s, supported platforms: %s",
+            this_platform,
+            supported_platforms,
+        )
+        return False
+    return True
+
+
+def _get_dpdk_pmd_dir(snap: Snap) -> str:
     # We'll need the "current" symlink so that the path remains valid during upgrades.
     glob_pattern = (
         Path("/snap")
         / Path(snap.name)
         / Path("current")
-        / Path("/usr/lib/x86_64-linux-gnu/dpdk/pmds-*")
+        / Path("usr/lib/x86_64-linux-gnu/dpdk/pmds-*")
     )
-    pmd_dirs = os.glob(glob_pattern)
+    pmd_dirs = glob.glob(str(glob_pattern))
     if not pmd_dirs:
         raise Exception("Unable to locate dpdk pmd plugin directory: %s" % glob_pattern)
     return pmd_dirs[0]
@@ -722,7 +737,7 @@ def _configure_ovs(snap: Snap, context: dict) -> None:
     ovs_pmd_cpu_mask = context.get("network", {}).get("ovs_pmd_cpu_mask")
     ovs_lcore_mask = context.get("network", {}).get("ovs_lcore_mask")
 
-    if ovs_dpdk_enabled:
+    if ovs_dpdk_enabled and _dpdk_supported():
         logging.info("Configuring Open vSwitch to use DPDK.")
         dpdk_settings["other_config:dpdk-init"] = "try"
         # Point DPDK to the right PMD plugin directory.
