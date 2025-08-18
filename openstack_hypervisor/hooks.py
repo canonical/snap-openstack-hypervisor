@@ -695,7 +695,13 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
 
 
 def _get_dpdk_pmd_dir(snap: Snap):
-    glob_pattern = snap.paths.snap / Path("usr/lib/x86_64-linux-gnu/dpdk/pmds-*")
+    # We'll need the "current" symlink so that the path remains valid during upgrades.
+    glob_pattern = (
+        Path("/snap")
+        / Path(snap.name)
+        / Path("current")
+        / Path("/usr/lib/x86_64-linux-gnu/dpdk/pmds-*")
+    )
     pmd_dirs = os.glob(glob_pattern)
     if not pmd_dirs:
         raise Exception("Unable to locate dpdk pmd plugin directory: %s" % glob_pattern)
