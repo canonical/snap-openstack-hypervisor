@@ -694,6 +694,14 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
     _ovs_vsctl_set("open", ".", {"external_ids:ovn-remote": sb_conn})
 
 
+def _get_dpdk_pmd_dir(snap: Snap):
+    glob_pattern = snap.paths.snap / Path("usr/lib/x86_64-linux-gnu/dpdk/pmds-*")
+    pmd_dirs = os.glob(glob_pattern)
+    if not pmd_dirs:
+        raise Exception("Unable to locate dpdk pmd plugin directory: %s" % glob_pattern)
+    return pmd_dirs[0]
+
+
 def _configure_ovs(snap: Snap, context: dict) -> None:
     hw_offloading = context.get("network", {}).get("hw_offloading")
     if hw_offloading:
@@ -712,7 +720,7 @@ def _configure_ovs(snap: Snap, context: dict) -> None:
         logging.info("Configuring Open vSwitch to use DPDK.")
         dpdk_settings["other_config:dpdk-init"] = "try"
         # Point DPDK to the right PMD plugin directory.
-        pmd_lib_dir = snap.paths.snap / Path("usr/lib/x86_64-linux-gnu/dpdk/pmds-25.0")
+        pmd_lib_dir = _get_dpdk_pmd_dir(snap)
         dpdk_settings["other_config:dpdk-extra"] = f"-d {pmd_lib_dir}"
     if ovs_memory:
         dpdk_settings["other_config:dpdk-socket-mem"] = ovs_memory
