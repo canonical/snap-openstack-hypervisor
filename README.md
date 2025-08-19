@@ -181,10 +181,10 @@ OVS DPDK settings:
 * `network.ovs-dpdk-enabled`: specifies whether ovs should initialize DPDK support
 * `network.ovs-memory`: comma separated list of integers that represent the memory (in MB)
   from each NUMA node to be used by OVS for DPDK
-* `network.ovs-pmd-cpu-mask` comma separated list of integers specifying which CPUs
-  should be used by OVS to run the PMD threads
-* `network.ovs-lcore-mask` comma separated list of integers specifying which CPUs
-  should be used by OVS to run the lcore threads
+* `network.ovs-pmd-cpu-mask` bit mask specifying which CPUs should be used by OVS to run
+  the PMD threads. For example, 0xF0 would enable the 5,6,7,8 cores.
+* `network.ovs-lcore-mask` bit mask specifying which CPUs should be used by OVS to run
+  the lcore threads. For example, 0xF0 would enable the 5,6,7,8 cores.
 
 SR-IOV agent settings:
 
