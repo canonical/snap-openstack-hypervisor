@@ -621,6 +621,87 @@ class TestHooks:
         )
         assert context["network"]["hw_offloading"]
 
+    @mock.patch("subprocess.check_output")
+    def test_ovs_vsctl_list_table(self, mock_check_output):
+        mock_data = """
+{"data":[[["map",[["dpdk-init","try"],["dpdk-socket-mem","4096"]]]]],"headings":["other_config"]}
+"""
+        mock_check_output.return_value = mock_data.encode("utf-8")
+
+        out = hooks._ovs_vsctl_list_table("mock-table", "mock-record", ["mock-column"])
+
+        mock_check_output.assert_called_once_with(
+            [
+                "ovs-vsctl",
+                "--retry",
+                "--format",
+                "json",
+                "--if-exists",
+                "--columns=mock-column",
+                "list",
+                "mock-table",
+                "mock-record",
+            ]
+        )
+
+        exp_out = {
+            "other_config": {
+                "dpdk-init": "try",
+                "dpdk-socket-mem": "4096",
+            }
+        }
+        assert exp_out == out
+
+    @mock.patch("subprocess.check_call")
+    def test_ovs_vsctl_set(self, mock_check_call):
+        hooks._ovs_vsctl_set(
+            "mock-table", "mock-record", "mock-column", {"key1": "val1", "key2": "val2"}
+        )
+
+        mock_check_call.assert_called_once_with(
+            [
+                "ovs-vsctl",
+                "--retry",
+                "set",
+                "mock-table",
+                "mock-record",
+                "mock-column:key1=val1",
+                "mock-column:key2=val2",
+            ]
+        )
+
+    @mock.patch.object(hooks, "_ovs_vsctl_list_table")
+    @mock.patch.object(hooks, "_ovs_vsctl_set")
+    def test_ovs_vsctl_set_check(self, mock_vsctl_set, mock_list_table):
+        mock_current_settings = {
+            "dpdk-init": "try",
+            "dpdk-socket-mem": "4096",
+        }
+        mock_updates = {
+            "hw-offload": True,
+        }
+        mock_applied_settings = dict(mock_current_settings)
+        mock_applied_settings.update(mock_updates)
+
+        mock_list_table.side_effect = [
+            {"other_config": mock_current_settings},
+            {"other_config": mock_applied_settings},
+        ]
+
+        config_changed = hooks._ovs_vsctl_set_check(
+            "mock-table", "mock-record", "other_config", mock_updates
+        )
+        assert config_changed
+
+        config_changed = hooks._ovs_vsctl_set_check(
+            "mock-table", "mock-record", "other_config", mock_updates
+        )
+        assert not config_changed
+
+        mock_vsctl_set.assert_called_once_with(
+            "mock-table", "mock-record", "other_config", mock_updates
+        )
+
 
 @pytest.mark.parametrize(
     "cpu_shared_set,allocated_cores,should_include",

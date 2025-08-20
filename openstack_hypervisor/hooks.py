@@ -5,11 +5,13 @@ import base64
 import binascii
 import datetime
 import errno
+import glob
 import hashlib
 import ipaddress
 import json
 import logging
 import os
+import platform
 import re
 import secrets
 import socket
@@ -17,6 +19,7 @@ import stat
 import string
 import subprocess
 import time
+import typing
 import uuid
 import xml.etree.ElementTree
 from pathlib import Path
@@ -278,6 +281,10 @@ DEFAULT_CONFIG = {
     "network.external-bridge": "br-ex",
     "network.external-bridge-address": IPVANYNETWORK_UNSET,
     "network.dns-servers": "8.8.8.8",
+    "network.ovs-dpdk-enabled": False,
+    "network.ovs-memory": UNSET,
+    "network.ovs-pmd-cpu-mask": UNSET,
+    "network.ovs-lcore-mask": UNSET,
     "network.ovn-sb-connection": UNSET,
     "network.ovn-cert": UNSET,
     "network.ovn-key": UNSET,
@@ -633,6 +640,72 @@ def _delete_iptable_postrouting_rule(comment: str) -> None:
         logging.info(f"Error in deletion of IPtable rule: {e.stderr}")
 
 
+def _ovs_vsctl_set(table: str, record: str, column: str, settings: dict[str, str]) -> None:
+    if not settings:
+        logging.warning("No ovs values to set, skipping...")
+        return
+
+    cmd = ["ovs-vsctl", "--retry", "set", table, record]
+    for key, value in settings.items():
+        cmd.append(f"{column}:{key}={value}")
+
+    subprocess.check_call(cmd)
+
+
+def _parse_ovsdb_data(data: list[str, typing.Any]) -> typing.Any:
+    """Parse OVSDB data.
+
+    https://tools.ietf.org/html/rfc7047#section-5.1
+    """
+    if isinstance(data, list) and len(data) == 2:
+        if data[0] == "set":
+            return [_parse_ovsdb_data(element) for element in data[1]]
+        if data[0] == "map":
+            return {_parse_ovsdb_data(key): _parse_ovsdb_data(value) for key, value in data[1]}
+        if data[0] == "uuid":
+            return uuid.UUID(data[1])
+    return data
+
+
+def _ovs_vsctl_list_table(table: str, record: str, columns: list[str] | None) -> dict:
+    try:
+        cmd = ["ovs-vsctl", "--retry", "--format", "json", "--if-exists"]
+        if columns:
+            cmd += ["--columns=%s" % ",".join(columns)]
+        cmd += ["list", table, record]
+        out = subprocess.check_output(cmd).decode()
+    except subprocess.CalledProcessError:
+        # The columns may not exist.
+        # --if-exists only applies to the record, not the columns.
+        return {}
+
+    raw_json = json.loads(out)
+    headings = raw_json["headings"]
+    data = raw_json["data"]
+
+    parsed = {}
+    # We've requested a single record.
+    for record in data:
+        for position, heading in enumerate(headings):
+            parsed[heading] = _parse_ovsdb_data(record[position])
+
+    return parsed
+
+
+def _ovs_vsctl_set_check(table: str, record: str, column: str, settings: dict[str, str]) -> bool:
+    """Apply the specified settings and return a boolean stating if changes were made."""
+    config_changed = False
+    current_values = _ovs_vsctl_list_table(table, record, [column]).get(column, {})
+    for key, new_val in settings.items():
+        if key not in current_values or str(new_val) != str(current_values[key]):
+            config_changed = True
+
+    if config_changed:
+        _ovs_vsctl_set(table, record, column, settings)
+
+    return config_changed
+
+
 def _configure_ovn_base(snap: Snap, context: dict) -> None:
     """Configure OVS/OVN.
 
@@ -649,35 +722,25 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
     if not ovn_encap_ip and system_id:
         logging.info("OVN IP and System ID not configured, skipping.")
         return
+    datapath_type = _get_datapath_type(context)
     logging.info(
         "Configuring Open vSwitch geneve tunnels and system id. "
-        f"ovn-encap-ip = {ovn_encap_ip}, system-id = {system_id}"
+        f"ovn-encap-ip = {ovn_encap_ip}, system-id = {system_id}, "
+        f"datapath-type = {datapath_type}"
     )
-    subprocess.check_call(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "set",
-            "open",
-            ".",
-            "external_ids:ovn-encap-type=geneve",
-            "--",
-            "set",
-            "open",
-            ".",
-            f"external_ids:ovn-encap-ip={ovn_encap_ip}",
-            "--",
-            "set",
-            "open",
-            ".",
-            f"external_ids:system-id={system_id}",
-            "--",
-            "set",
-            "open",
-            ".",
-            "external_ids:ovn-match-northd-version=true",
-        ]
+    _ovs_vsctl_set(
+        "open",
+        ".",
+        "external_ids",
+        {
+            "ovn-encap-type": "geneve",
+            "ovn-encap-ip": ovn_encap_ip,
+            "system-id": system_id,
+            "ovn-match-northd-version": "true",
+            "ovn-bridge-datapath-type": datapath_type,
+        },
     )
+
     try:
         sb_conn = snap.config.get("network.ovn-sb-connection")
     except UnknownConfigKey:
@@ -685,18 +748,78 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
     if not sb_conn:
         logging.info("OVN SB connection URL not configured, skipping.")
         return
-    subprocess.check_call(
-        ["ovs-vsctl", "--retry", "set", "open", ".", f"external_ids:ovn-remote={sb_conn}"]
-    )
 
+    _ovs_vsctl_set("open", ".", "external_ids", {"ovn-remote": sb_conn})
+
+
+def _dpdk_supported() -> bool:
+    supported_platforms = ["aarch64", "x86_64"]
+    this_platform = platform.machine()
+    if this_platform not in supported_platforms:
+        logging.warning(
+            "DPDK not supported on this platform: %s, supported platforms: %s",
+            this_platform,
+            supported_platforms,
+        )
+        return False
+    return True
+
+
+def _get_dpdk_pmd_dir(snap: Snap) -> str:
+    # We'll need the "current" symlink so that the path remains valid during upgrades.
+    glob_pattern = (
+        Path("/snap")
+        / Path(snap.name)
+        / Path("current")
+        / Path("usr/lib/x86_64-linux-gnu/dpdk/pmds-*")
+    )
+    pmd_dirs = glob.glob(str(glob_pattern))
+    if not pmd_dirs:
+        raise Exception("Unable to locate dpdk pmd plugin directory: %s" % glob_pattern)
+    return pmd_dirs[0]
+
+
+def _configure_ovs(snap: Snap, context: dict) -> bool:
+    """Configure OVS and return a boolean stating whether there were any changes made."""
+    config_changed = False
+
+    # See the "Open_vSwitch TABLE" section of "man ovs-vswitchd.conf.db" for more
+    # details.
     hw_offloading = context.get("network", {}).get("hw_offloading")
     if hw_offloading:
         logging.info("Configuring Open vSwitch hardware offloading.")
-        subprocess.check_call(
-            ["ovs-vsctl", "--retry", "set", "open", ".", "other_config:hw-offload=true"]
-        )
+        if _ovs_vsctl_set_check("Open_vSwitch", ".", "other_config", {"hw-offload": "true"}):
+            config_changed = True
     else:
         logging.info("No whitelisted SR-IOV devices with hardware offloading.")
+
+    dpdk_settings = {}
+    ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
+    ovs_memory = context.get("network", {}).get("ovs_memory")
+    ovs_pmd_cpu_mask = context.get("network", {}).get("ovs_pmd_cpu_mask")
+    ovs_lcore_mask = context.get("network", {}).get("ovs_lcore_mask")
+
+    if ovs_dpdk_enabled and _dpdk_supported():
+        logging.info("Configuring Open vSwitch to use DPDK.")
+        dpdk_settings["dpdk-init"] = "try"
+        # Point DPDK to the right PMD plugin directory.
+        pmd_lib_dir = _get_dpdk_pmd_dir(snap)
+        dpdk_settings["dpdk-extra"] = f"-d {pmd_lib_dir}"
+    if ovs_memory:
+        dpdk_settings["dpdk-socket-mem"] = ovs_memory
+    if ovs_lcore_mask:
+        dpdk_settings["dpdk-lcore-mask"] = ovs_lcore_mask
+    if ovs_pmd_cpu_mask:
+        dpdk_settings["pmd-cpu-mask"] = ovs_pmd_cpu_mask
+
+    if dpdk_settings:
+        logging.debug("Applying DPDK settings: %s", dpdk_settings)
+        if _ovs_vsctl_set_check("Open_vSwitch", ".", "other_config", dpdk_settings):
+            config_changed = True
+    else:
+        logging.debug("No OVS DPDK settings provided.")
+
+    return config_changed
 
 
 def _list_bridge_ifaces(bridge_name: str) -> list:
@@ -796,7 +919,15 @@ def _del_external_nics_from_bridge(external_bridge: str) -> None:
         _del_interface_from_bridge(external_bridge, p)
 
 
-def _configure_ovn_external_networking(snap: Snap) -> None:
+def _get_datapath_type(context: dict) -> str:
+    ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
+    if ovs_dpdk_enabled:
+        return "netdev"
+    else:
+        return "system"
+
+
+def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:
     """Configure OVS/OVN external networking.
 
     :param snap: the snap reference
@@ -822,6 +953,8 @@ def _configure_ovn_external_networking(snap: Snap) -> None:
     if not external_bridge and physnet_name:
         logging.info("OVN external networking not configured, skipping.")
         return
+
+    datapath_type = _get_datapath_type(context)
     subprocess.check_call(
         [
             "ovs-vsctl",
@@ -833,7 +966,7 @@ def _configure_ovn_external_networking(snap: Snap) -> None:
             "set",
             "bridge",
             external_bridge,
-            "datapath_type=system",
+            f"datapath_type={datapath_type}",
             "protocols=OpenFlow13,OpenFlow15",
         ]
     )
@@ -1748,7 +1881,17 @@ def configure(snap: Snap) -> None:
         _configure_tls(snap)
 
     _configure_ovn_base(snap, context)
-    _configure_ovn_external_networking(snap)
+    _configure_ovn_external_networking(snap, context)
+    ovs_restart_required = _configure_ovs(snap, context)
+
+    if ovs_restart_required:
+        logging.info("Restarting ovs-vswitchd to apply changes.")
+        ovs_vswitchd_service = snap.services.list()["ovs-vswitchd"]
+        ovs_vswitchd_service.stop()
+        ovs_vswitchd_service.start(enable=True)
+    else:
+        logging.info("ovs-vswitchd restart not required.")
+
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
