@@ -105,6 +105,7 @@ class TestHooks:
     ):
         """Tests the configure hook."""
         mock_template = mocker.Mock()
+        mocker.patch.object(hooks, "_ovs_vsctl_set_check")
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mock_write_text = mocker.patch.object(hooks.Path, "write_text")
         mock_chmod = mocker.patch.object(hooks.Path, "chmod")
@@ -722,6 +723,7 @@ def test_nova_conf_cpu_pinning_injection(
     mocker.patch("openstack_hypervisor.hooks.Path.write_text")
     mocker.patch("openstack_hypervisor.hooks.Path.chmod")
     for fn in [
+        "_configure_ovs",
         "_configure_ovn_base",
         "_configure_ovn_external_networking",
         "_configure_kvm",

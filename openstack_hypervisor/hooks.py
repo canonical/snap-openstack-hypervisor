@@ -805,6 +805,9 @@ def _configure_ovs(snap: Snap, context: dict) -> bool:
         # Point DPDK to the right PMD plugin directory.
         pmd_lib_dir = _get_dpdk_pmd_dir(snap)
         dpdk_settings["dpdk-extra"] = f"-d {pmd_lib_dir}"
+    else:
+        dpdk_settings["dpdk-init"] = "false"
+
     if ovs_memory:
         dpdk_settings["dpdk-socket-mem"] = ovs_memory
     if ovs_lcore_mask:
