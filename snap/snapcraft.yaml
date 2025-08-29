@@ -76,6 +76,7 @@ apps:
     plugs:
       - network
       - network-observe
+      - network-setup-control
       - hardware-observe
 
   # Libvirt
@@ -648,9 +649,11 @@ parts:
       - on amd64:
         - openvswitch-switch-dpdk
         - librte-meta-all
+        - driverctl
       - on arm64:
         - openvswitch-switch-dpdk
         - librte-meta-all
+        - driverctl
       - ovn-host
     override-build: |
       craftctl default
@@ -731,6 +734,53 @@ parts:
       - CGO_CFLAGS: "-I$CRAFT_STAGE/usr/include"
       - CGO_LDFLAGS: "-L$CRAFT_STAGE/usr/lib"
 
+  # TODO: drop the following once https://github.com/canonical/netplan/pull/549
+  # gets backported.
+  netplan:
+    plugin: nil
+    source-tag: main
+    source-type: git
+    source: https://github.com/canonical/netplan
+    build-packages:
+      # - netplan.io-build-deps-depends
+      - build-essential
+      - debhelper-compat
+      - dh-sequence-python3
+      - pkgconf
+      - bash-completion
+      - libyaml-dev
+      - libglib2.0-dev
+      - uuid-dev
+      - python3
+      - python3-cffi
+      - python3-coverage
+      - python3-pytest
+      - python3-pytest-cov
+      - python3-rich
+      - python3-yaml
+      - libcmocka-dev
+      - libpython3-dev
+      - libsystemd-dev
+      - udev
+      - systemd
+      - systemd-dev
+      - dbus-x11
+      - pyflakes3
+      - pycodestyle
+      - pandoc
+      - openvswitch-switch
+      - meson
+      - iproute2
+    stage-packages:
+      - netplan.io
+    build-environment:
+      - DEBIAN_FRONTEND: "noninteractive"
+    after: [openstack]
+    override-build: |
+      meson setup _build -Dunit_testing=false --prefix=/usr
+      meson compile -C _build
+      meson install -C _build --destdir $CRAFT_PART_INSTALL
+
 slots:
   hypervisor-config:
     interface: content
@@ -753,11 +803,14 @@ hooks:
     plugs:
       - network
       - network-control
+      - network-setup-control
       - hardware-observe
+      - kernel-module-control
       - firewall-control
       - microstack-support
       - kvm
       - epa-info
+      - etc-driverctl
   connect-slot-hypervisor-config:
     plugs:
       - network
@@ -769,3 +822,8 @@ plugs:
     interface: content
     content: epa-info
     target: $SNAP_DATA
+  # Required in order to persistently bind drivers such as vfio-pci.
+  etc-driverctl:
+    interface: system-files
+    write:
+    - /etc/driverctl.d
