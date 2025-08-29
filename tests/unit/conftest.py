@@ -160,3 +160,10 @@ def ifaddresses():
     with patch("openstack_hypervisor.hooks.ifaddresses") as p:
         p.side_effect = lambda nic: ifaddresses.get(nic)
         yield p
+
+
+@pytest.fixture()
+def get_pci_address():
+    with patch("openstack_hypervisor.cli.interfaces.get_pci_address") as p:
+        p.side_effect = lambda iface: "pci-addr-%s" % iface
+        yield p

@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2022 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
 
+import io
 import json
 import random
 import textwrap
 from unittest import mock
 
+import mock_netplan_configs
 import pytest
+import yaml
 from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import hooks
@@ -106,6 +109,7 @@ class TestHooks:
         """Tests the configure hook."""
         mock_template = mocker.Mock()
         mocker.patch.object(hooks, "_ovs_vsctl_set_check")
+        mocker.patch.object(hooks, "_process_dpdk_ports")
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mock_write_text = mocker.patch.object(hooks.Path, "write_text")
         mock_chmod = mocker.patch.object(hooks.Path, "chmod")
@@ -731,6 +735,7 @@ def test_nova_conf_cpu_pinning_injection(
         "_configure_ceph",
         "_configure_masakari_services",
         "_configure_sriov_agent_service",
+        "_process_dpdk_ports",
         "_set_sriov_context",
         "_set_pci_context",
     ]:
@@ -771,3 +776,435 @@ def test_nova_conf_cpu_pinning_injection(
     else:
         assert context["compute"]["allocated_cores"] == ""
         assert context["compute"]["cpu_shared_set"] == ""
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+def test_process_dpdk_netplan_config(mock_get_netplan_config, get_pci_address):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE)
+    )
+
+    dpdk_mappings = {"ports": {}, "bonds": {}}
+    dpdk_ifaces = ["eth1", "eth2"]
+
+    netplan_changes_required = hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+
+    # eth2 will be skipped since it's not connected to a bridge.
+    exp_mappings = {
+        "ports": {
+            "eth1": {
+                "pci_address": "pci-addr-eth1",
+                "mtu": 1500,
+                "bridge": "br0",
+                "bond": None,
+                "dpdk_port_name": "dpdk-eth1",
+            },
+        },
+        "bonds": {},
+    }
+    assert exp_mappings == dpdk_mappings
+    assert netplan_changes_required
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+def test_process_dpdk_netplan_config_bond(mock_get_netplan_config, get_pci_address):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE_WITH_BOND)
+    )
+
+    dpdk_mappings = {"ports": {}, "bonds": {}}
+    dpdk_ifaces = ["eth1", "eth2"]
+
+    netplan_changes_required = hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+
+    exp_mappings = {
+        "ports": {
+            "eth1": {
+                "pci_address": "pci-addr-eth1",
+                "mtu": 1500,
+                "bridge": None,
+                "bond": "bond0",
+                "dpdk_port_name": "dpdk-eth1",
+            },
+            "eth2": {
+                "pci_address": "pci-addr-eth2",
+                "mtu": 1500,
+                "bridge": None,
+                "bond": "bond0",
+                "dpdk_port_name": "dpdk-eth2",
+            },
+        },
+        "bonds": {
+            "bond0": {
+                "ports": ["eth1", "eth2"],
+                "bridge": "br0",
+                "bond_mode": "balance-tcp",
+                "lacp_mode": "active",
+                "lacp_time": "slow",
+                "mtu": 1500,
+            }
+        },
+    }
+    assert exp_mappings == dpdk_mappings
+    assert netplan_changes_required
+
+
+@pytest.mark.parametrize(
+    "netplan_config",
+    [
+        mock_netplan_configs.MOCK_NETPLAN_OVS_NO_BRIDGE,
+        mock_netplan_configs.MOCK_NETPLAN_OVS_WITH_BOND_NO_BRIDGE,
+    ],
+    ids=["without_bond", "with_bond"],
+)
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+def test_process_dpdk_netplan_config_no_bridge(
+    mock_get_netplan_config, get_pci_address, netplan_config
+):
+    mock_get_netplan_config.return_value = yaml.safe_load(io.StringIO(netplan_config))
+
+    dpdk_mappings = {"ports": {}, "bonds": {}}
+    dpdk_ifaces = ["eth1", "eth2"]
+
+    netplan_changes_required = hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+
+    # No bridge defined.
+    exp_mappings = {"ports": {}, "bonds": {}}
+    assert exp_mappings == dpdk_mappings
+    assert not netplan_changes_required
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+def test_process_dpdk_netplan_already_processed(mock_get_netplan_config, get_pci_address):
+    mock_get_netplan_config.return_value = {}
+
+    dpdk_mappings = {
+        "ports": {
+            "eth1": {
+                "pci_address": "pci-addr-eth1",
+                "mtu": 1500,
+                "bridge": None,
+                "bond": "bond0",
+                "dpdk_port_name": "dpdk-eth1",
+            },
+            "eth2": {
+                "pci_address": "pci-addr-eth2",
+                "mtu": 1500,
+                "bridge": None,
+                "bond": "bond0",
+                "dpdk_port_name": "dpdk-eth2",
+            },
+        },
+        "bonds": {
+            "bond0": {
+                "ports": ["eth1", "eth2"],
+                "bridge": "br0",
+                "bond_mode": "balance-tcp",
+                "lacp_mode": "active",
+                "lacp_time": "slow",
+                "mtu": 1500,
+            }
+        },
+    }
+    dpdk_mappings_copy = dict(dpdk_mappings)
+    dpdk_ifaces = ["eth1", "eth2"]
+
+    netplan_changes_required = hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+
+    assert dpdk_mappings_copy == dpdk_mappings
+    assert not netplan_changes_required
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+@mock.patch("openstack_hypervisor.netplan.remove_interface_from_bridge")
+@mock.patch("openstack_hypervisor.netplan.remove_bond")
+@mock.patch("openstack_hypervisor.netplan.remove_ethernet")
+@mock.patch("openstack_hypervisor.netplan.apply_netplan")
+@mock.patch.object(hooks, "_remove_ovs_port_from_bridge")
+def test_update_netplan_dpdk_ports_with_bond(
+    mock_remove_ovs_port_from_bridge,
+    mock_apply_netplan,
+    mock_remove_ethernet,
+    mock_remove_bond,
+    mock_remove_interface_from_bridge,
+    mock_get_netplan_config,
+    get_pci_address,
+):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE_WITH_BOND)
+    )
+
+    dpdk_mappings = {"ports": {}, "bonds": {}}
+    dpdk_ifaces = ["eth1", "eth2"]
+
+    hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+    hooks._update_netplan_dpdk_ports(dpdk_mappings)
+
+    mock_remove_interface_from_bridge.assert_called_once_with("br0", "bond0")
+    mock_remove_ovs_port_from_bridge.assert_called_once_with("br0", "bond0")
+    mock_remove_bond.assert_called_once_with("bond0")
+    mock_remove_ethernet.assert_has_calls([mock.call(iface) for iface in ["eth1", "eth2"]])
+
+    mock_apply_netplan.assert_called_once_with()
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+@mock.patch("openstack_hypervisor.netplan.remove_interface_from_bridge")
+@mock.patch("openstack_hypervisor.netplan.remove_bond")
+@mock.patch("openstack_hypervisor.netplan.remove_ethernet")
+@mock.patch("openstack_hypervisor.netplan.apply_netplan")
+@mock.patch.object(hooks, "_remove_ovs_port_from_bridge")
+def test_update_netplan_dpdk_ports_without_bond(
+    mock_remove_ovs_port_from_bridge,
+    mock_apply_netplan,
+    mock_remove_ethernet,
+    mock_remove_bond,
+    mock_remove_interface_from_bridge,
+    mock_get_netplan_config,
+    get_pci_address,
+):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE)
+    )
+
+    dpdk_mappings = {"ports": {}, "bonds": {}}
+    dpdk_ifaces = ["eth1", "eth2"]
+
+    hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+    hooks._update_netplan_dpdk_ports(dpdk_mappings)
+
+    mock_remove_interface_from_bridge.assert_called_once_with("br0", "eth1")
+    mock_remove_ovs_port_from_bridge.assert_called_once_with("br0", "eth1")
+    mock_remove_ethernet.assert_called_once_with("eth1")
+
+    mock_apply_netplan.assert_called_once_with()
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+@mock.patch("openstack_hypervisor.pci.ensure_driver_override")
+@mock.patch.object(hooks, "_add_ovs_bridge")
+@mock.patch.object(hooks, "_add_dpdk_port")
+@mock.patch.object(hooks, "_add_dpdk_bond")
+def test_create_dpdk_ports_and_bonds(
+    mock_add_dpdk_bond,
+    mock_add_dpdk_port,
+    mock_add_ovs_bridge,
+    mock_ensure_driver_override,
+    mock_get_netplan_config,
+    get_pci_address,
+):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE_WITH_BOND)
+    )
+
+    dpdk_mappings = {"ports": {}, "bonds": {}}
+    dpdk_ifaces = ["eth1", "eth2"]
+
+    hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+    hooks._create_dpdk_ports_and_bonds(dpdk_mappings, "mock-driver")
+
+    mock_ensure_driver_override.assert_has_calls(
+        [mock.call("pci-addr-eth1", "mock-driver"), mock.call("pci-addr-eth2", "mock-driver")]
+    )
+    mock_add_ovs_bridge.assert_called_once_with("br0", "netdev")
+    mock_add_dpdk_bond.assert_called_once_with(
+        bridge_name="br0",
+        bond_name="bond0",
+        dpdk_ports=[
+            {
+                "name": "dpdk-eth1",
+                "pci_address": "pci-addr-eth1",
+                "mtu": 1500,
+            },
+            {
+                "name": "dpdk-eth2",
+                "pci_address": "pci-addr-eth2",
+                "mtu": 1500,
+            },
+        ],
+        mtu=1500,
+        bond_mode="balance-tcp",
+        lacp_mode="active",
+        lacp_time="slow",
+    )
+    mock_add_dpdk_port.assert_not_called()
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+@mock.patch("openstack_hypervisor.pci.ensure_driver_override")
+@mock.patch.object(hooks, "_add_ovs_bridge")
+@mock.patch.object(hooks, "_add_dpdk_port")
+@mock.patch.object(hooks, "_add_dpdk_bond")
+def test_create_dpdk_ports(
+    mock_add_dpdk_bond,
+    mock_add_dpdk_port,
+    mock_add_ovs_bridge,
+    mock_ensure_driver_override,
+    mock_get_netplan_config,
+    get_pci_address,
+):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE)
+    )
+
+    dpdk_mappings = {"ports": {}, "bonds": {}}
+    dpdk_ifaces = ["eth1", "eth2"]
+
+    hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+    hooks._create_dpdk_ports_and_bonds(dpdk_mappings, "mock-driver")
+
+    mock_ensure_driver_override.assert_called_once_with("pci-addr-eth1", "mock-driver")
+    mock_add_ovs_bridge.assert_called_once_with("br0", "netdev")
+    mock_add_dpdk_port.assert_called_once_with(
+        bridge_name="br0", dpdk_port_name="dpdk-eth1", pci_address="pci-addr-eth1", mtu=1500
+    )
+    mock_add_dpdk_bond.assert_not_called()
+
+
+def test_add_ovs_bridge(check_call):
+    hooks._add_ovs_bridge("bridge-name", "datapath-name", "fake-arg")
+
+    check_call.assert_called_once_with(
+        [
+            "ovs-vsctl",
+            "--retry",
+            "--may-exist",
+            "add-br",
+            "bridge-name",
+            "--",
+            "set",
+            "bridge",
+            "bridge-name",
+            "datapath_type=datapath-name",
+            "fake-arg",
+        ]
+    )
+
+
+def test_add_dpdk_port(check_call):
+    hooks._add_dpdk_port("bridge-name", "dpdk-port-name", "pci-address", 9000)
+
+    check_call.assert_called_once_with(
+        [
+            "ovs-vsctl",
+            "--may-exist",
+            "add-port",
+            "bridge-name",
+            "dpdk-port-name",
+            "--",
+            "set",
+            "Interface",
+            "dpdk-port-name",
+            "type=dpdk",
+            "options:dpdk-devargs=pci-address",
+            "mtu-request=9000",
+        ]
+    )
+
+
+def test_add_dpdk_bond(check_call):
+    hooks._add_dpdk_bond(
+        "bridge-name",
+        "bond-name",
+        [
+            {
+                "name": "dpdk-eth0",
+                "pci_address": "pci-address-eth0",
+            },
+            {
+                "name": "dpdk-eth1",
+                "pci_address": "pci-address-eth1",
+            },
+        ],
+        9000,
+        "balance-tcp",
+        "active",
+        "fast",
+    )
+
+    check_call.assert_called_once_with(
+        [
+            "ovs-vsctl",
+            "--may-exist",
+            "add-bond",
+            "bridge-name",
+            "bond-name",
+            "dpdk-eth0",
+            "dpdk-eth1",
+            "--",
+            "set",
+            "port",
+            "bond-name",
+            "bond_mode=balance-tcp",
+            "--",
+            "set",
+            "port",
+            "bond-name",
+            "lacp=active",
+            "--",
+            "set",
+            "port",
+            "bond-name",
+            "other-config:lacp-time=fast",
+            "--",
+            "set",
+            "Interface",
+            "dpdk-eth0",
+            "type=dpdk",
+            "options:dpdk-devargs=pci-address-eth0",
+            "mtu-request=9000",
+            "--",
+            "set",
+            "Interface",
+            "dpdk-eth1",
+            "type=dpdk",
+            "options:dpdk-devargs=pci-address-eth1",
+            "mtu-request=9000",
+        ]
+    )
+
+
+def test_remove_ovs_port_from_bridge(check_call):
+    hooks._remove_ovs_port_from_bridge("bridge-name", "port-name")
+    check_call.assert_called_once_with(
+        ["ovs-vsctl", "--if-exists", "del-port", "bridge-name", "port-name"]
+    )
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+@mock.patch.object(hooks, "_update_netplan_dpdk_ports")
+@mock.patch.object(hooks, "_create_dpdk_ports_and_bonds")
+def test_process_dpdk_ports(
+    mock_create_dpdk_ports, mock_update_netplan, mock_get_netplan_config, get_pci_address, snap
+):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE)
+    )
+
+    fake_config = {
+        "internal.dpdk-port-mappings": None,
+        "network.ovs-dpdk-ports": ["eth1", "eth2"],
+    }
+    snap.config.get.side_effect = fake_config.get
+
+    hooks._process_dpdk_ports(snap)
+
+    # eth2 will be skipped since it's not connected to a bridge.
+    exp_mappings = {
+        "ports": {
+            "eth1": {
+                "pci_address": "pci-addr-eth1",
+                "mtu": 1500,
+                "bridge": "br0",
+                "bond": None,
+                "dpdk_port_name": "dpdk-eth1",
+            },
+        },
+        "bonds": {},
+    }
+    snap.config.set.assert_called_once_with(
+        {"internal.dpdk-port-mappings": json.dumps(exp_mappings)}
+    )
+
+    mock_update_netplan.assert_called_once_with(exp_mappings)
+    mock_create_dpdk_ports.assert_called_once_with(exp_mappings, "vfio-pci")

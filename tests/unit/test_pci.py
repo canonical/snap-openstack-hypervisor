@@ -104,3 +104,36 @@ class TestPCIUtils:
             result = pci.apply_exclusion_list(device_specs, excluded_devices)
 
         assert expected_result == result
+
+    def test_set_driver_override(self, check_call):
+        pci.set_driver_override("pci-address", "driver-name")
+
+        check_call.assert_called_once_with(
+            ["driverctl", "set-override", "pci-address", "driver-name"]
+        )
+
+    def test_get_driver_overrides(self, check_output):
+        check_output.return_value = b"0000:1a:00.0 (none)\n0000:1a:00.1 vfio-pci\n"
+
+        overrides = pci.get_driver_overrides()
+        expected_overrides = {
+            "0000:1a:00.1": "vfio-pci",
+        }
+        assert expected_overrides == overrides
+
+        check_output.assert_called_once_with(
+            ["driverctl", "list-overrides"],
+        )
+
+    @mock.patch.object(pci, "set_driver_override")
+    @mock.patch.object(pci, "get_driver_overrides")
+    def test_ensure_driver_override(self, mock_get_driver_overrides, mock_set_driver_override):
+        mock_get_driver_overrides.return_value = {
+            "0000:1a:00.0": "ixgbe",
+            "0000:1a:00.1": "vfio-pci",
+        }
+
+        pci.ensure_driver_override("0000:1a:00.0", "vfio-pci")
+        pci.ensure_driver_override("0000:1a:00.1", "vfio-pci")
+
+        mock_set_driver_override.assert_called_once_with("0000:1a:00.0", "vfio-pci")

@@ -185,6 +185,13 @@ OVS DPDK settings:
   the PMD threads. For example, 0xF0 would enable the 5,6,7,8 cores.
 * `network.ovs-lcore-mask` bit mask specifying which CPUs should be used by OVS to run
   the lcore threads. For example, 0xF0 would enable the 5,6,7,8 cores.
+* `network.ovs-dpdk-ports` list of interface names that will be used with DPDK.
+  The interfaces will be bound to the DPDK-compatible driver (vfio-pci by default) and
+  corresponding DPDK ports will be created in OVS. Any bridges and bonds that use
+  those interfaces will be updated with the resulting DPDK ports, based on the
+  MAAS/Netplan configuration.
+* `network.dpdk-driver` The DPDK driver used to control physical network interfaces.
+  Possible values: `vfio-pci` (default) or `uio-pci-generic`.
 
 SR-IOV agent settings:
 
