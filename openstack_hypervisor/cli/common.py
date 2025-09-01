@@ -14,6 +14,9 @@ from .schemas import (
     ActionType,
     AllocateCoresRequest,
     AllocateCoresResponse,
+    AllocateHugepagesRequest,
+    AllocateNumaCoresRequest,
+    GetMemoryInfoRequest,
     ListAllocationsRequest,
 )
 
@@ -52,7 +55,13 @@ def socket_path(snap: Snap) -> str:
 
 
 def _communicate_with_socket(
-    request: Union[AllocateCoresRequest, ListAllocationsRequest],
+    request: Union[
+        AllocateCoresRequest,
+        AllocateNumaCoresRequest,
+        AllocateHugepagesRequest,
+        GetMemoryInfoRequest,
+        ListAllocationsRequest,
+    ],
     response_model: type[T],
     socket_path: str,
 ) -> T:
@@ -112,7 +121,7 @@ def get_cpu_pinning_from_socket(
     request = AllocateCoresRequest(
         service_name=service_name,
         action=ActionType.ALLOCATE_CORES,
-        cores_requested=cores_requested,
+        num_of_cores=cores_requested,
     )
     try:
         response = _communicate_with_socket(request, AllocateCoresResponse, socket_path)
