@@ -941,7 +941,7 @@ def _get_dpdk_port_name(ifname: str) -> str:
     return f"dpdk-{ifname}"
 
 
-def _get_dpdk_mappings(snap: Snap) -> dict:
+def _get_dpdk_mappings(snap: Snap, context: dict) -> dict:
     # We're using a snap setting to store information about
     # DPDK ports, bridges and bonds.
     #
@@ -949,10 +949,7 @@ def _get_dpdk_mappings(snap: Snap) -> dict:
     # it will no longer be visible to the host. At the same time,
     # we're modifying the initial netplan configuration as part of
     # the dpdk enablement.
-    try:
-        mappings = snap.config.get("internal.dpdk-port-mappings") or {}
-    except UnknownConfigKey:
-        mappings = {}
+    mappings = (context.get("internal") or {}).get("dpdk_port_mappings") or {}
 
     if isinstance(mappings, str):
         mappings = json.loads(mappings)
@@ -966,30 +963,29 @@ def _get_dpdk_mappings(snap: Snap) -> dict:
     return mappings
 
 
-def _set_dpdk_mappings(snap, mappings: dict):
+def _set_dpdk_mappings(snap: Snap, mappings: dict):
     logging.debug("Updated DPDK port mappings: %s", mappings)
     snap.config.set({"internal.dpdk-port-mappings": json.dumps(mappings or {})})
 
 
-def _process_dpdk_ports(snap):
-    try:
-        dpdk_ifaces = snap.config.get("network.ovs-dpdk-ports") or []
-    except UnknownConfigKey:
-        dpdk_ifaces = []
+def _process_dpdk_ports(snap: Snap, context: dict):
+    ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
+    dpdk_ifaces = context.get("network", {}).get("ovs_dpdk_ports") or []
+    dpdk_driver = context.get("network", {}).get("dpdk_driver") or "vfio-pci"
 
-    try:
-        dpdk_driver = snap.config.get("network.dpdk-driver") or "vfio-pci"
-    except UnknownConfigKey:
-        dpdk_driver = "vfio-pci"
-
-    logging.info("DPDK interface names: %s", dpdk_ifaces)
+    if not ovs_dpdk_enabled:
+        logging.info("DPDK disabled, skipping physical port configuration.")
+        return
     if not dpdk_ifaces:
+        logging.info("No DPDK interface specified, skipping physical port configuration.")
         # For now, we'll just ignore interfaces that were removed
         # from the list of dpdk ports.
         return
 
+    logging.info("DPDK interface names: %s", dpdk_ifaces)
+
     # Previously processed dpdk port mappings.
-    dpdk_mappings = _get_dpdk_mappings(snap)
+    dpdk_mappings = _get_dpdk_mappings(snap, context)
 
     _process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
     _update_netplan_dpdk_ports(dpdk_mappings)
@@ -1106,14 +1102,17 @@ def _process_dpdk_netplan_config(  # noqa: C901
     return netplan_changes_required
 
 
-def _update_netplan_dpdk_ports(dpdk_mappings):
+def _update_netplan_dpdk_ports(dpdk_mappings: dict):
     port_mappings = dpdk_mappings["ports"]
     bond_mappings = dpdk_mappings["bonds"]
+
+    should_reapply_netplan = False
 
     for bond_name, bond_config in bond_mappings.items():
         changes_made = netplan.remove_interface_from_bridge(bond_config["bridge"], bond_name)
         netplan.remove_bond(bond_name)
         if changes_made:
+            should_reapply_netplan = True
             # Remove existing system bonds and ports so that
             # we can recreate them using DPDK.
             _remove_ovs_port_from_bridge(bond_config["bridge"], bond_name)
@@ -1124,10 +1123,14 @@ def _update_netplan_dpdk_ports(dpdk_mappings):
                 interface_config["bridge"], interface_name
             )
             if changes_made:
+                should_reapply_netplan = True
                 _remove_ovs_port_from_bridge(interface_config["bridge"], interface_name)
         netplan.remove_ethernet(interface_name)
 
-    netplan.apply_netplan()
+    if should_reapply_netplan:
+        netplan.apply_netplan()
+    else:
+        logging.debug("No Netplan changes made while processing DPDK ports.")
 
 
 def _create_dpdk_ports_and_bonds(dpdk_mappings: dict, dpdk_driver: str):
@@ -2250,7 +2253,7 @@ def configure(snap: Snap) -> None:
     else:
         logging.info("ovs-vswitchd restart not required.")
 
-    _process_dpdk_ports(snap)
+    _process_dpdk_ports(snap, context)
 
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
@@ -2286,6 +2289,7 @@ def _get_configure_context(snap: Snap) -> dict:
         "ca",
         "masakari",
         "sev",
+        "internal",
     ).as_dict()
     context["compute"]["allocated_cores"] = allocated_cores
     context["compute"]["cpu_shared_set"] = cpu_shared_set

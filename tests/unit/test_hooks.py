@@ -981,6 +981,39 @@ def test_update_netplan_dpdk_ports_without_bond(
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+@mock.patch("openstack_hypervisor.netplan.remove_interface_from_bridge")
+@mock.patch("openstack_hypervisor.netplan.remove_bond")
+@mock.patch("openstack_hypervisor.netplan.remove_ethernet")
+@mock.patch("openstack_hypervisor.netplan.apply_netplan")
+@mock.patch.object(hooks, "_remove_ovs_port_from_bridge")
+def test_update_netplan_reapply_not_required(
+    mock_remove_ovs_port_from_bridge,
+    mock_apply_netplan,
+    mock_remove_ethernet,
+    mock_remove_bond,
+    mock_remove_interface_from_bridge,
+    mock_get_netplan_config,
+    get_pci_address,
+):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE_WITH_BOND)
+    )
+
+    dpdk_mappings = {"ports": {}, "bonds": {}}
+    # The netplan configuration doesn't contain this interface, as such it
+    # shouldn't be modified or reapplied.
+    dpdk_ifaces = ["fake-iface"]
+
+    hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+    hooks._update_netplan_dpdk_ports(dpdk_mappings)
+
+    mock_remove_interface_from_bridge.assert_not_called()
+    mock_remove_ovs_port_from_bridge.assert_not_called()
+    mock_remove_ethernet.assert_not_called()
+    mock_apply_netplan.assert_not_called()
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
 @mock.patch("openstack_hypervisor.pci.ensure_driver_override")
 @mock.patch.object(hooks, "_add_ovs_bridge")
 @mock.patch.object(hooks, "_add_dpdk_port")
@@ -1181,13 +1214,14 @@ def test_process_dpdk_ports(
         io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE)
     )
 
-    fake_config = {
-        "internal.dpdk-port-mappings": None,
-        "network.ovs-dpdk-ports": ["eth1", "eth2"],
+    context = {
+        "network": {
+            "ovs_dpdk_enabled": True,
+            "ovs_dpdk_ports": ["eth1", "eth2"],
+        }
     }
-    snap.config.get.side_effect = fake_config.get
 
-    hooks._process_dpdk_ports(snap)
+    hooks._process_dpdk_ports(snap, context)
 
     # eth2 will be skipped since it's not connected to a bridge.
     exp_mappings = {
@@ -1208,3 +1242,34 @@ def test_process_dpdk_ports(
 
     mock_update_netplan.assert_called_once_with(exp_mappings)
     mock_create_dpdk_ports.assert_called_once_with(exp_mappings, "vfio-pci")
+
+
+@mock.patch("openstack_hypervisor.netplan.get_netplan_config")
+@mock.patch.object(hooks, "_update_netplan_dpdk_ports")
+@mock.patch.object(hooks, "_create_dpdk_ports_and_bonds")
+def test_process_dpdk_ports_skipped(
+    mock_create_dpdk_ports, mock_update_netplan, mock_get_netplan_config, get_pci_address, snap
+):
+    mock_get_netplan_config.return_value = yaml.safe_load(
+        io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE)
+    )
+
+    context = {
+        "network": {
+            "ovs_dpdk_enabled": False,
+            "ovs_dpdk_ports": ["eth1", "eth2"],
+        }
+    }
+    hooks._process_dpdk_ports(snap, context)
+
+    context = {
+        "network": {
+            "ovs_dpdk_enabled": True,
+            "ovs_dpdk_ports": [],
+        }
+    }
+    hooks._process_dpdk_ports(snap, context)
+
+    snap.config.set.assert_not_called()
+    mock_update_netplan.assert_not_called()
+    mock_create_dpdk_ports.assert_not_called()
