@@ -970,7 +970,8 @@ def _set_dpdk_mappings(snap: Snap, mappings: dict):
 
 def _process_dpdk_ports(snap: Snap, context: dict):
     ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
-    dpdk_ifaces = context.get("network", {}).get("ovs_dpdk_ports") or []
+    dpdk_ifaces = (context.get("network", {}).get("ovs_dpdk_ports") or "").split(",")
+    dpdk_ifaces = [iface.strip() for iface in dpdk_ifaces if iface]
     dpdk_driver = context.get("network", {}).get("dpdk_driver") or "vfio-pci"
 
     if not ovs_dpdk_enabled:

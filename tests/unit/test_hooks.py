@@ -1217,7 +1217,7 @@ def test_process_dpdk_ports(
     context = {
         "network": {
             "ovs_dpdk_enabled": True,
-            "ovs_dpdk_ports": ["eth1", "eth2"],
+            "ovs_dpdk_ports": "eth1,eth2",
         }
     }
 
@@ -1257,7 +1257,7 @@ def test_process_dpdk_ports_skipped(
     context = {
         "network": {
             "ovs_dpdk_enabled": False,
-            "ovs_dpdk_ports": ["eth1", "eth2"],
+            "ovs_dpdk_ports": "eth1,eth2",
         }
     }
     hooks._process_dpdk_ports(snap, context)
@@ -1265,7 +1265,7 @@ def test_process_dpdk_ports_skipped(
     context = {
         "network": {
             "ovs_dpdk_enabled": True,
-            "ovs_dpdk_ports": [],
+            "ovs_dpdk_ports": "",
         }
     }
     hooks._process_dpdk_ports(snap, context)
