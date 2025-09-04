@@ -37,7 +37,7 @@ from pyroute2.netlink.exceptions import NetlinkError
 from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
-from openstack_hypervisor import pci
+from openstack_hypervisor import netplan, pci
 from openstack_hypervisor.cli import interfaces
 from openstack_hypervisor.cli.common import (
     EPAOrchestratorError,
@@ -285,6 +285,8 @@ DEFAULT_CONFIG = {
     "network.ovs-memory": UNSET,
     "network.ovs-pmd-cpu-mask": UNSET,
     "network.ovs-lcore-mask": UNSET,
+    "network.ovs-dpdk-ports": UNSET,
+    "network.dpdk-driver": "vfio-pci",
     "network.ovn-sb-connection": UNSET,
     "network.ovn-cert": UNSET,
     "network.ovn-key": UNSET,
@@ -930,6 +932,381 @@ def _get_datapath_type(context: dict) -> str:
         return "system"
 
 
+def _get_dpdk_port_name(ifname: str) -> str:
+    """Get the DPDK port name for the specified interface."""
+    # Charmed Openstack used a hash of the pci address:
+    # https://github.com/juju/charm-helpers/blob/33c08fc064069c30237b47f1998ac9996351301a/charmhelpers/contrib/openstack/context.py#L2950
+    #
+    # Sice Sunbeam uses interface names, we'll go with dpdk-{ifname}.
+    return f"dpdk-{ifname}"
+
+
+def _get_dpdk_mappings(snap: Snap, context: dict) -> dict:
+    # We're using a snap setting to store information about
+    # DPDK ports, bridges and bonds.
+    #
+    # Note that once an interface is bound to the vfio-pci driver,
+    # it will no longer be visible to the host. At the same time,
+    # we're modifying the initial netplan configuration as part of
+    # the dpdk enablement.
+    mappings = (context.get("internal") or {}).get("dpdk_port_mappings") or {}
+
+    if isinstance(mappings, str):
+        mappings = json.loads(mappings)
+
+    if "ports" not in mappings:
+        mappings["ports"] = {}
+    if "bonds" not in mappings:
+        mappings["bonds"] = {}
+
+    logging.debug("Retrieved DPDK port mappings: %s", mappings)
+    return mappings
+
+
+def _set_dpdk_mappings(snap: Snap, mappings: dict):
+    logging.debug("Updated DPDK port mappings: %s", mappings)
+    snap.config.set({"internal.dpdk-port-mappings": json.dumps(mappings or {})})
+
+
+def _process_dpdk_ports(snap: Snap, context: dict):
+    ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
+    dpdk_ifaces = (context.get("network", {}).get("ovs_dpdk_ports") or "").split(",")
+    dpdk_ifaces = [iface.strip() for iface in dpdk_ifaces if iface]
+    dpdk_driver = context.get("network", {}).get("dpdk_driver") or "vfio-pci"
+
+    if not ovs_dpdk_enabled:
+        logging.info("DPDK disabled, skipping physical port configuration.")
+        return
+    if not dpdk_ifaces:
+        logging.info("No DPDK interface specified, skipping physical port configuration.")
+        # For now, we'll just ignore interfaces that were removed
+        # from the list of dpdk ports.
+        return
+
+    logging.info("DPDK interface names: %s", dpdk_ifaces)
+
+    # Previously processed dpdk port mappings.
+    dpdk_mappings = _get_dpdk_mappings(snap, context)
+
+    # Populate the DPDK mappings based on the Netplan config.
+    _process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+    # Update the Netplan config, removing the interfaces and bonds that will be
+    # used with DPDK and defined in OVS.
+    _update_netplan_dpdk_ports(dpdk_mappings)
+    # The ports have been removed from Netplan, save the dpdk
+    # configuration before attempting to apply it to ovs.
+    _set_dpdk_mappings(snap, dpdk_mappings)
+
+    # Define the DPDK ports and bonds in OVS and ensure that the DPDK-compatible
+    # interface driver is used.
+    _create_dpdk_ports_and_bonds(dpdk_mappings, dpdk_driver)
+
+
+def _process_dpdk_netplan_config(  # noqa: C901
+    dpdk_mappings: dict, dpdk_ifaces: list[str]
+) -> bool:
+    # Current netplan configuration.
+    netplan_config = (netplan.get_netplan_config() or {}).get("network") or {}
+    ethernets = netplan_config.get("ethernets") or {}
+    bonds = netplan_config.get("bonds") or {}
+    bridges = netplan_config.get("bridges") or {}
+
+    logging.debug(
+        "Detected netplan configuration. Ethernets: %s, bonds: %s, bridges: %s",
+        ethernets,
+        bonds,
+        bridges,
+    )
+
+    port_mappings = dpdk_mappings["ports"]
+    bond_mappings = dpdk_mappings["bonds"]
+    netplan_changes_required = False
+
+    for iface in dpdk_ifaces:
+        if port_mappings.get(iface):
+            logging.debug("DPDK port already processed: %s", iface)
+            continue
+
+        pci_address = interfaces.get_pci_address(iface)
+        if not pci_address:
+            logging.warning(
+                "Couldn't determine interface PCI address: %s, skipping DPDK configuration.",
+                iface,
+            )
+            continue
+
+        ethernet = ethernets.get(iface) or {}
+        iface_bond = None
+        iface_bridge = None
+        bond_bridge = None
+
+        for bond_name, bond_config in bonds.items():
+            bond_ifaces = bond_config.get("interfaces") or []
+            if iface in bond_ifaces:
+                logging.debug("DPDK interface %s connected to bond: %s.", iface, bond_name)
+                iface_bond = bond_name
+                break
+        for bridge_name, bridge_config in bridges.items():
+            bridge_ifaces = bridge_config.get("interfaces") or []
+            if (iface in bridge_ifaces or iface_bond in bridge_ifaces) and (
+                ("openvswitch" not in bridge_config)
+            ):
+                logging.warning("Not an OVS bridge: %s, skipping DPDK configuration.", bridge_name)
+                continue
+            if iface in bridge_ifaces:
+                logging.debug("DPDK interface %s connected to bridge: %s.", iface, bridge_name)
+                iface_bridge = bridge_name
+                break
+            if iface_bond in bridge_ifaces:
+                logging.debug("DPDK bond %s connected to bridge: %s.", bond_name, bridge_name)
+                bond_bridge = bridge_name
+                break
+
+        if iface_bond:
+            if not bond_bridge:
+                logging.warning(
+                    "Bond not connected to any bridge: %s, skipping DPDK configuration.",
+                    iface_bond,
+                )
+                continue
+        else:
+            if not iface_bridge:
+                logging.warning(
+                    "Interface not connected to any bridge: %s, skipping DPDK configuration.",
+                    iface,
+                )
+                continue
+
+        netplan_changes_required = True
+        port_info = {
+            "pci_address": pci_address,
+            "mtu": ethernet.get("mtu"),
+            "bridge": iface_bridge,
+            "bond": iface_bond,
+            "dpdk_port_name": _get_dpdk_port_name(iface),
+        }
+        port_mappings[iface] = port_info
+        if iface_bond:
+            if iface_bond not in bond_mappings:
+                bond_params = bond_config.get("parameters", {})
+                netplan_bond_mode = bond_params.get("mode")
+                if netplan_bond_mode == "active-backup":
+                    ovs_bond_mode = netplan_bond_mode
+                else:
+                    ovs_bond_mode = "balance-tcp"
+                bond_mappings[iface_bond] = {
+                    "ports": [iface],
+                    "bridge": bond_bridge,
+                    "bond_mode": ovs_bond_mode,
+                    "lacp_mode": bond_params.get("lacp", "active"),
+                    "lacp_time": bond_params.get("lacp-rate", "fast"),
+                    "mtu": bond_config.get("mtu"),
+                }
+            elif iface not in bond_mappings[iface_bond]:
+                bond_mappings[iface_bond]["ports"].append(iface)
+
+    return netplan_changes_required
+
+
+def _update_netplan_dpdk_ports(dpdk_mappings: dict):
+    port_mappings = dpdk_mappings["ports"]
+    bond_mappings = dpdk_mappings["bonds"]
+
+    should_reapply_netplan = False
+
+    for bond_name, bond_config in bond_mappings.items():
+        changes_made = netplan.remove_interface_from_bridge(bond_config["bridge"], bond_name)
+        netplan.remove_bond(bond_name)
+        if changes_made:
+            should_reapply_netplan = True
+            # Remove existing system bonds and ports so that
+            # we can recreate them using DPDK.
+            _remove_ovs_port_from_bridge(bond_config["bridge"], bond_name)
+
+    for interface_name, interface_config in port_mappings.items():
+        if interface_config["bridge"]:
+            changes_made = netplan.remove_interface_from_bridge(
+                interface_config["bridge"], interface_name
+            )
+            if changes_made:
+                should_reapply_netplan = True
+                _remove_ovs_port_from_bridge(interface_config["bridge"], interface_name)
+        netplan.remove_ethernet(interface_name)
+
+    if should_reapply_netplan:
+        netplan.apply_netplan()
+    else:
+        logging.debug("No Netplan changes made while processing DPDK ports.")
+
+
+def _create_dpdk_ports_and_bonds(dpdk_mappings: dict, dpdk_driver: str):
+    port_mappings = dpdk_mappings["ports"]
+    bond_mappings = dpdk_mappings["bonds"]
+
+    for port_name, port_config in port_mappings.items():
+        pci.ensure_driver_override(port_config["pci_address"], dpdk_driver)
+        if port_config["bond"]:
+            # Created separately.
+            continue
+        _add_ovs_bridge(port_config["bridge"], "netdev")
+        _add_dpdk_port(
+            bridge_name=port_config["bridge"],
+            dpdk_port_name=port_config["dpdk_port_name"],
+            pci_address=port_config["pci_address"],
+            mtu=port_config["mtu"],
+        )
+
+    for bond_name, bond_config in bond_mappings.items():
+        bond_ports = []
+        for port_name in bond_config["ports"]:
+            port_info = port_mappings.get(port_name)
+            if not port_info:
+                raise Exception("Missing dpdk port info: %s", port_name)
+            bond_ports.append(
+                {
+                    "name": port_info["dpdk_port_name"],
+                    "pci_address": port_info["pci_address"],
+                    "mtu": port_info["mtu"],
+                }
+            )
+        _add_ovs_bridge(bond_config["bridge"], "netdev")
+        _add_dpdk_bond(
+            bridge_name=bond_config["bridge"],
+            bond_name=bond_name,
+            dpdk_ports=bond_ports,
+            mtu=bond_config["mtu"],
+            bond_mode=bond_config["bond_mode"],
+            lacp_mode=bond_config["lacp_mode"],
+            lacp_time=bond_config["lacp_time"],
+        )
+
+
+def _add_ovs_bridge(bridge_name: str, datapath_type: str, *cmd_args):
+    subprocess.check_call(
+        [
+            "ovs-vsctl",
+            "--retry",
+            "--may-exist",
+            "add-br",
+            bridge_name,
+            "--",
+            "set",
+            "bridge",
+            bridge_name,
+            f"datapath_type={datapath_type}",
+            *cmd_args,
+        ]
+    )
+
+
+def _add_dpdk_port(
+    bridge_name: str,
+    dpdk_port_name: str,
+    pci_address: str,
+    mtu: int | None = None,
+):
+    logging.info(
+        "Adding ovs dpdk port %s to bridge %s, address: %s, mtu: %s",
+        dpdk_port_name,
+        bridge_name,
+        pci_address,
+        mtu,
+    )
+    cmd = [
+        "ovs-vsctl",
+        "--may-exist",
+        "add-port",
+        bridge_name,
+        dpdk_port_name,
+        "--",
+        "set",
+        "Interface",
+        dpdk_port_name,
+        "type=dpdk",
+        f"options:dpdk-devargs={pci_address}",
+    ]
+    if mtu:
+        cmd.append(f"mtu-request={mtu}")
+    subprocess.check_call(cmd)
+
+
+def _add_dpdk_bond(
+    bridge_name: str,
+    bond_name: str,
+    dpdk_ports: list[dict],
+    mtu: int | None = None,
+    bond_mode: str = "balance-tcp",
+    lacp_mode: str = "active",
+    lacp_time: str = "fast",
+):
+    """Create a bond using DPDK ports.
+
+    :param bridge_name: add the bond to the specified bridge
+    :param dpdk_ports: a list of dictionaries that are expected to
+        contain the following keys:
+            * name - the dpdk port name
+            * pci_address - the PCI address of the underlying interface
+            * mtu (optional) - the MTU address
+    :param bond_mode, one of the following:
+            * "active-backup" - No load balancing, using one member at a time
+            * "balance-slb" - Balancing based on source MAC and output VLAN,
+                              periodic rebalancing based on traffic patterns
+            * "balance-tcp" - The switch needs to support 802.3ad and LACP
+                              negotiation. Balancing based on L3 and L4
+                              information. If unavailable, active-backup will
+                              be used as a fallback.
+        See "man ovs-vswitchd.conf.db" for more details about
+        the ovs bond parameters.
+    :param bond: the MTU value, optional.
+    :param lacp_mode: allows the switches to negotiate which links will be bonded
+        * "active" - the ports can initiate LACP negotiations
+        * "passive" - the ports can participate in LACP negotiations but not initiate
+        * "off" - disable LACP
+    :param lacp_time: LACP negotiation interval, "fast" (30ms) or "slow" (1s).
+    """
+    logging.info(
+        "Adding bond %s to bridge %s. Ports: %s, bond settings: %s/%s/%s.",
+        bridge_name,
+        bond_name,
+        dpdk_ports,
+        bond_mode,
+        lacp_mode,
+        lacp_time,
+    )
+
+    cmd = ["ovs-vsctl", "--may-exist", "add-bond", bridge_name, bond_name]
+    for port in dpdk_ports:
+        cmd.append(port["name"])
+
+    if bond_mode:
+        cmd += ["--", "set", "port", bond_name, f"bond_mode={bond_mode}"]
+    if lacp_mode:
+        cmd += ["--", "set", "port", bond_name, f"lacp={lacp_mode}"]
+    if lacp_time:
+        cmd += ["--", "set", "port", bond_name, f"other-config:lacp-time={lacp_time}"]
+
+    for port in dpdk_ports:
+        cmd += [
+            "--",
+            "set",
+            "Interface",
+            port["name"],
+            "type=dpdk",
+            f"options:dpdk-devargs={port["pci_address"]}",
+        ]
+        mtu = mtu or port.get("mtu")
+        if mtu:
+            cmd.append(f"mtu-request={mtu}")
+
+    subprocess.check_call(cmd)
+
+
+def _remove_ovs_port_from_bridge(bridge_name: str, port_name: str):
+    logging.debug("Removing ovs port %s from bridge %s.", port_name, bridge_name)
+    cmd = ["ovs-vsctl", "--if-exists", "del-port", bridge_name, port_name]
+    subprocess.check_call(cmd)
+
+
 def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:
     """Configure OVS/OVN external networking.
 
@@ -958,21 +1335,8 @@ def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:
         return
 
     datapath_type = _get_datapath_type(context)
-    subprocess.check_call(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "--may-exist",
-            "add-br",
-            external_bridge,
-            "--",
-            "set",
-            "bridge",
-            external_bridge,
-            f"datapath_type={datapath_type}",
-            "protocols=OpenFlow13,OpenFlow15",
-        ]
-    )
+    _add_ovs_bridge(external_bridge, datapath_type, "protocols=OpenFlow13,OpenFlow15")
+
     subprocess.check_call(
         [
             "ovs-vsctl",
@@ -1895,6 +2259,8 @@ def configure(snap: Snap) -> None:
     else:
         logging.info("ovs-vswitchd restart not required.")
 
+    _process_dpdk_ports(snap, context)
+
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
@@ -1929,6 +2295,7 @@ def _get_configure_context(snap: Snap) -> dict:
         "ca",
         "masakari",
         "sev",
+        "internal",
     ).as_dict()
     context["compute"]["allocated_cores"] = allocated_cores
     context["compute"]["cpu_shared_set"] = cpu_shared_set
