@@ -76,6 +76,7 @@ apps:
     plugs:
       - network
       - network-observe
+      - network-setup-control
       - hardware-observe
 
   # Libvirt
@@ -648,9 +649,11 @@ parts:
       - on amd64:
         - openvswitch-switch-dpdk
         - librte-meta-all
+        - driverctl
       - on arm64:
         - openvswitch-switch-dpdk
         - librte-meta-all
+        - driverctl
       - ovn-host
     override-build: |
       craftctl default
@@ -753,11 +756,14 @@ hooks:
     plugs:
       - network
       - network-control
+      - network-setup-control
       - hardware-observe
+      - kernel-module-control
       - firewall-control
       - microstack-support
       - kvm
       - epa-info
+      - etc-driverctl
   connect-slot-hypervisor-config:
     plugs:
       - network
@@ -769,3 +775,8 @@ plugs:
     interface: content
     content: epa-info
     target: $SNAP_DATA
+  # Required in order to persistently bind drivers such as vfio-pci.
+  etc-driverctl:
+    interface: system-files
+    write:
+    - /etc/driverctl.d
