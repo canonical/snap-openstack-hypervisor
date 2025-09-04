@@ -988,12 +988,17 @@ def _process_dpdk_ports(snap: Snap, context: dict):
     # Previously processed dpdk port mappings.
     dpdk_mappings = _get_dpdk_mappings(snap, context)
 
+    # Populate the DPDK mappings based on the Netplan config.
     _process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
+    # Update the Netplan config, removing the interfaces and bonds that will be
+    # used with DPDK and defined in OVS.
     _update_netplan_dpdk_ports(dpdk_mappings)
-    # The ports have been removed from netplan, save the dpdk
+    # The ports have been removed from Netplan, save the dpdk
     # configuration before attempting to apply it to ovs.
     _set_dpdk_mappings(snap, dpdk_mappings)
 
+    # Define the DPDK ports and bonds in OVS and ensure that the DPDK-compatible
+    # interface driver is used.
     _create_dpdk_ports_and_bonds(dpdk_mappings, dpdk_driver)
 
 
