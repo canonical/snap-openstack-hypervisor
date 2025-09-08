@@ -204,3 +204,46 @@ def apply_exclusion_list(pci_device_specs: list[dict], excluded_devices: list[st
 
     LOG.debug("New PCI whitelist: %s", updated_pci_device_specs)
     return updated_pci_device_specs
+
+
+def set_driver_override(pci_address: str, driver_name: str):
+    """Persistently bind the pci device to the specified driver."""
+    logging.info("Setting driver override: %s -> %s", pci_address, driver_name)
+    subprocess.check_call(["driverctl", "set-override", pci_address, driver_name])
+
+
+def get_driver_overrides() -> dict[str, str]:
+    """Obtain a map of persistent driver overrides (address -> driver)."""
+    overrides = {}
+    try:
+        out = subprocess.check_output(["driverctl", "list-overrides"])
+    except subprocess.CalledProcessError:
+        # driverctl returns non-zero (1) if there are no overrides...
+        return overrides
+
+    for line in out.decode().split("\n"):
+        if not line or " " not in line:
+            continue
+        address, driver = line.split(" ", 1)
+        if driver != "(none)":
+            overrides[address] = driver
+    return overrides
+
+
+def ensure_driver_override(pci_address, driver_name):
+    """Persistently bind the pci device to the specified driver.
+
+    Avoids unbinding the driver if the desired driver is already configured.
+    """
+    overrides = get_driver_overrides()
+    current_override = overrides.get(pci_address)
+    if current_override != driver_name:
+        LOG.info(
+            "%s: found driver override: %s, changing to %s",
+            pci_address,
+            current_override,
+            driver_name,
+        )
+        set_driver_override(pci_address, driver_name)
+    else:
+        LOG.info("%s: driver override already set: %s", pci_address, driver_name)

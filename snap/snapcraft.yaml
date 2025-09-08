@@ -28,6 +28,7 @@ environment:
   OVS_PKGDATADIR: $SNAP/usr/share/openvswitch
   OVS_BINDIR: $SNAP/usr/bin
   OVS_SBINDIR: $SNAP/usr/sbin
+  RUNTIME_DIRECTORY: $SNAP_COMMON/run
 
 platforms:
   amd64:
@@ -240,6 +241,7 @@ apps:
       - network-control
       - network-observe
       - microstack-support
+      - firewall-control
 
   neutron-sriov-nic-agent:
     command: 'bin/neutron-sriov-nic-agent-service'
@@ -458,7 +460,6 @@ parts:
       - --disable-user
       - --disable-linux-user
       - --disable-bsd-user
-      - --disable-vhost-user
       - --disable-xen
       - --disable-werror
       - --prefix=/usr
@@ -631,8 +632,12 @@ parts:
       - openvswitch-switch
       - on amd64:
         - openvswitch-switch-dpdk
+        - librte-meta-all
+        - driverctl
       - on arm64:
         - openvswitch-switch-dpdk
+        - librte-meta-all
+        - driverctl
       - ovn-host
     override-build: |
       craftctl default
@@ -713,6 +718,53 @@ parts:
       - CGO_CFLAGS: "-I$CRAFT_STAGE/usr/include"
       - CGO_LDFLAGS: "-L$CRAFT_STAGE/usr/lib"
 
+  # TODO: drop the following once https://github.com/canonical/netplan/pull/549
+  # gets backported.
+  netplan:
+    plugin: nil
+    source-tag: main
+    source-type: git
+    source: https://github.com/canonical/netplan
+    build-packages:
+      # - netplan.io-build-deps-depends
+      - build-essential
+      - debhelper-compat
+      - dh-sequence-python3
+      - pkgconf
+      - bash-completion
+      - libyaml-dev
+      - libglib2.0-dev
+      - uuid-dev
+      - python3
+      - python3-cffi
+      - python3-coverage
+      - python3-pytest
+      - python3-pytest-cov
+      - python3-rich
+      - python3-yaml
+      - libcmocka-dev
+      - libpython3-dev
+      - libsystemd-dev
+      - udev
+      - systemd
+      - systemd-dev
+      - dbus-x11
+      - pyflakes3
+      - pycodestyle
+      - pandoc
+      - openvswitch-switch
+      - meson
+      - iproute2
+    stage-packages:
+      - netplan.io
+    build-environment:
+      - DEBIAN_FRONTEND: "noninteractive"
+    after: [openstack]
+    override-build: |
+      meson setup _build -Dunit_testing=false --prefix=/usr
+      meson compile -C _build
+      meson install -C _build --destdir $CRAFT_PART_INSTALL
+
 slots:
   hypervisor-config:
     interface: content
@@ -729,6 +781,7 @@ hooks:
       - network
       - network-control
       - hardware-observe
+      - kernel-module-control
       - firewall-control
       - microstack-support
       - kvm
