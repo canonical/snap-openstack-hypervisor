@@ -19,17 +19,15 @@ jobs:
           run: |
             sudo apt update
             sudo apt install -y tox libvirt-dev
+            sudo snap install astral-uv --channel latest/stable --classic
 
         - name: Run coverage tests
           run: tox -e unit
 
         - name: Install hypervisor snap dependencies
           run: |
-            pip3 install --upgrade pip
-            for f in $(find -name '*requirements.txt'); do
-              echo "${f}"
-              pip3 install --requirement "${f}"
-            done
+            uv sync
+            source .venv/bin/activate
 
         - name: TICS
           uses: tiobe/tics-github-action@v3
