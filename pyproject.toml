@@ -48,6 +48,11 @@ dev= [
     "pytest-mock",
 ]
 
+tics= [
+    "python-novaclient",
+    "libvirt-python",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/canonical/openstack-hypervisor"
 "Bug Reports" = "https://github.com/canonical/openstack-hypervisor/issues"
