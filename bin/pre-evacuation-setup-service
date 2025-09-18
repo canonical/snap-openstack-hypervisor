@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+import enum
+import json
+import logging
+import os
+import socket
+import subprocess
+import time
+from typing import Dict
+
+from pydantic import BaseModel, Field, field_validator
+from snaphelpers import Snap
+
+SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "data", "shutdown.sock")
+
+PROTOCOL_VERSION = "1.0"
+
+
+class NetworkStatus(enum.Enum):
+    """Enum for network interface status"""
+    NIC_DOWN = "nic-down"
+
+
+class NetworkStatusMessage(BaseModel):
+    """Pydantic model for network status messages"""
+    version: str = Field(description="Protocol version")
+    timestamp: float = Field(description="Message timestamp")
+    status: str = Field(description="Network status")
+
+    @field_validator('version')
+    @classmethod
+    def validate_version(cls, v):
+        if v != PROTOCOL_VERSION:
+            logging.warning(f"Incompatible protocol version: {v}, expected: {PROTOCOL_VERSION}")
+        return v
+
+    @field_validator('status')
+    @classmethod
+    def validate_status(cls, v):
+        try:
+            return NetworkStatus(v).value
+        except ValueError:
+            raise ValueError(f"Invalid status: {v}. Must be one of: {', '.join([s.value for s in NetworkStatus])}")
+
+
+def stop_nova_compute():
+    """
+    Stop the nova-compute service to allow VM evacuation,
+    but only if it is currently running.
+    """
+    try:
+        snap = Snap()
+        services = snap.services.list()
+
+        if 'nova-compute' in services:
+            service = services['nova-compute']
+
+            if service.active:
+                logging.info("nova-compute is active. Proceeding to stop the service...")
+                service.stop()
+                logging.info("nova-compute service stopped successfully.")
+            else:
+                logging.info("nova-compute service is already stopped. No action needed.")
+        else:
+            logging.warning("nova-compute service not found in the list of snap services")
+
+    except Exception as e:
+        logging.error(f"Unexpected error during nova-compute stop: {e}")
+
+
+def shutdown_vms():
+    """
+    Shut down all running VMs using virsh.
+    """
+    logging.info("Initiating shutdown of all running VMs...")
+    result = subprocess.run(
+        ["virsh", "list", "--name"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    vm_names = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+
+    if not vm_names:
+        logging.info("No running VMs found.")
+        return
+
+    for vm in vm_names:
+        logging.info(f"Shutting down VM: {vm}")
+        try:
+            subprocess.run(["virsh", "shutdown", vm], check=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            logging.error(f"Timeout: VM '{vm}' did not shutdown in 30 seconds.")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error during VM shutdown: {e.stderr.strip()}")
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+
+    logging.info("Shutdown commands sent to all VMs.")
+
+
+def handle_network_status(data: Dict) -> str:
+    """Handle network status messages and take appropriate actions
+
+    Args:
+        data: The validated message data
+
+    Returns:
+        Response message to send back to the client
+    """
+    status_value = data["status"]
+    status = NetworkStatus(status_value)
+    logging.info(f"Received network status update: {status_value}")
+
+    if status == NetworkStatus.NIC_DOWN:
+        logging.info("Network interface down detected, initiating evacuation procedure")
+
+        stop_nova_compute()
+        shutdown_vms()
+
+        return json.dumps({
+            "status": "success",
+            "message": "Evacuation procedure initiated",
+            "timestamp": time.time()
+        })
+
+    else:
+        logging.warning(f"Received unknown network status: {status_value}")
+
+        return json.dumps({
+            "status": "error",
+            "message": f"Unknown network status: {status_value}",
+            "timestamp": time.time()
+        })
+
+
+def run_listener():
+    logging.basicConfig(level=logging.INFO)
+
+    os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+    if os.path.exists(SOCKET_PATH):
+        os.remove(SOCKET_PATH)
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_sock:
+        server_sock.bind(SOCKET_PATH)
+        os.chmod(SOCKET_PATH, 0o666)
+        server_sock.listen()
+        logging.info(f"Listening on Unix socket: {SOCKET_PATH}")
+        logging.info(f"Using protocol version: {PROTOCOL_VERSION}")
+
+        while True:
+            conn, _ = server_sock.accept()
+            with conn:
+                data = conn.recv(1024)
+                if not data:
+                    continue
+
+                raw_message = data.decode().strip()
+                logging.debug(f"Received raw message: {raw_message}")
+
+                try:
+                    json_data = json.loads(raw_message)
+                    message = NetworkStatusMessage.model_validate(json_data)
+                    validated_data = message.model_dump()
+
+                    response = handle_network_status(validated_data)
+                    conn.sendall(response.encode())
+
+                except ValueError as e:
+                    logging.error(f"Validation error: {e}")
+                    error_response = json.dumps({
+                        "status": "error",
+                        "message": f"Schema validation failed: {str(e)}",
+                        "timestamp": time.time()
+                    })
+                    conn.sendall(error_response.encode())
+                except Exception as e:
+                    logging.error(f"Error processing message: {e}")
+                    error_response = json.dumps({
+                        "status": "error",
+                        "message": f"Server error: {str(e)}",
+                        "timestamp": time.time()
+                    })
+                    conn.sendall(error_response.encode())
+
+
+if __name__ == "__main__":
+    run_listener()
