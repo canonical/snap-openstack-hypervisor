@@ -384,6 +384,7 @@ parts:
     plugin: autotools
     stage-packages:
       - seabios
+      - qemu-system-data
       - ipxe-qemu
       # UEFI Support, required on arm64
       - on arm64:
