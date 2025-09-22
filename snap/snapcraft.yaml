@@ -470,6 +470,7 @@ parts:
       - gcc
       - meson
       - ninja-build
+      - execstack
     autotools-configure-parameters:
       - --enable-system
       - --target-list=x86_64-softmmu,aarch64-softmmu
