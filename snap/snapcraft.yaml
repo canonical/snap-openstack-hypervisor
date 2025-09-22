@@ -508,6 +508,11 @@ parts:
 
       # Install keymaps as the qemu build process does not!
       install -Dp -m0644 -t $CRAFT_PART_INSTALL/usr/share/qemu/keymaps $(ls -1 $CRAFT_PART_SRC/pc-bios/keymaps/* | fgrep -v /meson.build)
+    override-prime: |
+      craftctl default
+      for f in $(execstack -q $CRAFT_PRIME/usr/share/qemu/* 2>/dev/null| grep -e "^X" | cut -d " " -f2); do
+          execstack --clear-execstack $f
+      done
 
   libvirt:
     source: https://git.launchpad.net/ubuntu/+source/libvirt
