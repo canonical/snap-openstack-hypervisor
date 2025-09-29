@@ -164,6 +164,6 @@ def ifaddresses():
 
 @pytest.fixture()
 def get_pci_address():
-    with patch("openstack_hypervisor.cli.interfaces.get_pci_address") as p:
+    with patch("openstack_hypervisor.cli.pci_devices.get_pci_address") as p:
         p.side_effect = lambda iface: "pci-addr-%s" % iface
         yield p
