@@ -27,7 +27,35 @@ from openstack_hypervisor.cli.common import (
 logger = logging.getLogger(__name__)
 
 
-class InterfaceOutput(pydantic.BaseModel):
+class PciDeviceOutput(pydantic.BaseModel):
+    """Output schema for a PCI device."""
+
+    pci_address: str = pydantic.Field(description="The PCI address of the device", default="")
+    # We're using "product" instead of "device" to stay consistent with the Openstack naming.
+    product_id: str = pydantic.Field(description="The PCI device id of the device", default="")
+    vendor_id: str = pydantic.Field(description="The PCI vendor id of the device", default="")
+
+    # Human readable PCI names
+    class_name: str = pydantic.Field(description="The PCI class name of the device", default="")
+    vendor_name: str = pydantic.Field(description="The PCI vendor name of the device", default="")
+    product_name: str = pydantic.Field(
+        description="The PCI product name of the device", default=""
+    )
+    subsystem_vendor_name: str | None = pydantic.Field(
+        description="The PCI subsystem vendor name of the device", default=""
+    )
+    subsystem_product_name: str | None = pydantic.Field(
+        description="The PCI subsystem device name of the device",
+        default="",
+    )
+
+    pci_whitelisted: bool = pydantic.Field(
+        description="Whether Nova is configured to expose this PCI device.",
+        default="",
+    )
+
+
+class InterfaceOutput(PciDeviceOutput):
     """Output schema for an interface."""
 
     name: str = pydantic.Field(description="Main name of the interface", default="")
@@ -49,38 +77,22 @@ class InterfaceOutput(pydantic.BaseModel):
         description="Whether switchdev hardware offload is supported",
         default=False,
     )
-    pci_address: str = pydantic.Field(description="The PCI address of the interface", default="")
-    # We're using "product" instead of "device" to stay consistent with the Openstack naming.
-    product_id: str = pydantic.Field(description="The PCI device id of the interface", default="")
-    vendor_id: str = pydantic.Field(description="The PCI vendor id of the interface", default="")
-
-    # Human readable PCI names
-    class_name: str = pydantic.Field(description="The PCI class name of the interface", default="")
-    vendor_name: str = pydantic.Field(
-        description="The PCI vendor name of the interface", default=""
-    )
-    product_name: str = pydantic.Field(
-        description="The PCI product name of the interface", default=""
-    )
-    subsystem_vendor_name: str = pydantic.Field(
-        description="The PCI subsystem vendor name of the interface", default=""
-    )
-    subsystem_product_name: str = pydantic.Field(
-        description="The PCI subsystem device name of the interface",
-        default="",
-    )
 
     pf_pci_address: str = pydantic.Field(
         description="The PF PCI address of a given SR-IOV VF", default=""
-    )
-    pci_whitelisted: bool = pydantic.Field(
-        description="Whether Nova is configured to expose this PCI device.",
-        default="",
     )
     pci_physnet: str | None = pydantic.Field(
         description="The Neutron physical network associated with this PCI device.",
         default=None,
     )
+
+
+class PciDeviceList(pydantic.RootModel[list[PciDeviceOutput]]):
+    """Root schema for a list of GPU devices."""
+
+
+class GpuList(pydantic.RootModel[list[PciDeviceOutput]]):
+    """Root schema for a list of GPU devices."""
 
 
 class NicList(pydantic.RootModel[list[InterfaceOutput]]):
@@ -228,7 +240,7 @@ def _get_pci_spec_cfg(snap: Snap):
     return pci.apply_exclusion_list(pci_spec_cfg, pci_excluded_devices)
 
 
-def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
+def _get_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
     if not pci_address:
         return {}
 
@@ -241,28 +253,15 @@ def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
             "Unable to retrieve PCI human readable names: %s, error: %s", pci_address, ex
         )
 
-    sriov_available = pci.is_sriov_capable(pci_address)
-    if sriov_available:
-        sriov_totalvfs = pci.get_sriov_totalvfs(pci_address)
-        sriov_numvfs = pci.get_sriov_numvfs(pci_address)
-    else:
-        sriov_totalvfs = 0
-        sriov_numvfs = 0
-
     out = dict(
-        sriov_available=sriov_available,
-        sriov_totalvfs=sriov_totalvfs,
-        sriov_numvfs=sriov_numvfs,
         pci_address=pci_address,
         product_id=pci.get_pci_product_id(pci_address),
         vendor_id=pci.get_pci_vendor_id(pci_address),
-        pf_pci_address=pci.get_physfn_address(pci_address),
         class_name=pci_description.get("class_name", ""),
         vendor_name=pci_description.get("vendor_name", ""),
         product_name=pci_description.get("device_name", ""),
         subsystem_vendor_name=pci_description.get("subsystem_vendor_name", ""),
         subsystem_product_name=pci_description.get("subsystem_device_name", ""),
-        pci_physnet=None,
         pci_whitelisted=False,
     )
 
@@ -281,6 +280,47 @@ def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
             match = pci_spec.match(dev)
             if match:
                 out["pci_whitelisted"] = True
+
+    return out
+
+
+def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
+    if not pci_address:
+        return {}
+
+    out = _get_pci_info(pci_address, pci_spec_cfg)
+
+    sriov_available = pci.is_sriov_capable(pci_address)
+    if sriov_available:
+        sriov_totalvfs = pci.get_sriov_totalvfs(pci_address)
+        sriov_numvfs = pci.get_sriov_numvfs(pci_address)
+    else:
+        sriov_totalvfs = 0
+        sriov_numvfs = 0
+    out.update(
+        {
+            "sriov_available": sriov_available,
+            "sriov_totalvfs": sriov_totalvfs,
+            "sriov_numvfs": sriov_numvfs,
+            "pf_pci_address": pci.get_physfn_address(pci_address),
+            "pci_physnet": None,
+        }
+    )
+
+    if pci_address and out["vendor_id"] and out["product_id"]:
+        for spec_dict in pci_spec_cfg:
+            if not isinstance(spec_dict, dict):
+                raise ValueError("Invalid device spec, expecting a dict: %s." % spec_dict)
+
+            pci_spec = devspec.PciDeviceSpec(spec_dict)
+            dev = {
+                "vendor_id": out["vendor_id"].replace("0x", ""),
+                "product_id": out["product_id"].replace("0x", ""),
+                "address": pci_address,
+                "parent_addr": out["pf_pci_address"],
+            }
+            match = pci_spec.match(dev)
+            if match:
                 if not out["pci_physnet"]:
                     out["pci_physnet"] = spec_dict.get("physical_network")
 
@@ -332,6 +372,22 @@ def to_output_schema(snap: Snap, nics: list[Interface]) -> NicList:  # noqa: C90
     return NicList(nics_)
 
 
+def to_output_schema_gpus(snap: Snap) -> GpuList:  # noqa: C901
+    """Convert the gpus to the output schema."""
+    gpus_ = []
+
+    pci_spec_cfg = _get_pci_spec_cfg(snap)
+    for pci_device in pci.list_pci_devices():
+        if not pci.is_gpu_device(pci_device["class"]):
+            continue
+
+        logger.debug("Adding PCI device to the gpu list: %s", pci_device["address"])
+        pci_info = _get_pci_info(pci_device["address"], pci_spec_cfg)
+        out = PciDeviceOutput(**pci_info)
+        gpus_.append(out)
+    return GpuList(gpus_)
+
+
 def display_nics(nics: NicList, candidate_nics: list[str], format: str):
     """Display the result depending on the format."""
     if format in (VALUE_FORMAT, TABLE_FORMAT):
@@ -363,6 +419,26 @@ def display_nics(nics: NicList, candidate_nics: list[str], format: str):
         print(json.dumps({"nics": nics.model_dump(), "candidates": candidate_nics}, indent=indent))
 
 
+def display_gpus(gpus: GpuList, format: str):
+    """Display the result depending on the format."""
+    if format in (VALUE_FORMAT, TABLE_FORMAT):
+        table = prettytable.PrettyTable()
+        table.title = "All GPUs"
+        table.field_names = ["Class Name", "Vendor Name", "Product Name"]
+        for gpu in gpus.root:
+            table.add_row(
+                [
+                    gpu.class_name,
+                    gpu.vendor_name,
+                    gpu.product_name,
+                ]
+            )
+        print(table)
+    elif format in (JSON_FORMAT, JSON_INDENT_FORMAT):
+        indent = 2 if format == JSON_INDENT_FORMAT else None
+        print(json.dumps({"gpus": gpus.model_dump()}, indent=indent))
+
+
 @click.command("list-nics")
 @click.option(
     "-f",
@@ -389,6 +465,21 @@ def list_nics(snap: Snap, format: str):
         candidate_nics = filter_candidate_nics(nics)
         nics_ = to_output_schema(snap, nics)
     display_nics(nics_, candidate_nics, format)
+
+
+@click.command("list-gpus")
+@click.option(
+    "-f",
+    "--format",
+    default=JSON_FORMAT,
+    type=click.Choice([VALUE_FORMAT, TABLE_FORMAT, JSON_FORMAT, JSON_INDENT_FORMAT]),
+    help="Output format",
+)
+@click.pass_obj
+def list_gpus(snap: Snap, format: str):
+    """List gpus that are available on the node."""
+    gpus_ = to_output_schema_gpus(snap)
+    display_gpus(gpus_, format)
 
 
 def get_nics(snap: Snap) -> NicList:
