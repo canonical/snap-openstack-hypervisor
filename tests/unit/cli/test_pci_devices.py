@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openstack_hypervisor.cli.interfaces import filter_candidate_nics
+from openstack_hypervisor.cli.pci_devices import filter_candidate_nics
 
 INTERFACES = [
     {
@@ -60,7 +60,7 @@ def mock_interfaces():
 
 
 @patch(
-    "openstack_hypervisor.cli.interfaces.load_virtual_interfaces",
+    "openstack_hypervisor.cli.pci_devices.load_virtual_interfaces",
     return_value=["vlan0", "bond0", "bond1"],
 )
 def test_filter_candidate_nics(mock_load_virtual_interfaces, mock_interfaces):

@@ -10,6 +10,11 @@ from openstack_hypervisor import devspec
 
 LOG = logging.getLogger(__name__)
 
+# PCI device class definitions: https://admin.pci-ids.ucw.cz/read/PD
+PCI_CLASS_NETWORK_CONTROLLER = "0x02"
+PCI_CLASS_DISPLAY_CONTROLLER = "0x03"
+PCI_SUBCLASS_PROCESSING_ACCELERATOR = "0x1200"
+
 
 def get_pci_product_id(address: str) -> str:
     """Determine the PCI product id for the specified PCI address."""
@@ -103,7 +108,30 @@ def is_network_device(pci_class: str) -> bool:
     #   * class code (8 bytes)
     #   * subclass code (8 bytes)
     #   * vendor specific (8 bytes)
-    return pci_class.startswith("0x02")
+    return pci_class.startswith(PCI_CLASS_NETWORK_CONTROLLER)
+
+
+def is_display_device(pci_class: str) -> bool:
+    """Specifies whether the PCI class represents a display device."""
+    # PCI class format:
+    #   * class code (8 bytes)
+    #   * subclass code (8 bytes)
+    #   * vendor specific (8 bytes)
+    return pci_class.startswith(PCI_CLASS_DISPLAY_CONTROLLER)
+
+
+def is_accelerator_device(pci_class: str) -> bool:
+    """Specifies whether the PCI class and subclass represents a accelerator device."""
+    # PCI class format:
+    #   * class code (8 bytes)
+    #   * subclass code (8 bytes)
+    #   * vendor specific (8 bytes)
+    return pci_class.startswith(PCI_SUBCLASS_PROCESSING_ACCELERATOR)
+
+
+def is_gpu_device(pci_class: str) -> bool:
+    """Specifies whether the PCI represents a display or accelerator device."""
+    return is_display_device(pci_class) or is_accelerator_device(pci_class)
 
 
 def list_pci_devices() -> list[dict]:

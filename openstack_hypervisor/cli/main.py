@@ -5,8 +5,8 @@ import click
 from snaphelpers import Snap
 
 from openstack_hypervisor.cli.hypervisor import hypervisor
-from openstack_hypervisor.cli.interfaces import list_nics
 from openstack_hypervisor.cli.log import setup_root_logging
+from openstack_hypervisor.cli.pci_devices import list_gpus, list_nics
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
@@ -22,6 +22,7 @@ def main():
     snap = Snap()
     setup_root_logging()
     cli.add_command(list_nics)
+    cli.add_command(list_gpus)
     cli.add_command(hypervisor)
 
     cli(obj=snap)

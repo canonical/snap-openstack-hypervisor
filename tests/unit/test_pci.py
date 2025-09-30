@@ -137,3 +137,56 @@ class TestPCIUtils:
         pci.ensure_driver_override("0000:1a:00.1", "vfio-pci")
 
         mock_set_driver_override.assert_called_once_with("0000:1a:00.0", "vfio-pci")
+
+    @pytest.mark.parametrize(
+        "pci_class, expected_result",
+        [
+            ("0x020000", True),
+            ("0x020200", True),
+            ("0x030000", False),
+        ],
+    )
+    def test_is_network_device(self, pci_class: str, expected_result: bool):
+        result = pci.is_network_device(pci_class)
+        assert expected_result == result
+
+    @pytest.mark.parametrize(
+        "pci_class, expected_result",
+        [
+            ("0x030000", True),
+            ("0x030200", True),
+            ("0x050000", False),
+        ],
+    )
+    def test_is_display_device(self, pci_class: str, expected_result: bool):
+        result = pci.is_display_device(pci_class)
+        assert expected_result == result
+
+    @pytest.mark.parametrize(
+        "pci_class, expected_result",
+        [
+            ("0x120000", True),
+            ("0x120040", True),
+            ("0x120100", False),
+            ("0x050000", False),
+            ("0x030000", False),
+        ],
+    )
+    def test_is_accelerator_device(self, pci_class: str, expected_result: bool):
+        result = pci.is_accelerator_device(pci_class)
+        assert expected_result == result
+
+    @pytest.mark.parametrize(
+        "pci_class, expected_result",
+        [
+            ("0x030000", True),
+            ("0x030200", True),
+            ("0x120000", True),
+            ("0x120040", True),
+            ("0x120100", False),
+            ("0x050000", False),
+        ],
+    )
+    def test_is_gpu_device(self, pci_class: str, expected_result: bool):
+        result = pci.is_gpu_device(pci_class)
+        assert expected_result == result
