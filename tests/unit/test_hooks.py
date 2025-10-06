@@ -13,7 +13,7 @@ import yaml
 from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import hooks
-from openstack_hypervisor.cli import interfaces
+from openstack_hypervisor.cli import pci_devices
 
 
 class TestHooks:
@@ -523,7 +523,7 @@ class TestHooks:
                 hex(random.randint(0, 0xFF)).strip("0x"),
                 hex(random.randint(0, 0xFF)).strip("0x"),
             )
-        return interfaces.InterfaceOutput(
+        return pci_devices.InterfaceOutput(
             name=name,
             configured=configured,
             up=up,
@@ -545,7 +545,7 @@ class TestHooks:
             subsystem_product_name="mock subsystem product name",
         )
 
-    @mock.patch.object(interfaces, "get_nics")
+    @mock.patch.object(pci_devices, "get_nics")
     def test_set_sriov_context(self, mock_get_nics, snap):
         sriov_pf_specs = dict(
             sriov_available=True,
