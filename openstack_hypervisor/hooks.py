@@ -38,7 +38,7 @@ from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import netplan, pci
-from openstack_hypervisor.cli import interfaces
+from openstack_hypervisor.cli import pci_devices
 from openstack_hypervisor.cli.common import (
     EPAOrchestratorError,
     SocketCommunicationError,
@@ -1026,7 +1026,7 @@ def _process_dpdk_netplan_config(  # noqa: C901
             logging.debug("DPDK port already processed: %s", iface)
             continue
 
-        pci_address = interfaces.get_pci_address(iface)
+        pci_address = pci_devices.get_pci_address(iface)
         if not pci_address:
             logging.warning(
                 "Couldn't determine interface PCI address: %s, skipping DPDK configuration.",
@@ -2083,7 +2083,7 @@ def _should_sriov_agent_manage_nic(nic, physnet=None):
 
 def _set_sriov_context(snap: Snap, context: dict):  # noqa: C901
     logging.info("Determining SR-IOV configuration.")
-    nics = interfaces.get_nics(snap).root
+    nics = pci_devices.get_nics(snap).root
     # Retrieve SR-IOV PFs that have been whitelisted, including
     # those that have whitelisted VFs.
     mappings = []
@@ -2142,7 +2142,7 @@ def process_whitelisted_sriov_pfs(
 ):
     """Replace whitelisted PFs with their corresponding VFs."""
     logging.info("Processing SR-IOV whitelist, replacing PFs with VFs")
-    nics = interfaces.get_nics(snap).root
+    nics = pci_devices.get_nics(snap).root
     # The following dict contains a list of VFs for each whitelisted PF address.
     whitelisted_pfs = {}
 
