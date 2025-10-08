@@ -275,7 +275,6 @@ def _get_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
                 "vendor_id": out["vendor_id"].replace("0x", ""),
                 "product_id": out["product_id"].replace("0x", ""),
                 "address": pci_address,
-                "parent_addr": out["pf_pci_address"],
             }
             match = pci_spec.match(dev)
             if match:
@@ -288,7 +287,14 @@ def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
     if not pci_address:
         return {}
 
-    out = _get_pci_info(pci_address, pci_spec_cfg)
+    # Human readable PCI names.
+    pci_description = {}
+    try:
+        pci_description = pci.get_pci_description(pci_address)
+    except Exception as ex:
+        logger.warning(
+            "Unable to retrieve PCI human readable names: %s, error: %s", pci_address, ex
+        )
 
     sriov_available = pci.is_sriov_capable(pci_address)
     if sriov_available:
@@ -297,14 +303,22 @@ def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
     else:
         sriov_totalvfs = 0
         sriov_numvfs = 0
-    out.update(
-        {
-            "sriov_available": sriov_available,
-            "sriov_totalvfs": sriov_totalvfs,
-            "sriov_numvfs": sriov_numvfs,
-            "pf_pci_address": pci.get_physfn_address(pci_address),
-            "pci_physnet": None,
-        }
+
+    out = dict(
+        sriov_available=sriov_available,
+        sriov_totalvfs=sriov_totalvfs,
+        sriov_numvfs=sriov_numvfs,
+        pci_address=pci_address,
+        product_id=pci.get_pci_product_id(pci_address),
+        vendor_id=pci.get_pci_vendor_id(pci_address),
+        pf_pci_address=pci.get_physfn_address(pci_address),
+        class_name=pci_description.get("class_name", ""),
+        vendor_name=pci_description.get("vendor_name", ""),
+        product_name=pci_description.get("device_name", ""),
+        subsystem_vendor_name=pci_description.get("subsystem_vendor_name", ""),
+        subsystem_product_name=pci_description.get("subsystem_device_name", ""),
+        pci_physnet=None,
+        pci_whitelisted=False,
     )
 
     if pci_address and out["vendor_id"] and out["product_id"]:
@@ -321,6 +335,7 @@ def _get_nic_pci_info(pci_address: str, pci_spec_cfg: list[dict]) -> dict:
             }
             match = pci_spec.match(dev)
             if match:
+                out["pci_whitelisted"] = True
                 if not out["pci_physnet"]:
                     out["pci_physnet"] = spec_dict.get("physical_network")
 
