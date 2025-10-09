@@ -298,6 +298,16 @@ apps:
       - network-bind
       - firewall-control
       - microstack-support
+      
+  file-transfer:
+    command: 'bin/file-transfer-service'
+    daemon: simple
+    restart-condition: on-failure
+    plugs:
+      - network
+      - network-bind
+      - network-control
+      - microstack-support
 
   libvirt-exporter:
     daemon: simple
@@ -670,6 +680,8 @@ parts:
 
   openstack:
     plugin: nil
+    build-packages:
+      - patch
     stage-packages:
       - ceilometer-agent-compute
       - python3-nova
@@ -710,6 +722,11 @@ parts:
       rm -rf $CRAFT_PART_INSTALL/usr/lib/python3/dist-packages/netaddr/eui/oui.txt
       # drop some docutils binaries to avoid libvirt part build confusion
       rm -rf $CRAFT_PART_INSTALL/usr/bin/rst2*
+    override-prime: |
+      craftctl default
+      pushd "$CRAFT_PRIME/usr/lib/python3/dist-packages"
+      patch -p1 < "$CRAFT_PROJECT_DIR/snap/patches/nova/0001-remotefs-http-driver.patch"
+      popd
 
   openstack-hypervisor:
     plugin: python
