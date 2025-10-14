@@ -38,9 +38,10 @@ dependencies = [
     "pyroute2==0.7.11",  # matched to caracal cloud-archive
     "click",
     "prettytable",
-    "fastapi",
-    "uvicorn[standard]",
-    "aiofiles",
+    "oslo.config",
+    "oslo.log",
+    "oslo.service",
+    "WebOb",
 ]
 
 [project.optional-dependencies]

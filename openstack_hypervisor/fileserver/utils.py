@@ -1,4 +1,4 @@
-"""Utility helpers for the fileserver HTTP implementation."""
+"""Utility helpers for the fileserver implementation (framework-agnostic)."""
 
 # SPDX-FileCopyrightText: 2024 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
@@ -8,7 +8,12 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
-from fastapi import HTTPException
+
+class BadRequestError(Exception):
+    """Raised when a client input is invalid."""
+
+    pass
+
 
 CHUNK_READ_SIZE = 8 * 1024 * 1024
 
@@ -35,15 +40,15 @@ def write_meta_json(directory: Path, data: Dict[str, Any]) -> None:
 def read_meta_json(directory: Path) -> Dict[str, Any]:
     """Read and parse meta.json from the given directory.
 
-    Raises an HTTP 400 error when missing or invalid.
+    Raises BadRequestError when missing or invalid.
     """
     meta_path = directory / "meta.json"
     if not meta_path.exists():
-        raise HTTPException(status_code=400, detail="upload metadata missing")
+        raise BadRequestError("upload metadata missing")
     try:
         return json.loads(meta_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"invalid upload metadata: {exc}")
+        raise BadRequestError(f"invalid upload metadata: {exc}")
 
 
 def assemble_chunks_to_file(chunk_paths: Iterable[Path], destination: Path) -> None:

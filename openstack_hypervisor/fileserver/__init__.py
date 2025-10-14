@@ -6,8 +6,8 @@ Exposes a small HTTP server and matching client used by the hypervisor
 to transfer files between hosts.
 """
 
-from .server import create_app
+from .server import application
 
 __all__ = [
-    "create_app",
+    "application",
 ]

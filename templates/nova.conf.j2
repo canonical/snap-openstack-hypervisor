@@ -52,6 +52,7 @@ live_migration_scheme = tls
 {% if compute.migration_address %}
 live_migration_inbound_addr = {{ compute.migration_address }}
 {% endif -%}
+remote_filesystem_transport = http
 
 # The following [compute] section controls CPU pinning for dedicated and shared vCPUs.
 # Setting cpu_dedicated_set and cpu_shared_set determines which host CPUs are used for
