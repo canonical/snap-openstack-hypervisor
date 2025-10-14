@@ -40,15 +40,16 @@ index 297aaae8d2..525a5b7a4c 100644
  
  libvirt_volume_vzstorage_opts = [
 diff --git a/nova/virt/libvirt/volume/remotefs.py b/nova/virt/libvirt/volume/remotefs.py
-index 8ddcaa1fcc..2732872895 100644
+index 8ddcaa1fcc..bea1a4965b 100644
 --- a/nova/virt/libvirt/volume/remotefs.py
 +++ b/nova/virt/libvirt/volume/remotefs.py
-@@ -15,6 +15,13 @@
+@@ -15,6 +15,14 @@
  
  import abc
  import os
 +import math
 +import gzip
++import socket
 +from typing import Tuple
 +
 +import requests
@@ -57,7 +58,7 @@ index 8ddcaa1fcc..2732872895 100644
  
  from oslo_concurrency import processutils
  from oslo_log import log as logging
-@@ -30,6 +37,42 @@ LOG = logging.getLogger(__name__)
+@@ -30,6 +38,45 @@ LOG = logging.getLogger(__name__)
  CONF = nova.conf.CONF
  
  
@@ -71,17 +72,20 @@ index 8ddcaa1fcc..2732872895 100644
 +        raise ValueError(f"Destination path must be absolute, got: {path}")
 +    return host, path
 +
++def _resolve_connect_host(host: str) -> str:
++    return socket.gethostbyaddr(host)[0]
 +
 +def _build_base_url(host: str, scheme: str) -> str:
 +    port = getattr(CONF.libvirt, "file_server_port", None)
-+    safe_host = utils.safe_ip_format(host)
-+    return f"{scheme}://{safe_host}:{port}"
++    connect_host = _resolve_connect_host(host)
++    return f"{scheme}://{connect_host}:{port}"
 +
 +
 +def _new_http_session() -> requests.Session:
 +    # Robust retry behavior for idempotent requests; chunk uploads are also safe to retry
 +    # because we use deterministic chunk_index names server-side.
 +    session = requests.Session()
++    session.trust_env = False
 +    retry = Retry(
 +        total=10,
 +        connect=5,
@@ -100,7 +104,7 @@ index 8ddcaa1fcc..2732872895 100644
  def mount_share(mount_path, export_path,
                  export_type, options=None):
      """Mount a remote export to mount_path.
-@@ -314,3 +357,107 @@ class RsyncDriver(RemoteFilesystemDriver):
+@@ -314,3 +361,107 @@ class RsyncDriver(RemoteFilesystemDriver):
              args.append('--compress')
          processutils.execute(
              *args, on_execute=on_execute, on_completion=on_completion)

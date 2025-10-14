@@ -362,6 +362,10 @@ class ThreadingWSGIService(service.ServiceBase):
         if self._thread is not None:
             self._thread.join()
 
+    def reset(self, exiting=False):
+        """Reset service state (no-op)."""
+        return
+
 
 if __name__ == "__main__":
     logging.register_options(CONF)
@@ -376,7 +380,6 @@ if __name__ == "__main__":
     ssl_key_path = str(get_snap_common() / "etc/pki/nova/private/serverkey.pem")
     CONF.set_default("cert_file", ssl_cert_path, group="ssl")
     CONF.set_default("key_file", ssl_key_path, group="ssl")
-    CONF.set_default("enabled", True, group="ssl")
 
     host = CONF.fileserver.host
     port = CONF.fileserver.port
