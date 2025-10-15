@@ -50,6 +50,7 @@ dev= [
     "pyroute2",
     "pytest",
     "pytest-mock",
+    "WebOb",
 ]
 
 tics= [
