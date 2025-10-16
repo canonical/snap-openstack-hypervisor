@@ -1695,15 +1695,12 @@ def _configure_libvirt_tls(snap: Snap) -> None:
     nova_key = snap.paths.common / Path("etc/pki/nova/private/serverkey.pem")
     nova_key.parent.mkdir(parents=True, exist_ok=True)
     nova_cert.parent.mkdir(parents=True, exist_ok=True)
-    nova_cert.write_bytes(cert)
-    nova_cert.chmod(DEFAULT_PERMS)
-    nova_key.write_bytes(key)
-    nova_key.chmod(PRIVATE_PERMS)
+    _template_tls_file(cert, nova_cert, [])
+    _template_tls_file(key, nova_key, [], PRIVATE_PERMS)
 
     # Nova fileserver CA (for client verification)
     nova_ca = snap.paths.common / Path("etc/pki/nova/ca-cert.pem")
-    nova_ca.write_bytes(cacert)
-    nova_ca.chmod(DEFAULT_PERMS)
+    _template_tls_file(cacert, nova_ca, [])
 
 
 def _configure_ovn_tls(snap: Snap) -> None:

@@ -10,6 +10,8 @@ from webob import Request
 
 from openstack_hypervisor.fileserver.server import application
 
+API_PREFIX = "/v1"
+
 
 def _call_app(method: str, path: str, body: bytes | None = None, query: dict | None = None):
     """Helper to invoke the WSGI application with a Request.
@@ -40,13 +42,13 @@ def test_create_and_remove_file(tmp_path: Path):
 
     resp = _call_app(
         "POST",
-        "/fs/create-file",
+        f"{API_PREFIX}/fs/create-file",
         body=json.dumps({"dst_path": str(dst)}).encode(),
     )
     assert resp.status_int == 200
     assert dst.exists()
 
-    resp = _call_app("DELETE", "/fs/remove-file", query={"dst_path": str(dst)})
+    resp = _call_app("DELETE", f"{API_PREFIX}/fs/remove-file", query={"dst_path": str(dst)})
     assert resp.status_int == 200
     assert not dst.exists()
 
@@ -56,13 +58,13 @@ def test_create_and_remove_dir(tmp_path: Path):
 
     resp = _call_app(
         "POST",
-        "/fs/create-dir",
+        f"{API_PREFIX}/fs/create-dir",
         body=json.dumps({"dst_path": str(d)}).encode(),
     )
     assert resp.status_int == 200
     assert d.exists() and d.is_dir()
 
-    resp = _call_app("DELETE", "/fs/remove-dir", query={"dst_path": str(d)})
+    resp = _call_app("DELETE", f"{API_PREFIX}/fs/remove-dir", query={"dst_path": str(d)})
     assert resp.status_int == 200
     assert not d.exists()
 
@@ -77,7 +79,7 @@ def test_upload_flow_gzip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     resp = _call_app(
         "POST",
-        "/upload/init",
+        f"{API_PREFIX}/upload/init",
         body=json.dumps(
             {
                 "destination_path": str(destination),
@@ -91,7 +93,7 @@ def test_upload_flow_gzip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     gz_body = gzip.compress(data)
     req = Request.blank(
-        f"/upload/{upload_id}?chunk_index=0&total_chunks=1",
+        f"{API_PREFIX}/upload/{upload_id}?chunk_index=0&total_chunks=1",
         method="PUT",
     )
     req.body = gz_body
@@ -100,7 +102,7 @@ def test_upload_flow_gzip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     fin_resp = _call_app(
         "POST",
-        "/upload/finalize",
+        f"{API_PREFIX}/upload/finalize",
         body=json.dumps({"upload_id": upload_id}).encode(),
     )
     assert fin_resp.status_int == 200
@@ -118,7 +120,7 @@ def test_upload_finalize_checksum_mismatch(tmp_path: Path, monkeypatch: pytest.M
 
     resp = _call_app(
         "POST",
-        "/upload/init",
+        f"{API_PREFIX}/upload/init",
         body=json.dumps(
             {
                 "destination_path": str(destination),
@@ -131,7 +133,7 @@ def test_upload_finalize_checksum_mismatch(tmp_path: Path, monkeypatch: pytest.M
     upload_id = json.loads(resp.text)["upload_id"]
 
     req = Request.blank(
-        f"/upload/{upload_id}?chunk_index=0&total_chunks=1",
+        f"{API_PREFIX}/upload/{upload_id}?chunk_index=0&total_chunks=1",
         method="PUT",
     )
     req.body = data
@@ -140,7 +142,7 @@ def test_upload_finalize_checksum_mismatch(tmp_path: Path, monkeypatch: pytest.M
 
     fin_resp = _call_app(
         "POST",
-        "/upload/finalize",
+        f"{API_PREFIX}/upload/finalize",
         body=json.dumps({"upload_id": upload_id}).encode(),
     )
     assert fin_resp.status_int == 400

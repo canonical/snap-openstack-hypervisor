@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2024 - Canonical Ltd
+# SPDX-FileCopyrightText: 2025 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
 """Fileserver package for remote file operations over HTTP.
 

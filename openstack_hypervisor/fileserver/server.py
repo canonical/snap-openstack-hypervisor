@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2025 - Canonical Ltd
+# SPDX-License-Identifier: Apache-2.0
 """WSGI server for remote file transfer operations (threaded backend).
 
 This module exposes a minimal WebOb-based WSGI application, typically
@@ -7,8 +9,6 @@ compression), and file downloads. TLS support is configured via
 ``oslo_service.sslutils`` and ``oslo_config``.
 """
 
-# SPDX-FileCopyrightText: 2024 - Canonical Ltd
-# SPDX-License-Identifier: Apache-2.0
 import json
 import os
 import ssl
@@ -264,53 +264,56 @@ def upload_finalize_ep(request: Request) -> Response:  # noqa: C901
         return _error(500, str(exc))
 
 
-def download_file_ep(request: Request) -> Response:
-    """Stream a file to the client in fixed-size chunks."""
-    path = request.GET.get("path")
-    if not path:
-        return _error(400, "path is required")
-    src = Path(path)
-    if not src.exists() or not src.is_file():
-        return _error(404, "File not found")
-    resp = Response(content_type="application/octet-stream")
-    resp.content_length = src.stat().st_size
-    # Use app_iter to stream file in chunks
+def upload_abort_ep(request: Request) -> Response:
+    """Abort an in-flight upload and cleanup its temporary files."""
+    try:
+        payload = _json(request)
+        upload_id = payload.get("upload_id")
+        if not upload_id:
+            raise BadRequestError("upload_id is required")
+        uroot = uploads_root() / upload_id
+        if not uroot.exists():
+            return _ok({"aborted": False, "detail": "not found"})
+        cleanup_upload(uroot)
+        return _ok({"aborted": True})
+    except BadRequestError as exc:
+        return _error(400, str(exc))
+    except Exception as exc:
+        LOG.exception("upload_abort failed: %s", exc)
+        return _error(500, str(exc))
 
-    def _iter():
-        with open(src, "rb") as f:
-            for chunk in iter(lambda: f.read(CHUNK_READ_SIZE), b""):
-                yield chunk
 
-    resp.app_iter = _iter()
-    return resp
+API_PREFIX = "/v1"
 
 
 def _route(request: Request) -> Response:  # noqa: C901
     """Dispatch incoming requests to the appropriate endpoint handler."""
-    if request.path_info == "/healthz" and request.method == "GET":
+    path = request.path_info or "/"
+    if path == "/healthz" and request.method == "GET":
         return _ok({"status": "ok"})
-    if request.path_info == "/fs/create-file" and request.method == "POST":
+    path = path[len(API_PREFIX) :] or "/"  # noqa: E203
+    if path == "/fs/create-file" and request.method == "POST":
         return create_file_ep(request)
-    if request.path_info == "/fs/remove-file" and request.method == "DELETE":
+    if path == "/fs/remove-file" and request.method == "DELETE":
         return remove_file_ep(request)
-    if request.path_info == "/fs/create-dir" and request.method == "POST":
+    if path == "/fs/create-dir" and request.method == "POST":
         return create_dir_ep(request)
-    if request.path_info == "/fs/remove-dir" and request.method == "DELETE":
+    if path == "/fs/remove-dir" and request.method == "DELETE":
         return remove_dir_ep(request)
-    if request.path_info == "/upload/init" and request.method == "POST":
+    if path == "/upload/init" and request.method == "POST":
         return upload_init_ep(request)
-    if request.path_info.startswith("/upload/") and request.method == "PUT":
-        upload_id = request.path_info.split("/", 2)[2]
+    if path.startswith("/upload/") and request.method == "PUT":
+        upload_id = path.split("/", 2)[2]
         try:
             chunk_index = int(request.GET.get("chunk_index", ""))
             total_chunks = int(request.GET.get("total_chunks", ""))
         except ValueError:
             return _error(400, "chunk_index and total_chunks must be integers")
         return upload_chunk_ep(request, upload_id, chunk_index, total_chunks)
-    if request.path_info == "/upload/finalize" and request.method == "POST":
+    if path == "/upload/finalize" and request.method == "POST":
         return upload_finalize_ep(request)
-    if request.path_info == "/download" and request.method == "GET":
-        return download_file_ep(request)
+    if path == "/upload/abort" and request.method == "POST":
+        return upload_abort_ep(request)
     return _error(404, "Not found")
 
 
@@ -376,10 +379,18 @@ if __name__ == "__main__":
         version="1.0.0",
     )
 
-    ssl_cert_path = str(get_snap_common() / "etc/pki/nova/servercert.pem")
-    ssl_key_path = str(get_snap_common() / "etc/pki/nova/private/serverkey.pem")
+    ssl_cert_path = os.environ.get("FILESERVER_SSL_CERT_FILE") or str(
+        get_snap_common() / "etc/pki/nova/servercert.pem"
+    )
+    ssl_key_path = os.environ.get("FILESERVER_SSL_KEY_FILE") or str(
+        get_snap_common() / "etc/pki/nova/private/serverkey.pem"
+    )
+    ssl_ca_path = os.environ.get("FILESERVER_SSL_CA_FILE") or str(
+        get_snap_common() / "etc/pki/nova/ca-cert.pem"
+    )
     CONF.set_default("cert_file", ssl_cert_path, group="ssl")
     CONF.set_default("key_file", ssl_key_path, group="ssl")
+    CONF.set_default("ca_file", ssl_ca_path, group="ssl")
 
     host = CONF.fileserver.host
     port = CONF.fileserver.port
@@ -388,7 +399,9 @@ if __name__ == "__main__":
     if sslutils.is_enabled(CONF):
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_ctx.load_cert_chain(CONF.ssl.cert_file, CONF.ssl.key_file)
-        LOG.info("TLS enabled for fileserver")
+        ssl_ctx.load_verify_locations(CONF.ssl.ca_file)
+        ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+        LOG.info("mTLS enabled for fileserver")
     else:
         LOG.info("TLS disabled for fileserver")
 
