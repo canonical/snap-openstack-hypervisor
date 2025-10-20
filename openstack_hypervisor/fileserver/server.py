@@ -373,24 +373,13 @@ class ThreadingWSGIService(service.ServiceBase):
 if __name__ == "__main__":
     logging.register_options(CONF)
     logging.setup(CONF, "openstack_hypervisor.fileserver")
+    default_cfg = str(get_snap_common() / "etc/nova/nova.conf")
     CONF(
         project="openstack-hypervisor",
         prog="openstack-hypervisor-fileserver",
         version="1.0.0",
+        default_config_files=[default_cfg],
     )
-
-    ssl_cert_path = os.environ.get("FILESERVER_SSL_CERT_FILE") or str(
-        get_snap_common() / "etc/pki/nova/servercert.pem"
-    )
-    ssl_key_path = os.environ.get("FILESERVER_SSL_KEY_FILE") or str(
-        get_snap_common() / "etc/pki/nova/private/serverkey.pem"
-    )
-    ssl_ca_path = os.environ.get("FILESERVER_SSL_CA_FILE") or str(
-        get_snap_common() / "etc/pki/nova/ca-cert.pem"
-    )
-    CONF.set_default("cert_file", ssl_cert_path, group="ssl")
-    CONF.set_default("key_file", ssl_key_path, group="ssl")
-    CONF.set_default("ca_file", ssl_ca_path, group="ssl")
 
     host = CONF.fileserver.host
     port = CONF.fileserver.port
