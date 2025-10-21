@@ -34,14 +34,14 @@ dependencies = [
     "jinja2",
     "netifaces",
     "pydantic",
-    "cryptography>=38.0.0,<42,!=40.0.0,!=40.0.1",  # PyOpenSSL requirements
-    "pyroute2==0.7.11",  # matched to caracal cloud-archive
+    "cryptography>=38.0.0,<42,!=40.0.0,!=40.0.1", # PyOpenSSL requirements
+    "pyroute2==0.7.11", # matched to caracal cloud-archive
     "click",
     "prettytable",
-    "oslo.config",
-    "oslo.log",
-    "oslo.service",
-    "WebOb",
+    "oslo-config>=10.0.0",
+    "oslo-log>=7.2.1",
+    "oslo-service>=4.3.0",
+    "webob>=1.8.9",
 ]
 
 [project.optional-dependencies]
@@ -50,7 +50,6 @@ dev= [
     "pyroute2",
     "pytest",
     "pytest-mock",
-    "WebOb",
 ]
 
 tics= [

@@ -37,7 +37,8 @@ def test_healthz():
     assert payload["status"] == "ok"
 
 
-def test_create_and_remove_file(tmp_path: Path):
+def test_create_and_remove_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SNAP_COMMON", str(tmp_path))
     dst = tmp_path / "testfile.bin"
 
     resp = _call_app(
@@ -53,7 +54,8 @@ def test_create_and_remove_file(tmp_path: Path):
     assert not dst.exists()
 
 
-def test_create_and_remove_dir(tmp_path: Path):
+def test_create_and_remove_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SNAP_COMMON", str(tmp_path))
     d = tmp_path / "foo" / "bar"
 
     resp = _call_app(

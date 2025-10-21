@@ -9,6 +9,8 @@ compression), and file downloads. TLS support is configured via
 ``oslo_service.sslutils`` and ``oslo_config``.
 """
 
+import errno
+import gzip as _gzip
 import json
 import os
 import ssl
@@ -28,7 +30,6 @@ from .utils import (
     CHUNK_READ_SIZE,
     BadRequestError,
     assemble_chunks_to_file,
-    atomic_replace,
     cleanup_upload,
     compute_sha256,
     get_snap_common,
@@ -52,11 +53,36 @@ fileserver_opts = [
         min=1,
         help="TCP listen port for the file server",
     ),
+    cfg.StrOpt(
+        "sandbox_root",
+        default=os.environ.get("SNAP_COMMON"),
+        help="Base directory for sandboxed filesystem operations",
+    ),
 ]
 
 CONF = cfg.CONF
 CONF.register_opts(fileserver_opts, group="fileserver")
 sslutils.register_opts(CONF)
+
+
+def _resolve_sandboxed_path(path_str: str) -> Path | None:
+    """Resolve a user-supplied path within the sandbox (SNAP_COMMON).
+
+    Returns an absolute Path when the path is within SNAP_COMMON. If
+    SNAP_COMMON is not set, returns the raw path as-is (for tests/dev).
+    Returns None if the resolved path escapes the sandbox.
+    """
+    base_str = os.environ.get("SNAP_COMMON") or CONF.fileserver.sandbox_root
+    candidate = Path(path_str)
+    if not base_str:
+        return candidate
+    base = Path(base_str).resolve()
+    resolved = (candidate if candidate.is_absolute() else base / candidate).resolve()
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        return None
+    return resolved
 
 
 def _json(request: Request) -> Dict[str, Any]:
@@ -69,7 +95,7 @@ def _json(request: Request) -> Dict[str, Any]:
         return {}
     try:
         body = request.body
-    except Exception:
+    except AttributeError:
         body = request.body_file.read()
     if not body:
         return {}
@@ -96,7 +122,9 @@ def create_file_ep(request: Request) -> Response:
         dst_path = payload.get("dst_path")
         if not dst_path:
             raise BadRequestError("dst_path is required")
-        dst = Path(dst_path)
+        dst = _resolve_sandboxed_path(dst_path)
+        if dst is None:
+            return _error(400, "path outside sandbox")
         dst.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(dst, "xb"):
@@ -116,7 +144,9 @@ def remove_file_ep(request: Request) -> Response:
     dst_path = request.GET.get("dst_path")
     if not dst_path:
         return _error(400, "dst_path is required")
-    dst = Path(dst_path)
+    dst = _resolve_sandboxed_path(dst_path)
+    if dst is None:
+        return _error(400, "path outside sandbox")
     try:
         Path(dst).unlink(missing_ok=True)
         return _ok({"removed": True, "path": str(dst)})
@@ -132,7 +162,9 @@ def create_dir_ep(request: Request) -> Response:
         dst_path = payload.get("dst_path")
         if not dst_path:
             raise BadRequestError("dst_path is required")
-        dst = Path(dst_path)
+        dst = _resolve_sandboxed_path(dst_path)
+        if dst is None:
+            return _error(400, "path outside sandbox")
         Path(dst).mkdir(parents=True, exist_ok=True)
         return _ok({"created": True, "path": str(dst)})
     except BadRequestError as exc:
@@ -147,11 +179,15 @@ def remove_dir_ep(request: Request) -> Response:
     dst_path = request.GET.get("dst_path")
     if not dst_path:
         return _error(400, "dst_path is required")
-    dst = Path(dst_path)
+    dst = _resolve_sandboxed_path(dst_path)
+    if dst is None:
+        return _error(400, "path outside sandbox")
     try:
         Path(dst).rmdir()
         return _ok({"removed": True, "path": str(dst)})
-    except Exception as exc:
+    except OSError as exc:
+        if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+            return _error(409, "directory not empty")
         LOG.exception("remove_dir failed: %s", exc)
         return _error(500, str(exc))
 
@@ -206,8 +242,6 @@ def upload_chunk_ep(
     comp_mode = (meta.get("compression") or "none").lower()
     try:
         if comp_mode == "gzip":
-            import gzip as _gzip
-
             body = request.body_file.read()
             data = _gzip.decompress(body)
             with open(chunk_path, "wb") as f:
@@ -254,7 +288,7 @@ def upload_finalize_ep(request: Request) -> Response:  # noqa: C901
             if compute_sha256(temp_path) != meta["checksum"]:
                 return _error(400, "checksum mismatch")
 
-        atomic_replace(temp_path, dest)
+        os.replace(temp_path, dest)
         cleanup_upload(uroot)
         return _ok({"finalized": True, "path": str(dest)})
     except BadRequestError as exc:

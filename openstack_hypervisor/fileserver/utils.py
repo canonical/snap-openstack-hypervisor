@@ -4,18 +4,20 @@
 # SPDX-License-Identifier: Apache-2.0
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable
+
+LOG = logging.getLogger(__name__)
+
+CHUNK_READ_SIZE = 8 * 1024 * 1024
 
 
 class BadRequestError(Exception):
     """Raised when a client input is invalid."""
 
     pass
-
-
-CHUNK_READ_SIZE = 8 * 1024 * 1024
 
 
 def get_snap_common() -> Path:
@@ -68,11 +70,6 @@ def compute_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def atomic_replace(src: Path, dst: Path) -> None:
-    """Atomically replace dst with src."""
-    os.replace(src, dst)
-
-
 def cleanup_upload(upload_dir: Path) -> None:
     """Best-effort removal of upload session artifacts.
 
@@ -102,12 +99,12 @@ def _remove_chunk_files(chunks_dir: Path) -> None:
 def _remove_file_quietly(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        LOG.warning("Failed to remove file %s: %s", path, exc)
 
 
 def _rmdir_quietly(path: Path) -> None:
     try:
         path.rmdir()
-    except Exception:
-        pass
+    except Exception as exc:
+        LOG.warning("Failed to remove directory %s: %s", path, exc)
