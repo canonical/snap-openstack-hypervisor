@@ -60,8 +60,18 @@ fileserver_opts = [
     ),
 ]
 
+libvirt_opts = [
+    cfg.IntOpt(
+        "file_server_chunk_size_mb",
+        default=None,
+        min=1,
+        help="Max chunk size in MiB for uploads; validated server-side",
+    ),
+]
+
 CONF = cfg.CONF
 CONF.register_opts(fileserver_opts, group="fileserver")
+CONF.register_opts(libvirt_opts, group="libvirt")
 sslutils.register_opts(CONF)
 
 
@@ -72,7 +82,7 @@ def _resolve_sandboxed_path(path_str: str) -> Path | None:
     SNAP_COMMON is not set, returns the raw path as-is (for tests/dev).
     Returns None if the resolved path escapes the sandbox.
     """
-    base_str = os.environ.get("SNAP_COMMON") or CONF.fileserver.sandbox_root
+    base_str = CONF.fileserver.sandbox_root
     candidate = Path(path_str)
     if not base_str:
         return candidate
@@ -103,6 +113,39 @@ def _json(request: Request) -> Dict[str, Any]:
         return json.loads(body.decode("utf-8"))
     except Exception as exc:
         raise BadRequestError(f"invalid JSON body: {exc}")
+
+
+def _configured_chunk_limit_bytes() -> int | None:
+    """Return configured per-chunk byte limit, or None if not set.
+
+    Reads CONF.libvirt.file_server_chunk_size_mb when available.
+    """
+    try:
+        mb = getattr(CONF.libvirt, "file_server_chunk_size_mb", None)
+    except Exception:
+        mb = None
+    return int(mb) * 1024 * 1024 if mb else None
+
+
+def _decompress_and_write_gzip(request: Request, chunk_path: Path) -> int:
+    """Decompress request body (gzip) and write to chunk_path.
+
+    Returns number of decompressed bytes written.
+    """
+    body = request.body_file.read()
+    data = _gzip.decompress(body)
+    with open(chunk_path, "wb") as f:
+        f.write(data)
+    return len(data)
+
+
+def _stream_write_body(request: Request, chunk_path: Path) -> None:
+    """Stream request body to chunk_path using CHUNK_READ_SIZE."""
+    with open(chunk_path, "wb") as f:
+        buf = request.body_file.read(CHUNK_READ_SIZE)
+        while buf:
+            f.write(buf)
+            buf = request.body_file.read(CHUNK_READ_SIZE)
 
 
 def _ok(payload: Dict[str, Any]) -> Response:
@@ -241,17 +284,14 @@ def upload_chunk_ep(
     chunk_path = uroot / "chunks" / f"{chunk_index:08d}.part"
     comp_mode = (meta.get("compression") or "none").lower()
     try:
+        _max_bytes = _configured_chunk_limit_bytes()
+
         if comp_mode == "gzip":
-            body = request.body_file.read()
-            data = _gzip.decompress(body)
-            with open(chunk_path, "wb") as f:
-                f.write(data)
+            data_len = _decompress_and_write_gzip(request, chunk_path)
+            if _max_bytes is not None and data_len > _max_bytes:
+                return _error(400, "chunk size exceeds configured file_server_chunk_size_mb")
         else:
-            with open(chunk_path, "wb") as f:
-                buf = request.body_file.read(CHUNK_READ_SIZE)
-                while buf:
-                    f.write(buf)
-                    buf = request.body_file.read(CHUNK_READ_SIZE)
+            _stream_write_body(request, chunk_path)
         return _ok({"received": True, "chunk_index": chunk_index, "total_chunks": total_chunks})
     except OSError as exc:
         return _error(400, f"gzip decompress failed: {exc}")

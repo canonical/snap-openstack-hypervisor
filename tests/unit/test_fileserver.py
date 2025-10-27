@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from webob import Request
 
+from openstack_hypervisor.fileserver import server as fs_server
 from openstack_hypervisor.fileserver.server import application
 
 API_PREFIX = "/v1"
@@ -39,6 +40,7 @@ def test_healthz():
 
 def test_create_and_remove_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SNAP_COMMON", str(tmp_path))
+    fs_server.CONF.set_override("sandbox_root", str(tmp_path), group="fileserver")
     dst = tmp_path / "testfile.bin"
 
     resp = _call_app(
@@ -56,6 +58,7 @@ def test_create_and_remove_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 def test_create_and_remove_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SNAP_COMMON", str(tmp_path))
+    fs_server.CONF.set_override("sandbox_root", str(tmp_path), group="fileserver")
     d = tmp_path / "foo" / "bar"
 
     resp = _call_app(

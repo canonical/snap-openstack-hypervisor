@@ -1,6 +1,6 @@
 """Utility helpers for the fileserver implementation (framework-agnostic)."""
 
-# SPDX-FileCopyrightText: 2024 - Canonical Ltd
+# SPDX-FileCopyrightText: 2025 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
 import hashlib
 import json
@@ -59,6 +59,7 @@ def assemble_chunks_to_file(chunk_paths: Iterable[Path], destination: Path) -> N
     with open(destination, "wb") as out:
         for c in chunk_paths:
             _copy_file_streaming(c, out)
+            _remove_file_quietly(c)
 
 
 def compute_sha256(path: Path) -> str:
