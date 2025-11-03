@@ -161,8 +161,12 @@ and OVN:
 
 * `network.dns-servers` External DNS servers to use for forwarding DNS requests
 
-* `network.external-bridge` (`br-ex`)  Name of OVS external network bridge
-* `network.physnet-name` (`physnet1`) Neutron label for physical network
+* `network.external-bridge` (`br-ex`)  Name of OVS external network bridge (Deprecated)
+* `network.physnet-name` (`physnet1`) Neutron label for physical network (Deprecated)
+* `network.physnet-bridge-mapping` (`physnet1:br-ex`) Mapping of physnet to bridge, format:
+  `<physnet>:<bridge> <physnet2>:<bridge2>` (Deprecated)
+* `network.interface-bridge-mapping` Mapping of physical interfaces to bridges, format:
+  `<bridge>:<interface> <bridge2>:<interface2>`
 
 * `network.ip-address` (`node.ip-address`) IP address to use for overlay network endpoints
 * `network.ovn-sb-connection` (`tcp:127.0.0.1:6642`) OVN Southbound DB connection URL
