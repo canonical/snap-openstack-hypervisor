@@ -36,6 +36,7 @@ cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
 {% endif -%}
 service_token_roles = {{ identity.admin_role }}
 service_token_roles_required = True
+region_name = {{ identity.keystone_region_name }}
 
 [service_credentials]
 auth_type = password
@@ -45,6 +46,7 @@ user_domain_id = {{ identity.user_domain_id }}
 project_name = {{ identity.project_name }}
 username = {{ identity.username }}
 password = {{ identity.password }}
+region_name = {{ identity.keystone_region_name }}
 
 [oslo_messaging_rabbit]
 rabbit_quorum_queue = True

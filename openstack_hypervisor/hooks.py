@@ -256,6 +256,10 @@ DEFAULT_CONFIG = {
     "identity.project-domain-id": UNSET,
     "identity.project-domain-name": "service_domain",
     "identity.region-name": "RegionOne",
+    # Keystone may reside in a separate region in case of multi-region
+    # environments.
+    # Defaults to "identity.region-name" if unset.
+    "identity.keystone-region-name": UNSET,
     # Messaging
     "rabbitmq.url": UNSET,
     # Nova
@@ -2308,6 +2312,13 @@ def _get_configure_context(snap: Snap) -> dict:
     )
     context = _context_compat(context)
     logging.info(context)
+
+    if not context.get("identity"):
+        context["identity"] = {}
+    if not context["identity"].get("keystone-region-name"):
+        context["identity"]["keystone-region-name"] = context["identity"].get(
+            "region-name", "RegionOne"
+        )
 
     _set_sriov_context(snap, context)
     _set_pci_context(snap, context)
