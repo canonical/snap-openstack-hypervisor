@@ -41,6 +41,7 @@ password = {{ identity.password }}
 {% if ca and ca.bundle -%}
 cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
 {% endif -%}
+region_name = {{ identity.keystone_region_name }}
 
 [paste_deploy]
 flavor = keystone
