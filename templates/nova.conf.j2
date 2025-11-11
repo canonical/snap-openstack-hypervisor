@@ -52,6 +52,18 @@ live_migration_scheme = tls
 {% if compute.migration_address %}
 live_migration_inbound_addr = {{ compute.migration_address }}
 {% endif -%}
+remote_filesystem_transport = http
+file_server_port = 8099
+file_server_chunk_size_mb = 50
+file_server_read_timeout = 900
+file_server_ca_file = /var/snap/openstack-hypervisor/common/etc/pki/nova/ca-cert.pem
+file_server_client_cert_file = /var/snap/openstack-hypervisor/common/etc/pki/libvirt/clientcert.pem
+file_server_client_key_file = /var/snap/openstack-hypervisor/common/etc/pki/libvirt/private/clientkey.pem
+
+[ssl]
+cert_file = /var/snap/openstack-hypervisor/common/etc/pki/nova/servercert.pem
+key_file = /var/snap/openstack-hypervisor/common/etc/pki/nova/private/serverkey.pem
+ca_file = /var/snap/openstack-hypervisor/common/etc/pki/nova/ca-cert.pem
 
 # The following [compute] section controls CPU pinning for dedicated and shared vCPUs.
 # Setting cpu_dedicated_set and cpu_shared_set determines which host CPUs are used for

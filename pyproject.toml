@@ -34,10 +34,14 @@ dependencies = [
     "jinja2",
     "netifaces",
     "pydantic",
-    "cryptography>=38.0.0,<42,!=40.0.0,!=40.0.1",  # PyOpenSSL requirements
-    "pyroute2==0.7.11",  # matched to caracal cloud-archive
+    "cryptography>=38.0.0,<42,!=40.0.0,!=40.0.1", # PyOpenSSL requirements
+    "pyroute2==0.7.11", # matched to caracal cloud-archive
     "click",
     "prettytable",
+    "oslo-config>=10.0.0",
+    "oslo-log>=7.2.1",
+    "oslo-service>=4.3.0",
+    "webob>=1.8.9",
 ]
 
 [project.optional-dependencies]
@@ -72,8 +76,8 @@ hypervisor = "openstack_hypervisor.cli.main:main"
 configure = "openstack_hypervisor.hooks:configure"
 install = "openstack_hypervisor.hooks:install"
 
-[tool.setuptools]
-packages = ["openstack_hypervisor"]
+[tool.setuptools.packages.find]
+include = ["openstack_hypervisor*"]
 
 # Testing tools configuration
 [tool.coverage.run]

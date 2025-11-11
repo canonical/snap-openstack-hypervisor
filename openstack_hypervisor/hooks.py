@@ -442,6 +442,9 @@ TLS_TEMPLATES = {
     Path("etc/pki/CA/cacert.pem"): {"services": ["libvirtd"]},
     Path("etc/pki/libvirt/servercert.pem"): {"services": ["libvirtd"]},
     Path("etc/pki/libvirt/private/serverkey.pem"): {"services": ["libvirtd"]},
+    # Restart fileserver when its TLS material changes
+    Path("etc/pki/nova/servercert.pem"): {"services": ["file-transfer"]},
+    Path("etc/pki/nova/private/serverkey.pem"): {"services": ["file-transfer"]},
 }
 
 
@@ -1689,6 +1692,18 @@ def _configure_libvirt_tls(snap: Snap) -> None:
         ],
         PRIVATE_PERMS,
     )
+
+    # Nova fileserver TLS (server cert/key for oslo.wsgi)
+    nova_cert = snap.paths.common / Path("etc/pki/nova/servercert.pem")
+    nova_key = snap.paths.common / Path("etc/pki/nova/private/serverkey.pem")
+    nova_key.parent.mkdir(parents=True, exist_ok=True)
+    nova_cert.parent.mkdir(parents=True, exist_ok=True)
+    _template_tls_file(cert, nova_cert, [])
+    _template_tls_file(key, nova_key, [], PRIVATE_PERMS)
+
+    # Nova fileserver CA (for client verification)
+    nova_ca = snap.paths.common / Path("etc/pki/nova/ca-cert.pem")
+    _template_tls_file(cacert, nova_ca, [])
 
 
 def _configure_ovn_tls(snap: Snap) -> None:

@@ -1,0 +1,252 @@
+diff --git a/nova/conf/libvirt.py b/nova/conf/libvirt.py
+index 297aaae8d2..c4f1a93812 100644
+--- a/nova/conf/libvirt.py
++++ b/nova/conf/libvirt.py
+@@ -1355,7 +1355,7 @@ and ``gid`` must be specified.
+ libvirt_remotefs_opts = [
+     cfg.StrOpt('remote_filesystem_transport',
+                default='ssh',
+-               choices=('ssh', 'rsync'),
++               choices=('ssh', 'rsync', 'http'),
+                help="""
+ libvirt's transport method for remote file operations.
+ 
+@@ -1366,7 +1366,34 @@ compute nodes, other method must be used for:
+ * creating file on remote host
+ * removing file from remote host
+ * copying file to remote host
+-""")
++"""),
++    cfg.IntOpt('file_server_port',
++               default=8099,
++               min=1,
++               help='TCP port of the remote file server used by the http '
++                    'RemoteFilesystem driver.'),
++    cfg.IntOpt('file_server_chunk_size_mb',
++               default=50,
++               min=1,
++               help='Chunk size in MiB for HTTP uploads in the http '
++                    'RemoteFilesystem driver.'),
++    cfg.IntOpt('file_server_read_timeout',
++               default=900,
++               min=1,
++               help='Read timeout in seconds for HTTP operations in the http '
++                    'RemoteFilesystem driver.'),
++    cfg.StrOpt('file_server_ca_file',
++               default='',
++               help='Path to a CA bundle file to verify the HTTPS file '
++                    'server. If set, verification is enabled using this file.'),
++    cfg.StrOpt('file_server_client_cert_file',
++               default='',
++               help='Path to client certificate file for mutual TLS to the '
++                    'file server.'),
++    cfg.StrOpt('file_server_client_key_file',
++               default='',
++               help='Path to client private key file for mutual TLS to the '
++                    'file server.'),
+ ]
+ 
+ libvirt_volume_vzstorage_opts = [
+diff --git a/nova/virt/libvirt/volume/remotefs.py b/nova/virt/libvirt/volume/remotefs.py
+index 8ddcaa1fcc..8096c77903 100644
+--- a/nova/virt/libvirt/volume/remotefs.py
++++ b/nova/virt/libvirt/volume/remotefs.py
+@@ -24,6 +24,8 @@ from oslo_utils import importutils
+ import nova.conf
+ import nova.privsep.fs
+ from nova import utils
++from nova.virt.libvirt.volume.remotefs_http import HttpDriver as _HttpDriverImpl
++HttpDriver = _HttpDriverImpl
+ 
+ LOG = logging.getLogger(__name__)
+ 
+diff --git a/nova/virt/libvirt/volume/remotefs_http.py b/nova/virt/libvirt/volume/remotefs_http.py
+new file mode 100644
+index 0000000000..50267b1014
+--- /dev/null
++++ b/nova/virt/libvirt/volume/remotefs_http.py
+@@ -0,0 +1,184 @@
++import os
++import math
++import gzip
++import socket
++from typing import Tuple
++
++import requests
++from requests.adapters import HTTPAdapter
++from urllib3.util.retry import Retry
++
++from oslo_log import log as logging
++
++import nova.conf
++from nova import utils
++
++
++LOG = logging.getLogger(__name__)
++CONF = nova.conf.CONF
++
++
++def _parse_remote_dst(dst: str) -> Tuple[str, str]:
++    # Expected format: "<host>:<absolute_path>"
++    # Example: "10.149.132.154:/var/snap/openstack-hypervisor/common/lib/nova/instances/.../disk"
++    if ":" not in dst:
++        raise ValueError(f"Invalid remote path format, expected 'host:/abs/path', got: {dst}")
++    host, path = dst.split(":", 1)
++    if not path.startswith("/"):
++        raise ValueError(f"Destination path must be absolute, got: {path}")
++    return host, path
++
++
++def _resolve_connect_host(host: str) -> str:
++    return socket.gethostbyaddr(host)[0]
++
++def _build_base_url(host: str, scheme: str) -> str:
++    port = getattr(CONF.libvirt, "file_server_port", None)
++    connect_host = _resolve_connect_host(host)
++    return f"{scheme}://{connect_host}:{port}/v1"
++
++
++def _new_http_session() -> requests.Session:
++    # Robust retry behavior for idempotent requests; chunk uploads are also safe to retry
++    # because we use deterministic chunk_index names server-side.
++    session = requests.Session()
++    session.trust_env = False
++    retry = Retry(
++        total=10,
++        connect=5,
++        read=5,
++        backoff_factor=0.5,
++        status_forcelist=(500, 502, 503, 504),
++        allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE"]),
++        raise_on_status=False,
++    )
++    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=20)
++    session.mount("http://", adapter)
++    session.mount("https://", adapter)
++    return session
++
++
++class HttpDriver:
++    """HTTP transport driver implementing RemoteFilesystemDriver API."""
++
++    def __init__(self):
++        chunk_mb = getattr(CONF.libvirt, "file_server_chunk_size_mb", None)
++        self._chunk_size = int(chunk_mb) * 1024 * 1024
++        read_timeout = getattr(CONF.libvirt, "file_server_read_timeout", None)
++        self._timeout = (5, int(read_timeout))
++        self._session = _new_http_session()
++        # TLS verification and client certs
++        ca_file = getattr(CONF.libvirt, 'file_server_ca_file', '') or None
++        # If a CA file is provided, enable verification using it; otherwise
++        # fall back to system CAs (True).
++        self._session.verify = ca_file if ca_file else True
++        # Present client cert/key for mTLS
++        cert_file = getattr(CONF.libvirt, 'file_server_client_cert_file', '') or None
++        key_file = getattr(CONF.libvirt, 'file_server_client_key_file', '') or None
++        if cert_file and key_file:
++            self._session.cert = (cert_file, key_file)
++
++
++    def create_file(self, host, dst_path, on_execute=None, on_completion=None):
++        LOG.debug("[http] Creating file %s on remote host %s", dst_path, host)
++        base = _build_base_url(host, "https")
++        url = f"{base}/fs/create-file"
++        resp = self._session.post(url, json={"dst_path": dst_path}, timeout=self._timeout)
++        self._raise_for_status(resp, url)
++
++    def remove_file(self, host, dst_path, on_execute=None, on_completion=None):
++        LOG.debug("[http] Removing file %s on remote host %s", dst_path, host)
++        base = _build_base_url(host, "https")
++        url = f"{base}/fs/remove-file"
++        resp = self._session.delete(url, params={"dst_path": dst_path}, timeout=self._timeout)
++        self._raise_for_status(resp, url)
++
++    def create_dir(self, host, dst_path, on_execute=None, on_completion=None):
++        LOG.debug("[http] Creating directory %s on remote host %s", dst_path, host)
++        base = _build_base_url(host, "https")
++        url = f"{base}/fs/create-dir"
++        resp = self._session.post(url, json={"dst_path": dst_path}, timeout=self._timeout)
++        self._raise_for_status(resp, url)
++
++    def remove_dir(self, host, dst_path, on_execute=None, on_completion=None):
++        LOG.debug("[http] Removing directory %s on remote host %s", dst_path, host)
++        base = _build_base_url(host, "https")
++        url = f"{base}/fs/remove-dir"
++        resp = self._session.delete(url, params={"dst_path": dst_path}, timeout=self._timeout)
++        self._raise_for_status(resp, url)
++
++
++    def copy_file(self, src, dst, on_execute=None, on_completion=None, compression=True):
++        LOG.debug("[http] Copying file %s to %s", src, dst)
++
++        host, dst_path = _parse_remote_dst(dst)
++        base = _build_base_url(host, "https")
++
++        init_url = f"{base}/upload/init"
++        total_size = os.path.getsize(src)
++        init_params = {
++            "destination_path": dst_path,
++            "total_size": total_size,
++        }
++        if compression:
++            init_params["compression"] = "gzip"
++        init_resp = self._session.post(init_url, json=init_params, timeout=self._timeout)
++        self._raise_for_status(init_resp, init_url)
++        upload_id = init_resp.json()["upload_id"]
++
++        total_chunks = int(math.ceil(float(total_size) / float(self._chunk_size)))
++        put_url = f"{base}/upload/{upload_id}"
++
++        with open(src, "rb") as f:
++            for chunk_index in range(total_chunks):
++                data = f.read(self._chunk_size)
++                if not data:
++                    break
++                params = {
++                    "chunk_index": chunk_index,
++                    "total_chunks": total_chunks,
++                }
++                body = gzip.compress(data) if compression else data
++                headers = {"Content-Encoding": "gzip"} if compression else None
++                last_exc = None
++                for _ in range(3):
++                    try:
++                        resp = self._session.put(
++                            put_url,
++                            params=params,
++                            data=body,
++                            headers=headers,
++                            timeout=self._timeout,
++                        )
++                        self._raise_for_status(resp, put_url)
++                        last_exc = None
++                        break
++                    except Exception as exc:
++                        last_exc = exc
++                if last_exc is not None:
++                    try:
++                        self._session.post(
++                            f"{base}/upload/abort",
++                            json={"upload_id": upload_id},
++                            timeout=self._timeout,
++                        )
++                    except Exception:
++                        pass
++                    raise last_exc
++
++        finalize_url = f"{base}/upload/finalize"
++        fin_resp = self._session.post(finalize_url, json={"upload_id": upload_id}, timeout=self._timeout)
++        self._raise_for_status(fin_resp, finalize_url)
++
++    def _raise_for_status(self, resp: requests.Response, url: str) -> None:
++        if 200 <= resp.status_code < 300:
++            return
++        msg = f"HttpDriver HTTP error {resp.status_code} on {url}"
++        try:
++            payload = resp.json()
++            msg += f": {payload}"
++        except Exception:
++            if resp.text:
++                msg += f": {resp.text[:1024]}"
++        LOG.error(msg)
++        resp.raise_for_status()
