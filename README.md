@@ -137,6 +137,8 @@ Configuration of options related to identity (Keystone):
 * `identity.project-name` (`services`) Service project
 * `identity.project-domain-name` (`service_domain`) Domain for service project
 * `identity.region-name` (`RegionOne`) OpenStack region to use
+* `identity.keystone-region-name` (`RegionOne`) The region of the Keystone service,
+  which can be different than `identity.region-name` in multi-region environments.
 
 ### logging
 
