@@ -1,0 +1,265 @@
+diff --git a/nova/conf/libvirt.py b/nova/conf/libvirt.py
+index 0746d4040a..6716eaa40a 100644
+--- a/nova/conf/libvirt.py
++++ b/nova/conf/libvirt.py
+@@ -1384,7 +1384,7 @@ and ``gid`` must be specified.
+ libvirt_remotefs_opts = [
+     cfg.StrOpt('remote_filesystem_transport',
+                default='ssh',
+-               choices=('ssh', 'rsync'),
++               choices=('ssh', 'rsync', 'http'),
+                help="""
+ libvirt's transport method for remote file operations.
+ 
+@@ -1395,7 +1395,29 @@ compute nodes, other method must be used for:
+ * creating file on remote host
+ * removing file from remote host
+ * copying file to remote host
+-""")
++"""),
++    cfg.IntOpt('file_server_port',
++               default=10099,
++               min=1,
++               help='TCP port of the remote file server used by the http '
++                    'RemoteFilesystem driver.'),
++    cfg.IntOpt('file_server_read_timeout',
++               default=900,
++               min=1,
++               help='Read timeout in seconds for HTTP operations in the http '
++                    'RemoteFilesystem driver.'),
++    cfg.StrOpt('file_server_ca_file',
++               default='',
++               help='Path to a CA bundle file to verify the HTTPS file '
++                    'server. If set, verification is enabled using this file.'),
++    cfg.StrOpt('file_server_client_cert_file',
++               default='',
++               help='Path to client certificate file for mutual TLS to the '
++                    'file server.'),
++    cfg.StrOpt('file_server_client_key_file',
++               default='',
++               help='Path to client private key file for mutual TLS to the '
++                    'file server.'),
+ ]
+ 
+ libvirt_volume_vzstorage_opts = [
+diff --git a/nova/virt/libvirt/volume/remotefs.py b/nova/virt/libvirt/volume/remotefs.py
+index 8ddcaa1fcc..8096c77903 100644
+--- a/nova/virt/libvirt/volume/remotefs.py
++++ b/nova/virt/libvirt/volume/remotefs.py
+@@ -24,6 +24,8 @@ from oslo_utils import importutils
+ import nova.conf
+ import nova.privsep.fs
+ from nova import utils
++from nova.virt.libvirt.volume.remotefs_http import HttpDriver as _HttpDriverImpl
++HttpDriver = _HttpDriverImpl
+ 
+ LOG = logging.getLogger(__name__)
+ 
+diff --git a/nova/virt/libvirt/volume/remotefs_http.py b/nova/virt/libvirt/volume/remotefs_http.py
+new file mode 100644
+index 0000000000..52b14b8e41
+--- /dev/null
++++ b/nova/virt/libvirt/volume/remotefs_http.py
+@@ -0,0 +1,193 @@
++import os
++import ssl
++import tempfile
++from typing import Tuple
++
++from oslo_log import log as logging
++
++import nova.conf
++
++
++LOG = logging.getLogger(__name__)
++CONF = nova.conf.CONF
++
++LOG.debug("[webdav] remotefs_http module loaded")
++
++
++def _debug_log_path(label: str, path: str) -> str:
++    LOG.debug("[webdav] %s path=%s", label, path)
++    return path
++
++
++def _parse_remote_dst(dst: str) -> Tuple[str, str]:
++    # Expected format: "<host>:<absolute_path>"
++    # Example: "10.149.132.154:/var/snap/openstack-hypervisor/common/lib/nova/instances/.../disk"
++    if ":" not in dst:
++        raise ValueError(f"Invalid remote path format, expected 'host:/abs/path', got: {dst}")
++    host, path = dst.split(":", 1)
++    if not path.startswith("/"):
++        raise ValueError(f"Destination path must be absolute, got: {path}")
++    return host, path
++
++
++def _normalize_webdav_path(path: str) -> str:
++    """Convert absolute path to WebDAV-relative path (chrooted to SNAP_COMMON).
++
++    The Apache layout binds SNAP_COMMON at /var/lib/openstack-hypervisor,
++    so we strip the snap-managed prefix and leave a relative path.
++    Example: /var/snap/openstack-hypervisor/common/lib/nova/disk
++           -> lib/nova/disk
++    """
++    snap_common = "/var/snap/openstack-hypervisor/common"
++    if path.startswith(snap_common):
++        normalized = path[len(snap_common):].lstrip("/")
++        return normalized
++    # If path doesn't start with SNAP_COMMON, assume it's already relative
++    return path.lstrip("/")
++
++
++def _ensure_trailing_slash(path: str) -> str:
++    if not path or path.endswith("/"):
++        return path
++    return f"{path}/"
++
++
++def _base_url(host: str) -> str:
++    port = getattr(CONF.libvirt, "file_server_port", 10099)
++    return f"https://{host}:{port}"
++
++
++def _new_client(host: str):
++    # Lazy import to keep dependency surface localized
++    from webdav4.client import Client
++
++    base_url = _base_url(host)
++
++    # TLS verification and client certs for mTLS
++    ca_file = getattr(CONF.libvirt, "file_server_ca_file", "") or True
++    cert_file = getattr(CONF.libvirt, "file_server_client_cert_file", "") or None
++    key_file = getattr(CONF.libvirt, "file_server_client_key_file", "") or None
++    client_cert = (cert_file, key_file) if cert_file and key_file else None
++
++    kwargs = {}
++    
++    # Handle SSL verification: verify certificate chain but not hostname
++    # (since we may connect via IP address, not hostname)
++    if ca_file and ca_file is not True:
++        # Create SSL context that verifies cert chain but not hostname
++        ssl_context = ssl.create_default_context(cafile=ca_file)
++        ssl_context.check_hostname = False
++        kwargs["verify"] = ssl_context
++    elif ca_file is True:
++        # System CA bundle - still disable hostname check for IP connections
++        ssl_context = ssl.create_default_context()
++        ssl_context.check_hostname = False
++        kwargs["verify"] = ssl_context
++    else:
++        kwargs["verify"] = False
++    
++    if client_cert:
++        kwargs["cert"] = client_cert
++
++    read_timeout = getattr(CONF.libvirt, "file_server_read_timeout", None)
++    if read_timeout:
++        kwargs["timeout"] = (5, int(read_timeout))
++    else:
++        kwargs["timeout"] = (5, 900)
++
++    # Disable proxy usage from environment variables
++    # httpx (used by webdav4) will otherwise try to use HTTP_PROXY/HTTPS_PROXY
++    kwargs["trust_env"] = False
++
++    # If webdav4 requires basic auth in addition to mTLS, uncomment:
++    # kwargs["auth"] = ("nova", "")  # username matches SFTPGo config
++
++    return Client(base_url, **kwargs)
++
++
++def _ensure_remote_dirs(client, path: str) -> None:
++    """Ensure that each component of the remote path exists."""
++    if not path:
++        return
++
++    from webdav4.client import ResourceAlreadyExists
++
++    components = [segment for segment in path.strip("/").split("/") if segment]
++    current = ""
++    for segment in components:
++        current = f"{current}/{segment}" if current else segment
++        current_dir = _ensure_trailing_slash(current)
++        _debug_log_path("ensure_remote_dirs candidate", current_dir)
++        if client.exists(current_dir):
++            continue
++        try:
++            client.mkdir(current_dir)
++            LOG.debug("[webdav] mkdir %s", current_dir)
++        except ResourceAlreadyExists:
++            # Another worker may have created this path between exists() and mkdir()
++            continue
++
++
++class HttpDriver:
++    """HTTP(WebDAV) transport driver implementing RemoteFilesystemDriver API."""
++
++    def create_file(self, host, dst_path, on_execute=None, on_completion=None):
++        LOG.debug("[webdav] create file %s on %s", dst_path, host)
++        client = _new_client(host)
++        webdav_path = _normalize_webdav_path(dst_path)
++
++        parent = os.path.dirname(webdav_path.rstrip("/"))
++        _ensure_remote_dirs(client, parent)
++
++        # PUT empty file using a temporary zero-byte file
++        with tempfile.NamedTemporaryFile(delete=False) as tmp:
++            tmp_path = tmp.name
++        try:
++            client.upload_file(tmp_path, webdav_path, overwrite=True)
++        finally:
++            os.unlink(tmp_path)
++
++    def remove_file(self, host, dst_path, on_execute=None, on_completion=None):
++        LOG.debug("[webdav] remove file %s on %s", dst_path, host)
++        client = _new_client(host)
++        webdav_path = _normalize_webdav_path(dst_path)
++        client.remove(webdav_path)
++
++    def create_dir(self, host, dst_path, on_execute=None, on_completion=None):
++        LOG.debug("[webdav] create dir %s on %s", dst_path, host)
++        client = _new_client(host)
++        webdav_path = _ensure_trailing_slash(_normalize_webdav_path(dst_path).rstrip("/"))
++        _debug_log_path("create_dir target", webdav_path)
++
++        parent = os.path.dirname(webdav_path)
++        _debug_log_path("create_dir parent", parent)
++        _ensure_remote_dirs(client, parent)
++
++        from webdav4.client import ResourceAlreadyExists
++
++        try:
++            client.mkdir(webdav_path)
++            LOG.debug("[webdav] mkdir final %s", webdav_path)
++        except ResourceAlreadyExists:
++            # Directory already exists, safe to ignore
++            pass
++
++    def remove_dir(self, host, dst_path, on_execute=None, on_completion=None):
++        LOG.debug("[webdav] remove dir %s on %s", dst_path, host)
++        client = _new_client(host)
++        webdav_path = _ensure_trailing_slash(_normalize_webdav_path(dst_path).rstrip("/"))
++        _debug_log_path("remove_dir target", webdav_path)
++        client.remove(webdav_path)
++
++    def copy_file(self, src, dst, on_execute=None, on_completion=None, compression=True):
++        # compression ignored: WebDAV handles full-stream PUTs natively
++        LOG.debug("[webdav] upload %s to %s", src, dst)
++
++        host, dst_path = _parse_remote_dst(dst)
++        client = _new_client(host)
++        webdav_path = _normalize_webdav_path(dst_path)
++
++        parent = os.path.dirname(webdav_path.rstrip("/"))
++        _ensure_remote_dirs(client, parent)
++
++        client.upload_file(src, webdav_path, overwrite=True)
+diff --git a/requirements.txt b/requirements.txt
+index 291ccbd828..ada3688b8a 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -63,3 +63,4 @@ python-dateutil>=2.7.0 # BSD
+ futurist>=3.2.1 # Apache-2.0
+ openstacksdk>=4.4.0 # Apache-2.0
+ PyYAML>=5.1 # MIT
++webdav4>=0.9 # MIT

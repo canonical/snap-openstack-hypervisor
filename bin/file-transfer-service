@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start the Apache WebDAV service using the generated configuration.
+CONFIG_DIR="${SNAP_COMMON}/etc/apache2"
+CONFIG_FILE="${CONFIG_DIR}/webdav.conf"
+TLS_DIR="${SNAP_COMMON}/apache-webdav/tls"
+TLS_CERT="${TLS_DIR}/servercert.pem"
+TLS_KEY="${TLS_DIR}/serverkey.pem"
+TLS_CA="${TLS_DIR}/ca-cert.pem"
+DAV_LOCK_DB="${SNAP_COMMON}/var/webdav-lock/DavLock"
+
+ensure_dir_mode() {
+    local dir="$1"
+    local mode="$2"
+    mkdir -p "${dir}"
+    chmod "${mode}" "${dir}"
+}
+
+ensure_dir_mode "${SNAP_COMMON}/var" 755
+ensure_dir_mode "${SNAP_COMMON}/log" 755
+ensure_dir_mode "${SNAP_COMMON}/run" 755
+
+for path in \
+    "${SNAP_COMMON}/var/webdav" \
+    "${SNAP_COMMON}/var/webdav-lock" \
+    "${SNAP_COMMON}/log/apache2" \
+    "${SNAP_COMMON}/run/apache2"; do
+    ensure_dir_mode "${path}" 757
+done
+
+find "${SNAP_COMMON}/var/webdav" -type d ! -perm 757 -exec chmod 757 {} +
+
+for file in \
+    "${SNAP_COMMON}/log/apache2/error.log" \
+    "${SNAP_COMMON}/log/apache2/access.log" \
+    "${SNAP_COMMON}/log/apache2/ssl_client.log" \
+    "${DAV_LOCK_DB}"; do
+    touch "${file}"
+    chmod 666 "${file}"
+done
+
+for required in "${CONFIG_FILE}" "${TLS_CERT}" "${TLS_KEY}" "${TLS_CA}"; do
+    if [ ! -s "${required}" ]; then
+        echo "Missing required file: ${required}" >&2
+        exit 1
+    fi
+done
+
+exec 3<"${TLS_CERT}"
+exec 4<"${TLS_KEY}"
+exec 5<"${TLS_CA}"
+exec 6<"${CONFIG_FILE}"
+
+RUNDIR="${SNAP_COMMON}/run/apache2"
+LOGDIR="${SNAP_COMMON}/log/apache2"
+LOCKDIR="${SNAP_COMMON}/run/apache2"
+PIDFILE="${RUNDIR}/apache2.pid"
+
+export APACHE_RUN_DIR="${RUNDIR}"
+export APACHE_LOG_DIR="${LOGDIR}"
+export APACHE_PID_FILE="${PIDFILE}"
+export APACHE_LOCK_DIR="${LOCKDIR}"
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
+exec /usr/bin/setpriv \
+    --reuid snap_daemon \
+    --regid snap_daemon \
+    --keep-groups \
+    --inh-caps=-setpcap \
+    -- /bin/sh -c '
+        exec "$1" -f /proc/self/fd/6 -DFOREGROUND
+    ' sh "${SNAP}/usr/sbin/apache2"

@@ -14,10 +14,12 @@ import os
 import platform
 import re
 import secrets
+import shutil
 import socket
 import stat
 import string
 import subprocess
+import textwrap
 import time
 import typing
 import uuid
@@ -105,6 +107,7 @@ COMMON_DIRS = [
 
 DEFAULT_PERMS = 0o640
 PRIVATE_PERMS = 0o600
+LAYOUT_BASE = Path("/var/lib/openstack-hypervisor")
 
 DATA_DIRS = [
     Path("lib/libvirt/images"),
@@ -442,6 +445,10 @@ TLS_TEMPLATES = {
     Path("etc/pki/CA/cacert.pem"): {"services": ["libvirtd"]},
     Path("etc/pki/libvirt/servercert.pem"): {"services": ["libvirtd"]},
     Path("etc/pki/libvirt/private/serverkey.pem"): {"services": ["libvirtd"]},
+    # Restart fileserver when its TLS material changes
+    Path("etc/pki/nova/servercert.pem"): {"services": ["file-transfer"]},
+    Path("etc/pki/nova/private/serverkey.pem"): {"services": ["file-transfer"]},
+    Path("etc/apache2/webdav.conf"): {"services": ["file-transfer"]},
 }
 
 
@@ -1656,18 +1663,37 @@ def _configure_libvirt_tls(snap: Snap) -> None:
         logging.info("Libvirt / QEMU TLS configuration incomplete, generating local.")
         cacert, cert, key = _generate_local_tls(snap)
 
-    pki_cacert = snap.paths.common / Path("etc/pki/CA/cacert.pem")
+    pki_root = snap.paths.common / Path("etc/pki")
+    pki_root.mkdir(parents=True, exist_ok=True)
+    pki_root.chmod(0o755)
+
+    pki_cacert = pki_root / Path("CA/cacert.pem")
     # Libvirt TLS configuration
-    libvirt_cert = snap.paths.common / Path("etc/pki/libvirt/servercert.pem")
-    libvirt_key = snap.paths.common / Path("etc/pki/libvirt/private/serverkey.pem")
-    libvirt_client_cert = snap.paths.common / Path("etc/pki/libvirt/clientcert.pem")
-    libvirt_client_key = snap.paths.common / Path("etc/pki/libvirt/private/clientkey.pem")
+    libvirt_cert = pki_root / Path("libvirt/servercert.pem")
+    libvirt_key = pki_root / Path("libvirt/private/serverkey.pem")
+    libvirt_client_cert = pki_root / Path("libvirt/clientcert.pem")
+    libvirt_client_key = pki_root / Path("libvirt/private/clientkey.pem")
     # QEMU TLS configuration
-    qemu_cacert = snap.paths.common / Path("etc/pki/qemu/ca-cert.pem")
-    qemu_cert = snap.paths.common / Path("etc/pki/qemu/server-cert.pem")
-    qemu_key = snap.paths.common / Path("etc/pki/qemu/server-key.pem")
-    qemu_client_cert = snap.paths.common / Path("etc/pki/qemu/client-cert.pem")
-    qemu_client_key = snap.paths.common / Path("etc/pki/qemu/client-key.pem")
+    qemu_cacert = pki_root / Path("qemu/ca-cert.pem")
+    qemu_cert = pki_root / Path("qemu/server-cert.pem")
+    qemu_key = pki_root / Path("qemu/server-key.pem")
+    qemu_client_cert = pki_root / Path("qemu/client-cert.pem")
+    qemu_client_key = pki_root / Path("qemu/client-key.pem")
+
+    for directory in {
+        pki_cacert.parent,
+        libvirt_cert.parent,
+        libvirt_key.parent,
+        libvirt_client_cert.parent,
+        libvirt_client_key.parent,
+        qemu_cacert.parent,
+        qemu_cert.parent,
+        qemu_key.parent,
+        qemu_client_cert.parent,
+        qemu_client_key.parent,
+    }:
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o755)
 
     _template_tls_file(cacert, pki_cacert, [qemu_cacert])
     _template_tls_file(
@@ -1689,6 +1715,152 @@ def _configure_libvirt_tls(snap: Snap) -> None:
         ],
         PRIVATE_PERMS,
     )
+
+    # Nova fileserver TLS (server cert/key for WebDAV)
+    nova_dir = pki_root / Path("nova")
+    nova_private_dir = nova_dir / Path("private")
+    nova_dir.mkdir(parents=True, exist_ok=True)
+    nova_private_dir.mkdir(parents=True, exist_ok=True)
+    nova_dir.chmod(0o755)
+    nova_private_dir.chmod(0o755)
+
+    nova_cert = nova_dir / "servercert.pem"
+    nova_key = nova_private_dir / "serverkey.pem"
+    _template_tls_file(cert, nova_cert, [])
+    _template_tls_file(key, nova_key, [], PRIVATE_PERMS)
+
+    # Nova fileserver CA (for client verification)
+    nova_ca = nova_dir / "ca-cert.pem"
+    _template_tls_file(cacert, nova_ca, [])
+
+    common_base = snap.paths.common
+    tls_parent = common_base / Path("apache-webdav")
+    webdav_tls_dir = tls_parent / "tls"
+    for path in (tls_parent, webdav_tls_dir):
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o755)
+
+    apache_cert = webdav_tls_dir / "servercert.pem"
+    apache_key = webdav_tls_dir / "serverkey.pem"
+    apache_ca = webdav_tls_dir / "ca-cert.pem"
+
+    shutil.copyfile(nova_cert, apache_cert)
+    shutil.copyfile(nova_key, apache_key)
+    shutil.copyfile(nova_ca, apache_ca)
+
+    apache_cert.chmod(0o644)
+    apache_key.chmod(0o644)
+    apache_ca.chmod(0o644)
+
+    _configure_webdav_apache(snap)
+
+
+def _configure_webdav_apache(snap: Snap) -> None:
+    """Configure Apache-based WebDAV endpoint with mTLS."""
+    apache_cfg_dir = snap.paths.common / Path("etc/apache2")
+    apache_cfg_dir.mkdir(parents=True, exist_ok=True)
+    for ancestor in (apache_cfg_dir, apache_cfg_dir.parent):
+        if ancestor.exists():
+            ancestor.chmod(0o755)
+    webdav_cfg_path = apache_cfg_dir / "webdav.conf"
+    mime_types_path = apache_cfg_dir / "mime.types"
+    server_root = snap.paths.snap / Path("usr/lib/apache2")
+    modules_dir = server_root / "modules"
+    if not mime_types_path.exists():
+        src_candidates = [
+            Path("/etc/mime.types"),
+            snap.paths.snap / Path("etc/mime.types"),
+            snap.paths.snap / Path("usr/share/misc/mime.types"),
+        ]
+        source = next((p for p in src_candidates if p.exists()), None)
+        if source:
+            shutil.copy(source, mime_types_path)
+        else:
+            mime_types_path.write_text(
+                "text/plain\t txt\napplication/octet-stream\tbin\n", encoding="utf-8"
+            )
+
+    webdav_root_fs = LAYOUT_BASE / Path("var/webdav")
+    dav_lock_dir_fs = LAYOUT_BASE / Path("var/webdav-lock")
+    log_dir_fs = LAYOUT_BASE / Path("log/apache2")
+    run_dir_fs = LAYOUT_BASE / Path("run/apache2")
+    mime_types_path_fs = LAYOUT_BASE / Path("etc/apache2/mime.types")
+
+    def module(name: str) -> Path:
+        return modules_dir / f"mod_{name}.so"
+
+    dav_lock_db = dav_lock_dir_fs / "DavLock"
+    error_log = log_dir_fs / "error.log"
+    access_log = log_dir_fs / "access.log"
+    client_log = log_dir_fs / "ssl_client.log"
+    pid_file = run_dir_fs / "apache2.pid"
+
+    config = (
+        textwrap.dedent(
+            f"""
+        ServerRoot "{server_root}"
+        PidFile "{pid_file}"
+        Listen 0.0.0.0:10099
+
+        LoadModule mpm_event_module "{module('mpm_event')}"
+        LoadModule authn_core_module "{module('authn_core')}"
+        LoadModule authz_core_module "{module('authz_core')}"
+        LoadModule authz_host_module "{module('authz_host')}"
+        LoadModule alias_module "{module('alias')}"
+        LoadModule dir_module "{module('dir')}"
+        LoadModule mime_module "{module('mime')}"
+        LoadModule setenvif_module "{module('setenvif')}"
+        LoadModule reqtimeout_module "{module('reqtimeout')}"
+        LoadModule ssl_module "{module('ssl')}"
+        LoadModule socache_shmcb_module "{module('socache_shmcb')}"
+        LoadModule headers_module "{module('headers')}"
+        LoadModule dav_module "{module('dav')}"
+        LoadModule dav_fs_module "{module('dav_fs')}"
+
+        Timeout 10800
+        KeepAlive On
+        MaxKeepAliveRequests 0
+        KeepAliveTimeout 60
+        LimitRequestBody 0
+        TypesConfig "{mime_types_path_fs}"
+
+        ErrorLog "{error_log}"
+        CustomLog "{access_log}" combined
+        CustomLog "{client_log}" "%t %h %{{SSL_CLIENT_S_DN}}x %{{SSL_CLIENT_I_DN}}x \\"%r\\" %b"
+
+        DavLockDB "{dav_lock_db}"
+
+        <VirtualHost *:10099>
+            SSLEngine on
+            SSLProtocol all -SSLv3
+            SSLCertificateFile "/proc/self/fd/3"
+            SSLCertificateKeyFile "/proc/self/fd/4"
+            SSLCACertificateFile "/proc/self/fd/5"
+            SSLVerifyClient require
+            SSLVerifyDepth 2
+            SSLOptions +StdEnvVars
+
+            RequestReadTimeout body=0
+
+            DocumentRoot "{webdav_root_fs}"
+            Alias / "{webdav_root_fs}/"
+            <Directory "{webdav_root_fs}">
+                DirectorySlash Off
+                DavDepthInfinity On
+                DAV On
+                Options Indexes FollowSymLinks
+                AllowOverride None
+                Require ssl-verify-client
+                Require all granted
+            </Directory>
+        </VirtualHost>
+        """
+        ).strip()
+        + "\n"
+    )
+
+    webdav_cfg_path.write_text(config, encoding="utf-8")
+    webdav_cfg_path.chmod(0o644)
 
 
 def _configure_ovn_tls(snap: Snap) -> None:
