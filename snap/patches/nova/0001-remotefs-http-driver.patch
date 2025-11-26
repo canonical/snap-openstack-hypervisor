@@ -1,5 +1,5 @@
 diff --git a/nova/conf/libvirt.py b/nova/conf/libvirt.py
-index 0746d4040a..6716eaa40a 100644
+index 0746d4040a..099dfd5762 100644
 --- a/nova/conf/libvirt.py
 +++ b/nova/conf/libvirt.py
 @@ -1384,7 +1384,7 @@ and ``gid`` must be specified.
@@ -38,7 +38,7 @@ index 0746d4040a..6716eaa40a 100644
 +    cfg.StrOpt('file_server_client_key_file',
 +               default='',
 +               help='Path to client private key file for mutual TLS to the '
-+                    'file server.'),
++                     'file server.'),
  ]
  
  libvirt_volume_vzstorage_opts = [
@@ -57,10 +57,10 @@ index 8ddcaa1fcc..8096c77903 100644
  
 diff --git a/nova/virt/libvirt/volume/remotefs_http.py b/nova/virt/libvirt/volume/remotefs_http.py
 new file mode 100644
-index 0000000000..52b14b8e41
+index 0000000000..ed983e2963
 --- /dev/null
 +++ b/nova/virt/libvirt/volume/remotefs_http.py
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,174 @@
 +import os
 +import ssl
 +import tempfile
@@ -84,29 +84,13 @@ index 0000000000..52b14b8e41
 +
 +def _parse_remote_dst(dst: str) -> Tuple[str, str]:
 +    # Expected format: "<host>:<absolute_path>"
-+    # Example: "10.149.132.154:/var/snap/openstack-hypervisor/common/lib/nova/instances/.../disk"
++    # NOTE: Only IPv4 addresses are supported; IPv6 bracket notation is not handled.
 +    if ":" not in dst:
 +        raise ValueError(f"Invalid remote path format, expected 'host:/abs/path', got: {dst}")
 +    host, path = dst.split(":", 1)
 +    if not path.startswith("/"):
 +        raise ValueError(f"Destination path must be absolute, got: {path}")
 +    return host, path
-+
-+
-+def _normalize_webdav_path(path: str) -> str:
-+    """Convert absolute path to WebDAV-relative path (chrooted to SNAP_COMMON).
-+
-+    The Apache layout binds SNAP_COMMON at /var/lib/openstack-hypervisor,
-+    so we strip the snap-managed prefix and leave a relative path.
-+    Example: /var/snap/openstack-hypervisor/common/lib/nova/disk
-+           -> lib/nova/disk
-+    """
-+    snap_common = "/var/snap/openstack-hypervisor/common"
-+    if path.startswith(snap_common):
-+        normalized = path[len(snap_common):].lstrip("/")
-+        return normalized
-+    # If path doesn't start with SNAP_COMMON, assume it's already relative
-+    return path.lstrip("/")
 +
 +
 +def _ensure_trailing_slash(path: str) -> str:
@@ -127,22 +111,19 @@ index 0000000000..52b14b8e41
 +    base_url = _base_url(host)
 +
 +    # TLS verification and client certs for mTLS
-+    ca_file = getattr(CONF.libvirt, "file_server_ca_file", "") or True
++    ca_file = getattr(CONF.libvirt, "file_server_ca_file", None) or True
 +    cert_file = getattr(CONF.libvirt, "file_server_client_cert_file", "") or None
 +    key_file = getattr(CONF.libvirt, "file_server_client_key_file", "") or None
 +    client_cert = (cert_file, key_file) if cert_file and key_file else None
 +
 +    kwargs = {}
-+    
 +    # Handle SSL verification: verify certificate chain but not hostname
 +    # (since we may connect via IP address, not hostname)
 +    if ca_file and ca_file is not True:
-+        # Create SSL context that verifies cert chain but not hostname
 +        ssl_context = ssl.create_default_context(cafile=ca_file)
 +        ssl_context.check_hostname = False
 +        kwargs["verify"] = ssl_context
 +    elif ca_file is True:
-+        # System CA bundle - still disable hostname check for IP connections
 +        ssl_context = ssl.create_default_context()
 +        ssl_context.check_hostname = False
 +        kwargs["verify"] = ssl_context
@@ -197,7 +178,7 @@ index 0000000000..52b14b8e41
 +    def create_file(self, host, dst_path, on_execute=None, on_completion=None):
 +        LOG.debug("[webdav] create file %s on %s", dst_path, host)
 +        client = _new_client(host)
-+        webdav_path = _normalize_webdav_path(dst_path)
++        webdav_path = dst_path
 +
 +        parent = os.path.dirname(webdav_path.rstrip("/"))
 +        _ensure_remote_dirs(client, parent)
@@ -213,13 +194,13 @@ index 0000000000..52b14b8e41
 +    def remove_file(self, host, dst_path, on_execute=None, on_completion=None):
 +        LOG.debug("[webdav] remove file %s on %s", dst_path, host)
 +        client = _new_client(host)
-+        webdav_path = _normalize_webdav_path(dst_path)
++        webdav_path = dst_path
 +        client.remove(webdav_path)
 +
 +    def create_dir(self, host, dst_path, on_execute=None, on_completion=None):
 +        LOG.debug("[webdav] create dir %s on %s", dst_path, host)
 +        client = _new_client(host)
-+        webdav_path = _ensure_trailing_slash(_normalize_webdav_path(dst_path).rstrip("/"))
++        webdav_path = _ensure_trailing_slash(dst_path.rstrip("/"))
 +        _debug_log_path("create_dir target", webdav_path)
 +
 +        parent = os.path.dirname(webdav_path)
@@ -238,7 +219,7 @@ index 0000000000..52b14b8e41
 +    def remove_dir(self, host, dst_path, on_execute=None, on_completion=None):
 +        LOG.debug("[webdav] remove dir %s on %s", dst_path, host)
 +        client = _new_client(host)
-+        webdav_path = _ensure_trailing_slash(_normalize_webdav_path(dst_path).rstrip("/"))
++        webdav_path = _ensure_trailing_slash(dst_path.rstrip("/"))
 +        _debug_log_path("remove_dir target", webdav_path)
 +        client.remove(webdav_path)
 +
@@ -248,7 +229,7 @@ index 0000000000..52b14b8e41
 +
 +        host, dst_path = _parse_remote_dst(dst)
 +        client = _new_client(host)
-+        webdav_path = _normalize_webdav_path(dst_path)
++        webdav_path = dst_path
 +
 +        parent = os.path.dirname(webdav_path.rstrip("/"))
 +        _ensure_remote_dirs(client, parent)

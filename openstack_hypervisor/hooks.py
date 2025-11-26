@@ -1795,6 +1795,10 @@ def _configure_webdav_apache(snap: Snap) -> None:
     client_log = log_dir_fs / "ssl_client.log"
     pid_file = run_dir_fs / "apache2.pid"
 
+    # The WebDAV endpoint listens on all interfaces so peer compute nodes can
+    # reach it during migrations. Restricting to loopback would break inter-node
+    # disk transfer flows. Timeout is intentionally long (3h) to cover large
+    # disk uploads over constrained links.
     config = (
         textwrap.dedent(
             f"""
@@ -1843,6 +1847,7 @@ def _configure_webdav_apache(snap: Snap) -> None:
             RequestReadTimeout body=0
 
             DocumentRoot "{webdav_root_fs}"
+            Alias /var/snap/openstack-hypervisor/common/ "{webdav_root_fs}/"
             Alias / "{webdav_root_fs}/"
             <Directory "{webdav_root_fs}">
                 DirectorySlash Off
