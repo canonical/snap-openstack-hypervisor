@@ -6,15 +6,16 @@ import os
 import socket
 import subprocess
 import time
-from typing import Dict
+from typing import Dict, List
 
+import psutil
 from pydantic import BaseModel, Field, field_validator
 from snaphelpers import Snap
 
 SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "data", "shutdown.sock")
 
 PROTOCOL_VERSION = "1.0"
-
+VIRSH_TIMEOUT = 3
 
 class NetworkStatus(enum.Enum):
     """Enum for network interface status"""
@@ -89,16 +90,25 @@ def shutdown_vms():
     for vm in vm_names:
         logging.info(f"Shutting down VM: {vm}")
         try:
-            subprocess.run(["virsh", "shutdown", vm], check=True, timeout=30)
-        except subprocess.TimeoutExpired:
-            logging.error(f"Timeout: VM '{vm}' did not shutdown in 30 seconds.")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error during VM shutdown: {e.stderr.strip()}")
+            subprocess.run(["virsh", "shutdown", vm], check=True, timeout=VIRSH_TIMEOUT)
         except Exception as e:
-            logging.error(f"Unexpected error: {e}")
+            logging.error("Failed graceful shutdown '%s': %s", vm, e)
+            force_shutdown_vms(vm_names)
+            break
 
-    logging.info("Shutdown commands sent to all VMs.")
-
+def force_shutdown_vms(vm_names: List[str]):
+    """
+    Forcefully stop VMs by killing their qemu processes.
+    """
+    for vm_name in vm_names:
+        for proc in list(psutil.process_iter(["cmdline"])):
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            if "qemu-system" in cmdline and vm_name in cmdline:
+                try:
+                    proc.kill()
+                    logging.warning("Force killed VM: %s", vm_name)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.Error) as exc:
+                    logging.error("Failed to kill qemu process for '%s': %s", vm_name, exc)
 
 def handle_network_status(data: Dict) -> str:
     """Handle network status messages and take appropriate actions
