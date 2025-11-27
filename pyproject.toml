@@ -38,6 +38,7 @@ dependencies = [
     "pyroute2==0.7.11",  # matched to caracal cloud-archive
     "click",
     "prettytable",
+    "psutil",
 ]
 
 [project.optional-dependencies]
