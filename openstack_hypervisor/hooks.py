@@ -38,6 +38,12 @@ from snaphelpers import Snap
 from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import netplan, pci
+from openstack_hypervisor.bridge_datapath import (
+    detect_current_mappings,
+    resolve_bridge_mappings,
+    resolve_ovs_changes,
+    update_mappings_from_rename,
+)
 from openstack_hypervisor.cli import pci_devices
 from openstack_hypervisor.cli.common import (
     EPAOrchestratorError,
@@ -281,9 +287,11 @@ DEFAULT_CONFIG = {
     "compute.pci-aliases": [],
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
+    # These 2 options are deprecated, kept as a compatibility layer
     "network.physnet-name": "physnet1",
     "network.external-bridge": "br-ex",
     "network.external-bridge-address": IPVANYNETWORK_UNSET,
+    "network.bridge-mapping": UNSET,
     "network.dns-servers": "8.8.8.8",
     "network.ovs-dpdk-enabled": False,
     "network.ovs-memory": UNSET,
@@ -297,6 +305,7 @@ DEFAULT_CONFIG = {
     "network.ovn-cacert": UNSET,
     "network.enable-gateway": False,
     "network.ip-address": _get_local_ip_by_default_route,  # noqa: F821
+    # Deprecate external nic
     "network.external-nic": UNSET,
     "network.sriov-nic-exclude-devices": UNSET,
     # Monitoring
@@ -318,7 +327,12 @@ DEFAULT_CONFIG = {
 # Required config can be a section like "identity" in which case all keys must
 # be set or a single key like "identity.password".
 REQUIRED_CONFIG = {
-    "nova-compute": ["identity.password", "identity.username", "identity", "rabbitmq.url"],
+    "nova-compute": [
+        "identity.password",
+        "identity.username",
+        "identity",
+        "rabbitmq.url",
+    ],
     "nova-api-metadata": [
         "identity.password",
         "identity.username",
@@ -415,11 +429,17 @@ TEMPLATES = {
         "template": "neutron_sriov_nic_agent.ini.j2",
         "services": ["neutron-sriov-nic-agent"],
     },
-    Path("etc/libvirt/libvirtd.conf"): {"template": "libvirtd.conf.j2", "services": ["libvirtd"]},
+    Path("etc/libvirt/libvirtd.conf"): {
+        "template": "libvirtd.conf.j2",
+        "services": ["libvirtd"],
+    },
     Path("etc/libvirt/qemu.conf"): {
         "template": "qemu.conf.j2",
     },
-    Path("etc/libvirt/virtlogd.conf"): {"template": "virtlogd.conf.j2", "services": ["virtlogd"]},
+    Path("etc/libvirt/virtlogd.conf"): {
+        "template": "virtlogd.conf.j2",
+        "services": ["virtlogd"],
+    },
     Path("etc/openvswitch/system-id.conf"): {
         "template": "system-id.conf.j2",
     },
@@ -1052,7 +1072,7 @@ def _process_dpdk_netplan_config(  # noqa: C901
         for bridge_name, bridge_config in bridges.items():
             bridge_ifaces = bridge_config.get("interfaces") or []
             if (iface in bridge_ifaces or iface_bond in bridge_ifaces) and (
-                ("openvswitch" not in bridge_config)
+                "openvswitch" not in bridge_config
             ):
                 logging.warning("Not an OVS bridge: %s, skipping DPDK configuration.", bridge_name)
                 continue
@@ -1295,7 +1315,7 @@ def _add_dpdk_bond(
             "Interface",
             port["name"],
             "type=dpdk",
-            f"options:dpdk-devargs={port["pci_address"]}",
+            f"options:dpdk-devargs={port['pci_address']}",
         ]
         mtu = mtu or port.get("mtu")
         if mtu:
@@ -1310,16 +1330,41 @@ def _remove_ovs_port_from_bridge(bridge_name: str, port_name: str):
     subprocess.check_call(cmd)
 
 
-def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:
+def _config_get(snap: Snap) -> typing.Callable[typing.Concatenate[str, ...], typing.Any]:
+    """Get a config value with a default fallback.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: a function that retrieves config values with a default
+    :rtype: Callable[[str, Any], Any]
+    """
+
+    def _getter(key: str, default: typing.Any = None) -> typing.Any:
+        try:
+            return snap.config.get(key)
+        except UnknownConfigKey:
+            return default
+
+    return _getter
+
+
+def get_machine_id() -> str:
+    """Retrieve the machine-id of the system.
+
+    :return: the machine-id string
+    :rtype: str
+    """
+    with open("/etc/machine-id", "r") as f:
+        return f.read().strip()
+
+
+def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:  # noqa: C901
     """Configure OVS/OVN external networking.
 
     :param snap: the snap reference
     :type snap: Snap
     :return: None
     """
-    # TODO:
-    # Deal with multiple external networks.
-    # Deal with wiring of hardware port to each bridge.
     try:
         sb_conn = snap.config.get("network.ovn-sb-connection")
     except UnknownConfigKey:
@@ -1327,18 +1372,47 @@ def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:
     if not sb_conn:
         logging.info("OVN SB connection URL not configured, skipping.")
         return
-    external_bridge = snap.config.get("network.external-bridge")
-    physnet_name = snap.config.get("network.physnet-name")
-    try:
-        external_nic = snap.config.get("network.external-nic")
-    except UnknownConfigKey:
-        external_nic = None
-    if not external_bridge and physnet_name:
+
+    config = _config_get(snap)
+
+    mappings = resolve_bridge_mappings(
+        config("network.external-bridge"),
+        config("network.physnet-name"),
+        config("network.external-nic"),
+        config("network.bridge-mapping"),
+    )
+
+    if not mappings:
         logging.info("OVN external networking not configured, skipping.")
         return
 
-    datapath_type = _get_datapath_type(context)
-    _add_ovs_bridge(external_bridge, datapath_type, "protocols=OpenFlow13,OpenFlow15")
+    external_bridge_address = snap.config.get("network.external-bridge-address")
+    if len(mappings) > 1 and external_bridge_address != IPVANYNETWORK_UNSET:
+        logging.warning(
+            "External bridge address configuration is supported only for localnet (i.e. no external nics)."
+        )
+        return
+
+    current_mappings = detect_current_mappings()
+
+    changes = resolve_ovs_changes(current_mappings, mappings)
+    logging.debug("OVS external networking changes: %s", changes)
+
+    mappings = update_mappings_from_rename(mappings, changes["renamed_bridges"])
+
+    for bridge, change in changes["interface_changes"].items():
+        for iface in change["removed"]:
+            logging.info(f"Removing interface {iface} from bridge {bridge}")
+            _del_interface_from_bridge(bridge, iface)
+            # Adding interfaces is handled later.
+
+    for bridge in changes["removed_bridges"]:
+        logging.info(f"Removing ovs bridge {bridge}")
+        subprocess.check_call(["ovs-vsctl", "--retry", "del-br", bridge])
+
+    for bridge in changes["added_bridges"]:
+        logging.info(f"Adding ovs bridge {bridge}")
+        _add_ovs_bridge(bridge, _get_datapath_type(context), "protocols=OpenFlow13,OpenFlow15")
 
     subprocess.check_call(
         [
@@ -1347,33 +1421,59 @@ def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:
             "set",
             "open",
             ".",
-            f"external_ids:ovn-bridge-mappings={physnet_name}:{external_bridge}",
+            "external_ids:ovn-bridge-mappings="
+            + ",".join(mapping.physnet_bridge_pair() for mapping in mappings),
         ]
     )
-    _wait_for_interface(external_bridge)
 
-    external_bridge_address = snap.config.get("network.external-bridge-address")
+    for mapping in mappings:
+        _wait_for_interface(mapping.bridge)
+
     comment = "openstack-hypervisor external network rule"
-    # Consider 0.0.0.0/0 as IPvAnyNetwork None
-    if external_bridge_address == IPVANYNETWORK_UNSET:
-        logging.info(f"Resetting external bridge {external_bridge} configuration")
-        _delete_ips_from_interface(external_bridge)
-        _delete_iptable_postrouting_rule(comment)
-        if external_nic:
-            logging.info(f"Adding {external_nic} to {external_bridge}")
-            _ensure_single_nic_on_bridge(external_bridge, external_nic)
-            _ensure_link_up(external_nic)
-            _enable_chassis_as_gateway()
-        else:
-            logging.info(f"Removing nics from {external_bridge}")
-            _del_external_nics_from_bridge(external_bridge)
-            _disable_chassis_as_gateway()
-    else:
-        logging.info(f"configuring external bridge {external_bridge}")
-        _add_ip_to_interface(external_bridge, external_bridge_address)
+    if len(mappings) == 1 and external_bridge_address != IPVANYNETWORK_UNSET:
+        # We only support localnet mode for a single virtual physnet
+        mapping = mappings[0]
+        logging.info(f"configuring external bridge {mapping.bridge}")
+        _add_ip_to_interface(mapping.bridge, external_bridge_address)
         external_network = ipaddress.ip_interface(external_bridge_address).network
         _add_iptable_postrouting_rule(str(external_network), comment)
         _enable_chassis_as_gateway()
+        return
+
+    # We're in external net mode
+    _delete_iptable_postrouting_rule(comment)
+    enable_as_gateway = False
+    for mapping in mappings:
+        logging.info(f"Resetting external bridge {mapping.bridge} configuration")
+        _delete_ips_from_interface(mapping.bridge)
+        if mapping.interface:
+            logging.info(f"Adding {mapping.interface} to {mapping.bridge}")
+            _ensure_single_nic_on_bridge(mapping.bridge, mapping.interface)
+            _ensure_link_up(mapping.interface)
+            enable_as_gateway = True
+        else:
+            logging.info(f"Removing nics from {mapping.bridge}")
+            _del_external_nics_from_bridge(mapping.bridge)
+
+    machine_id = get_machine_id()
+
+    subprocess.check_call(
+        [
+            "ovs-vsctl",
+            "--retry",
+            "set",
+            "open",
+            ".",
+            "external_ids:ovn-chassis-mac-mappings="
+            + ",".join(mapping.physnet_mac_pair(machine_id) for mapping in mappings),
+        ]
+    )
+
+    # If we have at least one external nic, enable chassis as gateway
+    if enable_as_gateway:
+        _enable_chassis_as_gateway()
+    else:
+        _disable_chassis_as_gateway()
 
 
 def _enable_chassis_as_gateway():
@@ -1474,7 +1574,9 @@ def _certificate_is_still_valid(cert: x509.Certificate) -> bool:
     return cert.not_valid_before < today < cert.not_valid_after
 
 
-def _generate_local_ca(root_path: Path) -> tuple[x509.Certificate, rsa.RSAPrivateKey, bool]:
+def _generate_local_ca(
+    root_path: Path,
+) -> tuple[x509.Certificate, rsa.RSAPrivateKey, bool]:
     """Return local CA cert and if it was generated."""
     ca_private_key = root_path / Path("ca.key")
     ca_certificate = root_path / Path("ca.pem")
@@ -1835,9 +1937,7 @@ def _is_hw_virt_supported() -> bool:
             # ARM 8.3-A added nested virtualization support but it is yet
             # to land upstream https://lwn.net/Articles/812280/ at the time
             # of writing (Nov 2020).
-            logging.warning(
-                "Nested virtualization is not supported on ARM" " - will use emulation"
-            )
+            logging.warning("Nested virtualization is not supported on ARM - will use emulation")
             return False
         else:
             logging.warning(
@@ -2124,7 +2224,8 @@ def _set_sriov_context(snap: Snap, context: dict):  # noqa: C901
             logging.info("nic %s: found parent PF: %s", nic.name, nic.pf_pci_address)
             if _should_sriov_agent_manage_nic(pf, physnet=physnet):
                 logging.info(
-                    "nic %s: found whiteliested VFs, adding to SR-IOV agent mappings.", nic.name
+                    "nic %s: found whitelisted VFs, adding to SR-IOV agent mappings.",
+                    nic.name,
                 )
                 mappings.append(f"{physnet}:{pf.name}")
             if pf.hw_offload_available:
