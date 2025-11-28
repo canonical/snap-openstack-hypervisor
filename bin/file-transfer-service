@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start the Apache WebDAV service using the generated configuration.
+CONFIG_DIR="${SNAP_COMMON}/etc/apache2"
+CONFIG_FILE="${CONFIG_DIR}/webdav.conf"
+TLS_DIR="${SNAP_COMMON}/apache-webdav/tls"
+TLS_CERT="${TLS_DIR}/servercert.pem"
+TLS_KEY="${TLS_DIR}/serverkey.pem"
+TLS_CA="${TLS_DIR}/ca-cert.pem"
+DAV_LOCK_DB="${SNAP_COMMON}/var/webdav-lock/DavLock"
+
+ensure_dir_owned() {
+    local dir="$1"
+    local mode="$2"
+    mkdir -p "${dir}"
+    chown snap_daemon:snap_daemon "${dir}"
+    chmod "${mode}" "${dir}"
+}
+
+ensure_dir_owned "${SNAP_COMMON}/var/webdav" 750
+ensure_dir_owned "${SNAP_COMMON}/var/webdav-lock" 750
+ensure_dir_owned "${SNAP_COMMON}/log/apache2" 750
+ensure_dir_owned "${SNAP_COMMON}/run/apache2" 750
+ensure_dir_owned "${SNAP_COMMON}/lib" 750
+ensure_dir_owned "${SNAP_COMMON}/lib/nova" 750
+ensure_dir_owned "${SNAP_COMMON}/lib/nova/instances" 750
+
+touch "${DAV_LOCK_DB}"
+chown snap_daemon:snap_daemon "${DAV_LOCK_DB}"
+chmod 640 "${DAV_LOCK_DB}"
+
+for required in "${CONFIG_FILE}" "${TLS_CERT}" "${TLS_KEY}" "${TLS_CA}"; do
+    if [ ! -s "${required}" ]; then
+        echo "Missing required file: ${required}" >&2
+        exit 1
+    fi
+done
+
+exec 3<"${TLS_CERT}"
+exec 4<"${TLS_KEY}"
+exec 5<"${TLS_CA}"
+exec 6<"${CONFIG_FILE}"
+
+RUNDIR="${SNAP_COMMON}/run/apache2"
+LOGDIR="${SNAP_COMMON}/log/apache2"
+LOCKDIR="${SNAP_COMMON}/run/apache2"
+PIDFILE="${RUNDIR}/apache2.pid"
+
+export APACHE_RUN_DIR="${RUNDIR}"
+export APACHE_LOG_DIR="${LOGDIR}"
+export APACHE_PID_FILE="${PIDFILE}"
+export APACHE_LOCK_DIR="${LOCKDIR}"
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
+exec /usr/bin/setpriv \
+    --reuid snap_daemon \
+    --regid snap_daemon \
+    --keep-groups \
+    --inh-caps=-setpcap \
+    -- /bin/sh -c '
+        exec "$1" -f /proc/self/fd/6 -DFOREGROUND
+    ' sh "${SNAP}/usr/sbin/apache2"
