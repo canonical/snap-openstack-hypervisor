@@ -680,7 +680,7 @@ parts:
           mv $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk $CRAFT_PART_INSTALL/usr/sbin/ovs-vswitchd
       fi
 
-  apache-webdav:
+  apache2-webdav:
     plugin: nil
     stage-packages:
       - apache2
@@ -753,7 +753,7 @@ parts:
       - requirements.txt
     after:
       - openstack
-      - apache-webdav
+      - apache2-webdav
     override-build: |
       uv export --frozen --no-hashes --format=requirements-txt -o requirements.txt
       craftctl default
