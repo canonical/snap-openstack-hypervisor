@@ -89,6 +89,11 @@ COMMON_DIRS = [
     Path("etc/pki/libvirt"),
     Path("etc/pki/libvirt/private"),
     Path("etc/pki/local"),
+    Path("etc/pki/nova"),
+    Path("etc/pki/nova/private"),
+    Path("etc/apache2"),
+    Path("apache-webdav"),
+    Path("apache-webdav/tls"),
     Path("etc/pki/qemu"),
     # log
     Path("log/libvirt/qemu"),
@@ -1680,21 +1685,6 @@ def _configure_libvirt_tls(snap: Snap) -> None:
     qemu_client_cert = pki_root / Path("qemu/client-cert.pem")
     qemu_client_key = pki_root / Path("qemu/client-key.pem")
 
-    for directory in {
-        pki_cacert.parent,
-        libvirt_cert.parent,
-        libvirt_key.parent,
-        libvirt_client_cert.parent,
-        libvirt_client_key.parent,
-        qemu_cacert.parent,
-        qemu_cert.parent,
-        qemu_key.parent,
-        qemu_client_cert.parent,
-        qemu_client_key.parent,
-    }:
-        directory.mkdir(parents=True, exist_ok=True)
-        directory.chmod(0o755)
-
     _template_tls_file(cacert, pki_cacert, [qemu_cacert])
     _template_tls_file(
         cert,
@@ -1715,14 +1705,16 @@ def _configure_libvirt_tls(snap: Snap) -> None:
         ],
         PRIVATE_PERMS,
     )
+    _configure_webdav_tls(snap, cacert, cert, key)
+
+
+def _configure_webdav_tls(snap: Snap, cacert: bytes, cert: bytes, key: bytes) -> None:
+    """Configure TLS material for the Nova WebDAV fileserver."""
+    pki_root = snap.paths.common / Path("etc/pki")
 
     # Nova fileserver TLS (server cert/key for WebDAV)
     nova_dir = pki_root / Path("nova")
     nova_private_dir = nova_dir / Path("private")
-    nova_dir.mkdir(parents=True, exist_ok=True)
-    nova_private_dir.mkdir(parents=True, exist_ok=True)
-    nova_dir.chmod(0o755)
-    nova_private_dir.chmod(0o755)
 
     nova_cert = nova_dir / "servercert.pem"
     nova_key = nova_private_dir / "serverkey.pem"
@@ -1736,9 +1728,6 @@ def _configure_libvirt_tls(snap: Snap) -> None:
     common_base = snap.paths.common
     tls_parent = common_base / Path("apache-webdav")
     webdav_tls_dir = tls_parent / "tls"
-    for path in (tls_parent, webdav_tls_dir):
-        path.mkdir(parents=True, exist_ok=True)
-        path.chmod(0o755)
 
     apache_cert = webdav_tls_dir / "servercert.pem"
     apache_key = webdav_tls_dir / "serverkey.pem"
