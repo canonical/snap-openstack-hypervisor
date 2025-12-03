@@ -121,6 +121,18 @@ DATA_DIRS = [
     Path("run/hypervisor-config"),
     Path("var/lib/libvirt/qemu"),
 ]
+
+# Host-side layout directories used by Apache WebDAV and related runtime state.
+LAYOUT_DIRS = [
+    Path("var/webdav"),
+    Path("var/webdav/lib"),
+    Path("var/webdav/lib/nova"),
+    Path("var/webdav/lib/nova/instances"),
+    Path("var/webdav-lock"),
+    Path("log/apache2"),
+    Path("run/apache2"),
+    Path("etc/apache2"),
+]
 SECRET_XML = string.Template(
     """
 <secret ephemeral='no' private='no'>
@@ -162,6 +174,27 @@ def _mkdirs(snap: Snap) -> None:
         os.makedirs(snap.paths.common / dir, exist_ok=True)
     for dir in DATA_DIRS:
         os.makedirs(snap.paths.data / dir, exist_ok=True)
+
+
+def _mkdir_layout_dirs() -> None:
+    """Ensure host-side layout directories required by Apache/WebDAV exist."""
+    logging.info("Ensuring LAYOUT_BASE exists: %s", LAYOUT_BASE)
+    try:
+        LAYOUT_BASE.mkdir(parents=True, exist_ok=True)
+        for relative_dir in LAYOUT_DIRS:
+            layout_dir = LAYOUT_BASE / relative_dir
+            logging.info("Ensuring layout dir %s", layout_dir)
+            layout_dir.mkdir(parents=True, exist_ok=True)
+            shutil.chown(layout_dir, user="snap_daemon", group="snap_daemon")
+            layout_dir.chmod(0o750)
+
+    except PermissionError as exc:
+        # In unit tests / non-root environments we can't touch /var/lib; log and skip.
+        logging.warning(
+            "Skipping layout dir creation under %s due to permissions: %s",
+            LAYOUT_BASE,
+            exc,
+        )
 
 
 def _setup_secrets(snap: Snap) -> None:
@@ -1768,6 +1801,9 @@ def _configure_webdav_apache(snap: Snap) -> None:
             mime_types_path.write_text(
                 "text/plain\t txt\napplication/octet-stream\tbin\n", encoding="utf-8"
             )
+
+    # Ensure host-side layout is present; idempotent and shared with install/configure.
+    _mkdir_layout_dirs()
 
     webdav_root_fs = LAYOUT_BASE / Path("var/webdav")
     dav_lock_dir_fs = LAYOUT_BASE / Path("var/webdav-lock")
