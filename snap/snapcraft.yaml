@@ -308,8 +308,6 @@ apps:
     plugs:
       - network
       - network-bind
-      - network-control
-      - microstack-support
 
   libvirt-exporter:
     daemon: simple

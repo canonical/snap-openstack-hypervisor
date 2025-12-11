@@ -19,7 +19,6 @@ import socket
 import stat
 import string
 import subprocess
-import textwrap
 import time
 import typing
 import uuid
@@ -1497,6 +1496,39 @@ def _template_tls_file(
         link.chmod(permissions)
 
 
+def _secure_copy(
+    src: Path, dst: Path, mode: int = 0o600, user: str = "snap_daemon", group: str = "snap_daemon"
+) -> None:
+    """Securely copy a file with atomic write and proper permissions.
+
+    Creates a temporary file, sets permissions and ownership before writing,
+    then atomically renames to the destination. This ensures the file is never
+    world-readable during creation.
+
+    :param src: Source file path
+    :type src: Path
+    :param dst: Destination file path
+    :type dst: Path
+    :param mode: File permissions (default: 0o600 for private keys)
+    :type mode: int
+    :param user: Owner username (default: snap_daemon)
+    :type user: str
+    :param group: Group name (default: snap_daemon)
+    :type group: str
+    """
+    tmp = dst.with_suffix(".tmp")
+    tmp.touch(mode=mode)
+    try:
+        shutil.chown(tmp, user=user, group=group)
+    except LookupError:
+        # In test environments, the user/group may not exist
+        # Permissions are still set correctly via mode
+        pass
+    shutil.copyfile(src, tmp)
+    tmp.chmod(mode)
+    tmp.rename(dst)
+
+
 def _configure_cabundle_tls(snap: Snap) -> None:
     """Configure CA Certs."""
     bundle = None
@@ -1766,19 +1798,13 @@ def _configure_webdav_tls(snap: Snap, cacert: bytes, cert: bytes, key: bytes) ->
     apache_key = webdav_tls_dir / "serverkey.pem"
     apache_ca = webdav_tls_dir / "ca-cert.pem"
 
-    shutil.copyfile(nova_cert, apache_cert)
-    shutil.copyfile(nova_key, apache_key)
-    shutil.copyfile(nova_ca, apache_ca)
-
-    apache_cert.chmod(0o644)
-    apache_key.chmod(0o644)
-    apache_ca.chmod(0o644)
-
-    _configure_webdav_apache(snap)
+    _secure_copy(nova_cert, apache_cert, mode=0o644)
+    _secure_copy(nova_key, apache_key, mode=0o600)
+    _secure_copy(nova_ca, apache_ca, mode=0o644)
 
 
-def _configure_webdav_apache(snap: Snap) -> None:
-    """Configure Apache-based WebDAV endpoint with mTLS."""
+def _configure_webdav_apache(snap: Snap, context: dict) -> None:
+    """Configure Apache-based WebDAV endpoint with mTLS using Jinja2 template."""
     apache_cfg_dir = snap.paths.common / Path("etc/apache2")
     apache_cfg_dir.mkdir(parents=True, exist_ok=True)
     for ancestor in (apache_cfg_dir, apache_cfg_dir.parent):
@@ -1820,76 +1846,33 @@ def _configure_webdav_apache(snap: Snap) -> None:
     client_log = log_dir_fs / "ssl_client.log"
     pid_file = run_dir_fs / "apache2.pid"
 
-    # The WebDAV endpoint listens on all interfaces so peer compute nodes can
-    # reach it during migrations. Restricting to loopback would break inter-node
-    # disk transfer flows. Timeout is intentionally long (3h) to cover large
-    # disk uploads over constrained links.
-    config = (
-        textwrap.dedent(
-            f"""
-        ServerRoot "{server_root}"
-        PidFile "{pid_file}"
-        Listen 0.0.0.0:10099
+    # WebDAV server always listens on all interfaces (0.0.0.0) to ensure it's
+    # accessible regardless of which IP address Nova uses to connect. Nova's
+    # HttpDriver connects to https://{host}:10099 where {host} comes from the
+    # destination string and may be a public IP (e.g., 10.133.149.x) or any
+    # other reachable IP. Binding to 0.0.0.0 ensures the server is reachable
+    # on all network interfaces.
+    listen_ip = "0.0.0.0"
+    listen_port = "10099"
+    listen_address = f"{listen_ip}:{listen_port}"
 
-        LoadModule mpm_event_module "{module('mpm_event')}"
-        LoadModule authn_core_module "{module('authn_core')}"
-        LoadModule authz_core_module "{module('authz_core')}"
-        LoadModule authz_host_module "{module('authz_host')}"
-        LoadModule alias_module "{module('alias')}"
-        LoadModule dir_module "{module('dir')}"
-        LoadModule mime_module "{module('mime')}"
-        LoadModule setenvif_module "{module('setenvif')}"
-        LoadModule reqtimeout_module "{module('reqtimeout')}"
-        LoadModule ssl_module "{module('ssl')}"
-        LoadModule socache_shmcb_module "{module('socache_shmcb')}"
-        LoadModule headers_module "{module('headers')}"
-        LoadModule dav_module "{module('dav')}"
-        LoadModule dav_fs_module "{module('dav_fs')}"
+    template_context = {
+        "server_root": str(server_root),
+        "pid_file": str(pid_file),
+        "listen_address": listen_address,
+        "listen_port": listen_port,
+        "module": module,
+        "mime_types_path": str(mime_types_path_fs),
+        "error_log": str(error_log),
+        "access_log": str(access_log),
+        "client_log": str(client_log),
+        "dav_lock_db": str(dav_lock_db),
+        "webdav_root": str(webdav_root_fs),
+    }
 
-        Timeout 10800
-        KeepAlive On
-        MaxKeepAliveRequests 0
-        KeepAliveTimeout 60
-        LimitRequestBody 0
-        TypesConfig "{mime_types_path_fs}"
-
-        ErrorLog "{error_log}"
-        CustomLog "{access_log}" combined
-        CustomLog "{client_log}" "%t %h %{{SSL_CLIENT_S_DN}}x %{{SSL_CLIENT_I_DN}}x \\"%r\\" %b"
-
-        DavLockDB "{dav_lock_db}"
-
-        <VirtualHost *:10099>
-            SSLEngine on
-            SSLProtocol all -SSLv3
-            SSLCertificateFile "/proc/self/fd/3"
-            SSLCertificateKeyFile "/proc/self/fd/4"
-            SSLCACertificateFile "/proc/self/fd/5"
-            SSLVerifyClient require
-            SSLVerifyDepth 2
-            SSLOptions +StdEnvVars
-
-            RequestReadTimeout body=0
-
-            DocumentRoot "{webdav_root_fs}"
-            Alias /var/snap/openstack-hypervisor/common/ "{webdav_root_fs}/"
-            Alias / "{webdav_root_fs}/"
-            <Directory "{webdav_root_fs}">
-                DirectorySlash Off
-                DavDepthInfinity On
-                DAV On
-                Options Indexes FollowSymLinks
-                AllowOverride None
-                Require ssl-verify-client
-                Require all granted
-            </Directory>
-        </VirtualHost>
-        """
-        ).strip()
-        + "\n"
-    )
-
-    webdav_cfg_path.write_text(config, encoding="utf-8")
+    template = _get_template(snap, "webdav.conf.j2")
+    output = template.render(template_context)
+    webdav_cfg_path.write_text(output, encoding="utf-8")
     webdav_cfg_path.chmod(0o644)
 
 
@@ -2451,6 +2434,7 @@ def configure(snap: Snap) -> None:
     with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         _render_templates(snap, context)
         _configure_tls(snap)
+        _configure_webdav_apache(snap, context)
 
     _configure_ovn_base(snap, context)
     _configure_ovn_external_networking(snap, context)
