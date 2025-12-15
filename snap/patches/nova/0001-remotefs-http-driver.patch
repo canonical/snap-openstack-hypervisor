@@ -54,10 +54,10 @@ index 8ddcaa1fcc..8096c77903 100644
  
 diff --git a/nova/virt/libvirt/volume/remotefs_http.py b/nova/virt/libvirt/volume/remotefs_http.py
 new file mode 100644
-index 0000000000..be33260b4e
+index 0000000000..0c1126646f
 --- /dev/null
 +++ b/nova/virt/libvirt/volume/remotefs_http.py
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,156 @@
 +import os
 +import ssl
 +import tempfile
@@ -171,12 +171,8 @@ index 0000000000..be33260b4e
 +        _ensure_remote_dirs(client, parent)
 +
 +        # PUT empty file using a temporary zero-byte file
-+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-+            tmp_path = tmp.name
-+        try:
-+            client.upload_file(tmp_path, webdav_path, overwrite=True)
-+        finally:
-+            os.unlink(tmp_path)
++        with tempfile.NamedTemporaryFile() as tmp:
++            client.upload_file(tmp.name, webdav_path, overwrite=True)
 +
 +    def remove_file(self, host, dst_path, on_execute=None, on_completion=None):
 +        LOG.debug("[webdav] remove file %s on %s", dst_path, host)
