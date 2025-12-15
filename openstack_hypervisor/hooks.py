@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import secrets
+import shutil
 import socket
 import stat
 import string
@@ -93,6 +94,11 @@ COMMON_DIRS = [
     Path("etc/pki/libvirt"),
     Path("etc/pki/libvirt/private"),
     Path("etc/pki/local"),
+    Path("etc/pki/nova"),
+    Path("etc/pki/nova/private"),
+    Path("etc/apache2"),
+    Path("apache-webdav"),
+    Path("apache-webdav/tls"),
     Path("etc/pki/qemu"),
     # log
     Path("log/libvirt/qemu"),
@@ -111,6 +117,7 @@ COMMON_DIRS = [
 
 DEFAULT_PERMS = 0o640
 PRIVATE_PERMS = 0o600
+LAYOUT_BASE = Path("/var/lib/openstack-hypervisor")
 
 DATA_DIRS = [
     Path("lib/libvirt/images"),
@@ -118,6 +125,18 @@ DATA_DIRS = [
     Path("lib/neutron"),
     Path("run/hypervisor-config"),
     Path("var/lib/libvirt/qemu"),
+]
+
+# Host-side layout directories used by Apache WebDAV and related runtime state.
+LAYOUT_DIRS = [
+    Path("var/webdav"),
+    Path("var/webdav/lib"),
+    Path("var/webdav/lib/nova"),
+    Path("var/webdav/lib/nova/instances"),
+    Path("var/webdav-lock"),
+    Path("log/apache2"),
+    Path("run/apache2"),
+    Path("etc/apache2"),
 ]
 SECRET_XML = string.Template(
     """
@@ -160,6 +179,27 @@ def _mkdirs(snap: Snap) -> None:
         os.makedirs(snap.paths.common / dir, exist_ok=True)
     for dir in DATA_DIRS:
         os.makedirs(snap.paths.data / dir, exist_ok=True)
+
+
+def _mkdir_layout_dirs() -> None:
+    """Ensure host-side layout directories required by Apache/WebDAV exist."""
+    logging.info("Ensuring LAYOUT_BASE exists: %s", LAYOUT_BASE)
+    try:
+        LAYOUT_BASE.mkdir(parents=True, exist_ok=True)
+        for relative_dir in LAYOUT_DIRS:
+            layout_dir = LAYOUT_BASE / relative_dir
+            logging.info("Ensuring layout dir %s", layout_dir)
+            layout_dir.mkdir(parents=True, exist_ok=True)
+            shutil.chown(layout_dir, user="snap_daemon", group="snap_daemon")
+            layout_dir.chmod(0o750)
+
+    except PermissionError as exc:
+        # In unit tests / non-root environments we can't touch /var/lib; log and skip.
+        logging.warning(
+            "Skipping layout dir creation under %s due to permissions: %s",
+            LAYOUT_BASE,
+            exc,
+        )
 
 
 def _setup_secrets(snap: Snap) -> None:
@@ -462,6 +502,10 @@ TLS_TEMPLATES = {
     Path("etc/pki/CA/cacert.pem"): {"services": ["libvirtd"]},
     Path("etc/pki/libvirt/servercert.pem"): {"services": ["libvirtd"]},
     Path("etc/pki/libvirt/private/serverkey.pem"): {"services": ["libvirtd"]},
+    # Restart fileserver when its TLS material changes
+    Path("etc/pki/nova/servercert.pem"): {"services": ["file-transfer"]},
+    Path("etc/pki/nova/private/serverkey.pem"): {"services": ["file-transfer"]},
+    Path("etc/apache2/webdav.conf"): {"services": ["file-transfer"]},
 }
 
 
@@ -1552,6 +1596,39 @@ def _template_tls_file(
         link.chmod(permissions)
 
 
+def _secure_copy(
+    src: Path, dst: Path, mode: int = 0o600, user: str = "snap_daemon", group: str = "snap_daemon"
+) -> None:
+    """Securely copy a file with atomic write and proper permissions.
+
+    Creates a temporary file, sets permissions and ownership before writing,
+    then atomically renames to the destination. This ensures the file is never
+    world-readable during creation.
+
+    :param src: Source file path
+    :type src: Path
+    :param dst: Destination file path
+    :type dst: Path
+    :param mode: File permissions (default: 0o600 for private keys)
+    :type mode: int
+    :param user: Owner username (default: snap_daemon)
+    :type user: str
+    :param group: Group name (default: snap_daemon)
+    :type group: str
+    """
+    tmp = dst.with_suffix(".tmp")
+    tmp.touch(mode=mode)
+    try:
+        shutil.chown(tmp, user=user, group=group)
+    except LookupError:
+        # In test environments, the user/group may not exist
+        # Permissions are still set correctly via mode
+        pass
+    shutil.copyfile(src, tmp)
+    tmp.chmod(mode)
+    tmp.rename(dst)
+
+
 def _configure_cabundle_tls(snap: Snap) -> None:
     """Configure CA Certs."""
     bundle = None
@@ -1758,18 +1835,22 @@ def _configure_libvirt_tls(snap: Snap) -> None:
         logging.info("Libvirt / QEMU TLS configuration incomplete, generating local.")
         cacert, cert, key = _generate_local_tls(snap)
 
-    pki_cacert = snap.paths.common / Path("etc/pki/CA/cacert.pem")
+    pki_root = snap.paths.common / Path("etc/pki")
+    pki_root.mkdir(parents=True, exist_ok=True)
+    pki_root.chmod(0o755)
+
+    pki_cacert = pki_root / Path("CA/cacert.pem")
     # Libvirt TLS configuration
-    libvirt_cert = snap.paths.common / Path("etc/pki/libvirt/servercert.pem")
-    libvirt_key = snap.paths.common / Path("etc/pki/libvirt/private/serverkey.pem")
-    libvirt_client_cert = snap.paths.common / Path("etc/pki/libvirt/clientcert.pem")
-    libvirt_client_key = snap.paths.common / Path("etc/pki/libvirt/private/clientkey.pem")
+    libvirt_cert = pki_root / Path("libvirt/servercert.pem")
+    libvirt_key = pki_root / Path("libvirt/private/serverkey.pem")
+    libvirt_client_cert = pki_root / Path("libvirt/clientcert.pem")
+    libvirt_client_key = pki_root / Path("libvirt/private/clientkey.pem")
     # QEMU TLS configuration
-    qemu_cacert = snap.paths.common / Path("etc/pki/qemu/ca-cert.pem")
-    qemu_cert = snap.paths.common / Path("etc/pki/qemu/server-cert.pem")
-    qemu_key = snap.paths.common / Path("etc/pki/qemu/server-key.pem")
-    qemu_client_cert = snap.paths.common / Path("etc/pki/qemu/client-cert.pem")
-    qemu_client_key = snap.paths.common / Path("etc/pki/qemu/client-key.pem")
+    qemu_cacert = pki_root / Path("qemu/ca-cert.pem")
+    qemu_cert = pki_root / Path("qemu/server-cert.pem")
+    qemu_key = pki_root / Path("qemu/server-key.pem")
+    qemu_client_cert = pki_root / Path("qemu/client-cert.pem")
+    qemu_client_key = pki_root / Path("qemu/client-key.pem")
 
     _template_tls_file(cacert, pki_cacert, [qemu_cacert])
     _template_tls_file(
@@ -1791,6 +1872,110 @@ def _configure_libvirt_tls(snap: Snap) -> None:
         ],
         PRIVATE_PERMS,
     )
+    _configure_webdav_tls(snap, cacert, cert, key)
+
+
+def _configure_webdav_tls(snap: Snap, cacert: bytes, cert: bytes, key: bytes) -> None:
+    """Configure TLS material for the Nova WebDAV fileserver."""
+    pki_root = snap.paths.common / Path("etc/pki")
+
+    # Nova fileserver TLS (server cert/key for WebDAV)
+    nova_dir = pki_root / Path("nova")
+    nova_private_dir = nova_dir / Path("private")
+
+    nova_cert = nova_dir / "servercert.pem"
+    nova_key = nova_private_dir / "serverkey.pem"
+    _template_tls_file(cert, nova_cert, [])
+    _template_tls_file(key, nova_key, [], PRIVATE_PERMS)
+
+    # Nova fileserver CA (for client verification)
+    nova_ca = nova_dir / "ca-cert.pem"
+    _template_tls_file(cacert, nova_ca, [])
+
+    common_base = snap.paths.common
+    tls_parent = common_base / Path("apache-webdav")
+    webdav_tls_dir = tls_parent / "tls"
+
+    apache_cert = webdav_tls_dir / "servercert.pem"
+    apache_key = webdav_tls_dir / "serverkey.pem"
+    apache_ca = webdav_tls_dir / "ca-cert.pem"
+
+    _secure_copy(nova_cert, apache_cert, mode=0o644)
+    _secure_copy(nova_key, apache_key, mode=0o600)
+    _secure_copy(nova_ca, apache_ca, mode=0o644)
+
+
+def _configure_webdav_apache(snap: Snap, context: dict) -> None:
+    """Configure Apache-based WebDAV endpoint with mTLS using Jinja2 template."""
+    apache_cfg_dir = snap.paths.common / Path("etc/apache2")
+    apache_cfg_dir.mkdir(parents=True, exist_ok=True)
+    for ancestor in (apache_cfg_dir, apache_cfg_dir.parent):
+        if ancestor.exists():
+            ancestor.chmod(0o755)
+    webdav_cfg_path = apache_cfg_dir / "webdav.conf"
+    mime_types_path = apache_cfg_dir / "mime.types"
+    server_root = snap.paths.snap / Path("usr/lib/apache2")
+    modules_dir = server_root / "modules"
+    if not mime_types_path.exists():
+        src_candidates = [
+            Path("/etc/mime.types"),
+            snap.paths.snap / Path("etc/mime.types"),
+            snap.paths.snap / Path("usr/share/misc/mime.types"),
+        ]
+        source = next((p for p in src_candidates if p.exists()), None)
+        if source:
+            shutil.copy(source, mime_types_path)
+        else:
+            mime_types_path.write_text(
+                "text/plain\t txt\napplication/octet-stream\tbin\n", encoding="utf-8"
+            )
+
+    # Ensure host-side layout is present; idempotent and shared with install/configure.
+    _mkdir_layout_dirs()
+
+    webdav_root_fs = LAYOUT_BASE / Path("var/webdav")
+    dav_lock_dir_fs = LAYOUT_BASE / Path("var/webdav-lock")
+    log_dir_fs = LAYOUT_BASE / Path("log/apache2")
+    run_dir_fs = LAYOUT_BASE / Path("run/apache2")
+    mime_types_path_fs = LAYOUT_BASE / Path("etc/apache2/mime.types")
+
+    def module(name: str) -> Path:
+        return modules_dir / f"mod_{name}.so"
+
+    dav_lock_db = dav_lock_dir_fs / "DavLock"
+    error_log = log_dir_fs / "error.log"
+    access_log = log_dir_fs / "access.log"
+    client_log = log_dir_fs / "ssl_client.log"
+    pid_file = run_dir_fs / "apache2.pid"
+
+    # WebDAV server always listens on all interfaces (0.0.0.0) to ensure it's
+    # accessible regardless of which IP address Nova uses to connect. Nova's
+    # HttpDriver connects to https://{host}:10099 where {host} comes from the
+    # destination string and may be a public IP (e.g., 10.133.149.x) or any
+    # other reachable IP. Binding to 0.0.0.0 ensures the server is reachable
+    # on all network interfaces.
+    listen_ip = "0.0.0.0"
+    listen_port = "10099"
+    listen_address = f"{listen_ip}:{listen_port}"
+
+    template_context = {
+        "server_root": str(server_root),
+        "pid_file": str(pid_file),
+        "listen_address": listen_address,
+        "listen_port": listen_port,
+        "module": module,
+        "mime_types_path": str(mime_types_path_fs),
+        "error_log": str(error_log),
+        "access_log": str(access_log),
+        "client_log": str(client_log),
+        "dav_lock_db": str(dav_lock_db),
+        "webdav_root": str(webdav_root_fs),
+    }
+
+    template = _get_template(snap, "webdav.conf.j2")
+    output = template.render(template_context)
+    webdav_cfg_path.write_text(output, encoding="utf-8")
+    webdav_cfg_path.chmod(0o644)
 
 
 def _configure_ovn_tls(snap: Snap) -> None:
@@ -2350,6 +2535,7 @@ def configure(snap: Snap) -> None:
     with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         _render_templates(snap, context)
         _configure_tls(snap)
+        _configure_webdav_apache(snap, context)
 
     _configure_ovn_base(snap, context)
     _configure_ovn_external_networking(snap, context)

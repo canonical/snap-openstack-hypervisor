@@ -1,0 +1,66 @@
+# THIS FILE IS MANAGED BY THE SNAP - CHANGES WILL BE OVERWRITTEN
+# Apache WebDAV configuration for Nova file transfer service
+ServerRoot "{{ server_root }}"
+PidFile "{{ pid_file }}"
+Listen {{ listen_address }}
+
+LoadModule mpm_event_module "{{ module('mpm_event') }}"
+LoadModule authn_core_module "{{ module('authn_core') }}"
+LoadModule authz_core_module "{{ module('authz_core') }}"
+LoadModule authz_host_module "{{ module('authz_host') }}"
+LoadModule alias_module "{{ module('alias') }}"
+LoadModule dir_module "{{ module('dir') }}"
+LoadModule mime_module "{{ module('mime') }}"
+LoadModule setenvif_module "{{ module('setenvif') }}"
+LoadModule reqtimeout_module "{{ module('reqtimeout') }}"
+LoadModule ssl_module "{{ module('ssl') }}"
+LoadModule socache_shmcb_module "{{ module('socache_shmcb') }}"
+LoadModule headers_module "{{ module('headers') }}"
+LoadModule dav_module "{{ module('dav') }}"
+LoadModule dav_fs_module "{{ module('dav_fs') }}"
+
+Timeout 10800
+KeepAlive On
+MaxKeepAliveRequests 0
+KeepAliveTimeout 60
+LimitRequestBody 0
+TypesConfig "{{ mime_types_path }}"
+
+ErrorLog "{{ error_log }}"
+CustomLog "{{ access_log }}" combined
+CustomLog "{{ client_log }}" "%t %h %{SSL_CLIENT_S_DN}x %{SSL_CLIENT_I_DN}x \"%r\" %b"
+
+DavLockDB "{{ dav_lock_db }}"
+
+<VirtualHost *:{{ listen_port }}>
+    SSLEngine on
+    SSLProtocol -all +TLSv1.2 +TLSv1.3
+    SSLCipherSuite ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
+    SSLHonorCipherOrder on
+    SSLCertificateFile "/proc/self/fd/3"
+    SSLCertificateKeyFile "/proc/self/fd/4"
+    SSLCACertificateFile "/proc/self/fd/5"
+    SSLVerifyClient require
+    SSLVerifyDepth 2
+    SSLOptions +StdEnvVars
+
+    RequestReadTimeout body=0
+
+    DocumentRoot "{{ webdav_root }}"
+    # Allow clients to use absolute paths rooted at SNAP_COMMON,
+    # such as "/var/snap/openstack-hypervisor/common/lib/...".
+    # The Nova client can therefore operate purely with absolute
+    # instance paths without needing snap-specific path stripping.
+    Alias /var/snap/openstack-hypervisor/common/ "{{ webdav_root }}/"
+    Alias / "{{ webdav_root }}/"
+    <Directory "{{ webdav_root }}">
+        DirectorySlash Off
+        DavDepthInfinity On
+        DAV On
+        Options Indexes FollowSymLinks
+        AllowOverride None
+        Require ssl-verify-client
+        Require all granted
+    </Directory>
+</VirtualHost>
+
