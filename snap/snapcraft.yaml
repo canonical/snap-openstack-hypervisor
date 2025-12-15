@@ -61,6 +61,8 @@ layout:
     symlink: $SNAP/usr/share/AAVMF
   /var/lib/libvirt:
     symlink: $SNAP_DATA/var/lib/libvirt
+  /var/lib/openstack-hypervisor:
+    bind: $SNAP_COMMON
 
 apps:
   openstack-hypervisor:
@@ -292,6 +294,14 @@ apps:
       - network-bind
       - firewall-control
       - microstack-support
+      
+  file-transfer:
+    command: 'bin/file-transfer-service'
+    daemon: simple
+    restart-condition: on-failure
+    plugs:
+      - network
+      - network-bind
 
   libvirt-exporter:
     daemon: simple
@@ -655,8 +665,16 @@ parts:
           mv $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk $CRAFT_PART_INSTALL/usr/sbin/ovs-vswitchd
       fi
 
+  apache2-webdav:
+    plugin: nil
+    stage-packages:
+      - apache2
+
   openstack:
     plugin: nil
+    build-packages:
+      - patch
+      - python3-pip
     stage-packages:
       - ceilometer-agent-compute
       - python3-nova
@@ -697,6 +715,16 @@ parts:
       rm -rf $CRAFT_PART_INSTALL/usr/lib/python3/dist-packages/netaddr/eui/oui.txt
       # drop some docutils binaries to avoid libvirt part build confusion
       rm -rf $CRAFT_PART_INSTALL/usr/bin/rst2*
+      # Install webdav4 for Nova's HttpDriver (not available as Debian package)
+      pip3 install --target=$CRAFT_PART_INSTALL/usr/lib/python3/dist-packages webdav4
+    override-prime: |
+      craftctl default
+      pushd "$CRAFT_PRIME/usr/lib/python3/dist-packages"
+      # Apply patch, skipping requirements.txt if it doesn't exist (it's not in installed packages)
+      if ! patch -p1 --forward --reject-file=/dev/null < "$CRAFT_PROJECT_DIR/snap/patches/nova/0001-remotefs-http-driver.patch"; then
+          echo "WARNING: nova/0001-remotefs-http-driver.patch failed (likely already applied)" >&2
+      fi
+      popd
 
   openstack-hypervisor:
     plugin: python
@@ -710,6 +738,7 @@ parts:
       - requirements.txt
     after:
       - openstack
+      - apache2-webdav
     override-build: |
       uv export --frozen --no-hashes --format=requirements-txt -o requirements.txt
       craftctl default
