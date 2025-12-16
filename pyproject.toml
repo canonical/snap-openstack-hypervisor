@@ -67,8 +67,8 @@ hypervisor = "openstack_hypervisor.cli.main:main"
 configure = "openstack_hypervisor.hooks:configure"
 install = "openstack_hypervisor.hooks:install"
 
-[tool.setuptools]
-packages = ["openstack_hypervisor"]
+[tool.setuptools.packages.find]
+include = ["openstack_hypervisor*"]
 
 # Testing tools configuration
 [tool.coverage.run]
