@@ -733,10 +733,10 @@ parts:
     override-prime: |
       craftctl default
       pushd "$CRAFT_PRIME/usr/lib/python3/dist-packages"
-      # Apply patch, skipping requirements.txt if it doesn't exist (it's not in installed packages)
-      if ! patch -p1 --forward --reject-file=/dev/null < "$CRAFT_PROJECT_DIR/snap/patches/nova/0001-remotefs-http-driver.patch"; then
-          echo "WARNING: nova/0001-remotefs-http-driver.patch failed (likely already applied)" >&2
-      fi
+      path="$CRAFT_PROJECT_DIR/snap/patches/nova/0001-remotefs-http-driver.patch"
+      # Unapply patch, ignore on failure
+      patch -p1 --reverse --forward --quiet --batch --reject-file=/dev/null --input "$path" || true
+      patch -p1 --forward --input="$path"
       popd
 
   openstack-hypervisor:

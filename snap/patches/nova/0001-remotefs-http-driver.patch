@@ -214,12 +214,3 @@ index 0000000000..0c1126646f
 +        _ensure_remote_dirs(client, parent)
 +
 +        client.upload_file(src, webdav_path, overwrite=True)
-diff --git a/requirements.txt b/requirements.txt
-index 291ccbd828..ada3688b8a 100644
---- a/requirements.txt
-+++ b/requirements.txt
-@@ -63,3 +63,4 @@ python-dateutil>=2.7.0 # BSD
- futurist>=3.2.1 # Apache-2.0
- openstacksdk>=4.4.0 # Apache-2.0
- PyYAML>=5.1 # MIT
-+webdav4>=0.9 # MIT
