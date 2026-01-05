@@ -167,3 +167,12 @@ def get_pci_address():
     with patch("openstack_hypervisor.cli.pci_devices.get_pci_address") as p:
         p.side_effect = lambda iface: "pci-addr-%s" % iface
         yield p
+
+
+@pytest.fixture()
+def ovs_cli():
+    """Create a mock OVSCli instance for testing."""
+    from openstack_hypervisor.bridge_datapath import OVSCli
+
+    ovs_cli_instance = MagicMock(spec=OVSCli)
+    yield ovs_cli_instance
