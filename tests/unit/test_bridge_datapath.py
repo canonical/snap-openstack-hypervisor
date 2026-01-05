@@ -500,3 +500,127 @@ class TestOVSCli:
                 "type!=patch",
                 "type!=internal",
             )
+
+    def test_list_table(self):
+        ovs = OVSCli()
+        mock_data = """
+{"data":[[["map",[["dpdk-init","try"],["dpdk-socket-mem","4096"]]]]],"headings":["other_config"]}
+"""
+        with patch.object(ovs, "vsctl", return_value=mock_data):
+            out = ovs.list_table("mock-table", "mock-record", ["mock-column"])
+
+            exp_out = {
+                "other_config": {
+                    "dpdk-init": "try",
+                    "dpdk-socket-mem": "4096",
+                }
+            }
+            assert exp_out == out
+
+    def test_set(self):
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl") as mock_vsctl:
+            ovs.set(
+                "mock-table",
+                "mock-record",
+                "mock-column",
+                {"key1": "val1", "key2": "val2"},
+            )
+
+            mock_vsctl.assert_called_once_with(
+                "set",
+                "mock-table",
+                "mock-record",
+                "mock-column:key1=val1",
+                "mock-column:key2=val2",
+            )
+
+    def test_set_check(self):
+        ovs = OVSCli()
+        mock_current_settings = {
+            "dpdk-init": "try",
+            "dpdk-socket-mem": "4096",
+        }
+        mock_updates = {
+            "hw-offload": "true",
+        }
+        mock_applied_settings = dict(mock_current_settings)
+        mock_applied_settings.update(mock_updates)
+
+        with (
+            patch.object(ovs, "list_table") as mock_list_table,
+            patch.object(ovs, "set"),
+        ):
+            mock_list_table.side_effect = [
+                {"other_config": mock_current_settings},
+                {"other_config": mock_applied_settings},
+            ]
+
+            config_changed = ovs.set_check(
+                "mock-table", "mock-record", "other_config", mock_updates
+            )
+            assert config_changed
+
+            config_changed = ovs.set_check(
+                "mock-table", "mock-record", "other_config", mock_updates
+            )
+            assert not config_changed
+
+    def test_add_bridge(self):
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl") as mock_vsctl:
+            ovs.add_bridge("bridge-name", "datapath-name", "fake-arg")
+
+            mock_vsctl.assert_called_once_with(
+                "--may-exist",
+                "add-br",
+                "bridge-name",
+                "--",
+                "set",
+                "bridge",
+                "bridge-name",
+                "datapath_type=datapath-name",
+                "fake-arg",
+            )
+
+    def test_del_port(self):
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl") as mock_vsctl:
+            ovs.del_port("bridge-name", "port-name")
+
+            mock_vsctl.assert_called_once_with(
+                "--if-exists", "del-port", "bridge-name", "port-name"
+            )
+
+    def test_add_port(self):
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl") as mock_vsctl:
+            ovs.add_port(
+                "bridge-name",
+                "port-name",
+                port_type="dpdk",
+                options={"dpdk-devargs": "pci-address"},
+                mtu=9000,
+            )
+
+            mock_vsctl.assert_called_once_with(
+                "--may-exist",
+                "add-port",
+                "bridge-name",
+                "port-name",
+                "--",
+                "set",
+                "Interface",
+                "port-name",
+                "type=dpdk",
+                "--",
+                "set",
+                "Interface",
+                "port-name",
+                "mtu-request=9000",
+                "--",
+                "set",
+                "Interface",
+                "port-name",
+                "options:dpdk-devargs=pci-address",
+            )

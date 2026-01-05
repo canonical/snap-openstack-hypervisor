@@ -40,6 +40,8 @@ from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import netplan, pci
 from openstack_hypervisor.bridge_datapath import (
+    OVSCli,
+    OVSCommandError,
     detect_current_mappings,
     resolve_bridge_mappings,
     resolve_ovs_changes,
@@ -710,73 +712,7 @@ def _delete_iptable_postrouting_rule(comment: str) -> None:
         logging.info(f"Error in deletion of IPtable rule: {e.stderr}")
 
 
-def _ovs_vsctl_set(table: str, record: str, column: str, settings: dict[str, str]) -> None:
-    if not settings:
-        logging.warning("No ovs values to set, skipping...")
-        return
-
-    cmd = ["ovs-vsctl", "--retry", "set", table, record]
-    for key, value in settings.items():
-        cmd.append(f"{column}:{key}={value}")
-
-    subprocess.check_call(cmd)
-
-
-def _parse_ovsdb_data(data: list[str, typing.Any]) -> typing.Any:
-    """Parse OVSDB data.
-
-    https://tools.ietf.org/html/rfc7047#section-5.1
-    """
-    if isinstance(data, list) and len(data) == 2:
-        if data[0] == "set":
-            return [_parse_ovsdb_data(element) for element in data[1]]
-        if data[0] == "map":
-            return {_parse_ovsdb_data(key): _parse_ovsdb_data(value) for key, value in data[1]}
-        if data[0] == "uuid":
-            return uuid.UUID(data[1])
-    return data
-
-
-def _ovs_vsctl_list_table(table: str, record: str, columns: list[str] | None) -> dict:
-    try:
-        cmd = ["ovs-vsctl", "--retry", "--format", "json", "--if-exists"]
-        if columns:
-            cmd += ["--columns=%s" % ",".join(columns)]
-        cmd += ["list", table, record]
-        out = subprocess.check_output(cmd).decode()
-    except subprocess.CalledProcessError:
-        # The columns may not exist.
-        # --if-exists only applies to the record, not the columns.
-        return {}
-
-    raw_json = json.loads(out)
-    headings = raw_json["headings"]
-    data = raw_json["data"]
-
-    parsed = {}
-    # We've requested a single record.
-    for record in data:
-        for position, heading in enumerate(headings):
-            parsed[heading] = _parse_ovsdb_data(record[position])
-
-    return parsed
-
-
-def _ovs_vsctl_set_check(table: str, record: str, column: str, settings: dict[str, str]) -> bool:
-    """Apply the specified settings and return a boolean stating if changes were made."""
-    config_changed = False
-    current_values = _ovs_vsctl_list_table(table, record, [column]).get(column, {})
-    for key, new_val in settings.items():
-        if key not in current_values or str(new_val) != str(current_values[key]):
-            config_changed = True
-
-    if config_changed:
-        _ovs_vsctl_set(table, record, column, settings)
-
-    return config_changed
-
-
-def _configure_ovn_base(snap: Snap, context: dict) -> None:
+def _configure_ovn_base(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:
     """Configure OVS/OVN.
 
     :param snap: the snap reference
@@ -798,7 +734,7 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
         f"ovn-encap-ip = {ovn_encap_ip}, system-id = {system_id}, "
         f"datapath-type = {datapath_type}"
     )
-    _ovs_vsctl_set(
+    ovs_cli.set(
         "open",
         ".",
         "external_ids",
@@ -818,7 +754,7 @@ def _configure_ovn_base(snap: Snap, context: dict) -> None:
         logging.info("OVN SB connection URL not configured, skipping.")
         return
 
-    _ovs_vsctl_set("open", ".", "external_ids", {"ovn-remote": sb_conn})
+    ovs_cli.set("open", ".", "external_ids", {"ovn-remote": sb_conn})
 
 
 def _dpdk_supported() -> bool:
@@ -848,7 +784,7 @@ def _get_dpdk_pmd_dir(snap: Snap) -> str:
     return pmd_dirs[0]
 
 
-def _configure_ovs(snap: Snap, context: dict) -> bool:
+def _configure_ovs(snap: Snap, ovs_cli: OVSCli, context: dict) -> bool:
     """Configure OVS and return a boolean stating whether there were any changes made."""
     config_changed = False
 
@@ -857,7 +793,7 @@ def _configure_ovs(snap: Snap, context: dict) -> bool:
     hw_offloading = context.get("network", {}).get("hw_offloading")
     if hw_offloading:
         logging.info("Configuring Open vSwitch hardware offloading.")
-        if _ovs_vsctl_set_check("Open_vSwitch", ".", "other_config", {"hw-offload": "true"}):
+        if ovs_cli.set_check("Open_vSwitch", ".", "other_config", {"hw-offload": "true"}):
             config_changed = True
     else:
         logging.info("No whitelisted SR-IOV devices with hardware offloading.")
@@ -886,7 +822,7 @@ def _configure_ovs(snap: Snap, context: dict) -> bool:
 
     if dpdk_settings:
         logging.debug("Applying DPDK settings: %s", dpdk_settings)
-        if _ovs_vsctl_set_check("Open_vSwitch", ".", "other_config", dpdk_settings):
+        if ovs_cli.set_check("Open_vSwitch", ".", "other_config", dpdk_settings):
             config_changed = True
     else:
         logging.debug("No OVS DPDK settings provided.")
@@ -894,101 +830,77 @@ def _configure_ovs(snap: Snap, context: dict) -> bool:
     return config_changed
 
 
-def _list_bridge_ifaces(bridge_name: str) -> list:
-    """Return a list of interfaces attached to given bridge.
-
-    :param bridge_name: Name of bridge.
-    """
-    ifaces = (
-        subprocess.check_output(["ovs-vsctl", "--retry", "list-ifaces", bridge_name])
-        .decode()
-        .split()
-    )
-    return sorted(ifaces)
-
-
-def _add_interface_to_bridge(external_bridge: str, external_nic: str) -> None:
+def _add_interface_to_bridge(ovs_cli: OVSCli, external_bridge: str, external_nic: str) -> None:
     """Add an interface to a given bridge.
 
-    :param bridge_name: Name of bridge.
+    :param ovs_cli: OVSCli instance.
+    :param external_bridge: Name of bridge.
     :param external_nic: Name of nic.
     """
-    if external_nic in _list_bridge_ifaces(external_bridge):
+    if external_nic in ovs_cli.list_bridge_interfaces(external_bridge):
         logging.warning(f"Interface {external_nic} already connected to {external_bridge}")
     else:
         logging.warning(f"Adding interface {external_nic} to {external_bridge}")
-        cmd = [
-            "ovs-vsctl",
-            "--retry",
-            "add-port",
+        ovs_cli.add_port(
             external_bridge,
             external_nic,
-            "--",
-            "set",
-            "Port",
-            external_nic,
-            "external-ids:microstack-function=ext-port",
-        ]
-        subprocess.check_call(cmd)
+            external_ids={"microstack-function": "ext-port"},
+        )
 
 
-def _del_interface_from_bridge(external_bridge: str, external_nic: str) -> None:
+def _del_interface_from_bridge(ovs_cli: OVSCli, external_bridge: str, external_nic: str) -> None:
     """Remove an interface from  a given bridge.
 
-    :param bridge_name: Name of bridge.
+    :param ovs_cli: OVSCli instance.
+    :param external_bridge: Name of bridge.
     :param external_nic: Name of nic.
     """
-    if external_nic in _list_bridge_ifaces(external_bridge):
+    if external_nic in ovs_cli.list_bridge_interfaces(external_bridge):
         logging.warning(f"Removing interface {external_nic} from {external_bridge}")
-        subprocess.check_call(["ovs-vsctl", "--retry", "del-port", external_bridge, external_nic])
+        ovs_cli.del_port(external_bridge, external_nic)
     else:
         logging.warning(f"Interface {external_nic} not connected to {external_bridge}")
 
 
-def _get_external_ports_on_bridge(bridge: str) -> list:
+def _get_external_ports_on_bridge(ovs_cli: OVSCli, bridge: str) -> list:
     """Get microstack managed external port on bridge.
 
-    :param bridge_name: Name of bridge.
+    :param ovs_cli: OVSCli instance.
+    :param bridge: Name of bridge.
     """
-    cmd = [
-        "ovs-vsctl",
-        "-f",
-        "json",
-        "find",
-        "Port",
-        "external-ids:microstack-function=ext-port",
-    ]
-    output = json.loads(subprocess.check_output(cmd))
+    output = ovs_cli.find("Port", "external-ids:microstack-function=ext-port")
     name_idx = output["headings"].index("name")
     external_nics = [r[name_idx] for r in output["data"]]
-    bridge_ifaces = _list_bridge_ifaces(bridge)
+    bridge_ifaces = ovs_cli.list_bridge_interfaces(bridge)
     return [i for i in bridge_ifaces if i in external_nics]
 
 
-def _ensure_single_nic_on_bridge(external_bridge: str, external_nic: str) -> None:
+def _ensure_single_nic_on_bridge(ovs_cli: OVSCli, external_bridge: str, external_nic: str) -> None:
     """Ensure nic is attached to bridge and no other microk8s managed nics.
 
-    :param bridge_name: Name of bridge.
+    :param ovs_cli: OVSCli instance.
+    :param external_bridge: Name of bridge.
     :param external_nic: Name of nic.
     """
-    external_ports = _get_external_ports_on_bridge(external_bridge)
+    external_ports = _get_external_ports_on_bridge(ovs_cli, external_bridge)
     if external_nic in external_ports:
         logging.debug(f"{external_nic} already attached to {external_bridge}")
     else:
-        _add_interface_to_bridge(external_bridge, external_nic)
+        _add_interface_to_bridge(ovs_cli, external_bridge, external_nic)
     for p in external_ports:
         if p != external_nic:
             logging.debug(f"Removing additional external port {p} from {external_bridge}")
-            _del_interface_from_bridge(external_bridge, p)
+            _del_interface_from_bridge(ovs_cli, external_bridge, p)
 
 
-def _del_external_nics_from_bridge(external_bridge: str) -> None:
+def _del_external_nics_from_bridge(ovs_cli: OVSCli, external_bridge: str) -> None:
     """Delete all microk8s managed external nics from bridge.
 
-    :param bridge_name: Name of bridge.
+    :param ovs_cli: OVSCli instance.
+    :param external_bridge: Name of bridge.
     """
-    for p in _get_external_ports_on_bridge(external_bridge):
-        _del_interface_from_bridge(external_bridge, p)
+    for p in _get_external_ports_on_bridge(ovs_cli, external_bridge):
+        _del_interface_from_bridge(ovs_cli, external_bridge, p)
 
 
 def _get_datapath_type(context: dict) -> str:
@@ -1035,7 +947,7 @@ def _set_dpdk_mappings(snap: Snap, mappings: dict):
     snap.config.set({"internal.dpdk-port-mappings": json.dumps(mappings or {})})
 
 
-def _process_dpdk_ports(snap: Snap, context: dict):
+def _process_dpdk_ports(snap: Snap, ovs_cli: OVSCli, context: dict):
     ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
     dpdk_ifaces = (context.get("network", {}).get("ovs_dpdk_ports") or "").split(",")
     dpdk_ifaces = [iface.strip() for iface in dpdk_ifaces if iface]
@@ -1059,14 +971,14 @@ def _process_dpdk_ports(snap: Snap, context: dict):
     _process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
     # Update the Netplan config, removing the interfaces and bonds that will be
     # used with DPDK and defined in OVS.
-    _update_netplan_dpdk_ports(dpdk_mappings)
+    _update_netplan_dpdk_ports(ovs_cli, dpdk_mappings)
     # The ports have been removed from Netplan, save the dpdk
     # configuration before attempting to apply it to ovs.
     _set_dpdk_mappings(snap, dpdk_mappings)
 
     # Define the DPDK ports and bonds in OVS and ensure that the DPDK-compatible
     # interface driver is used.
-    _create_dpdk_ports_and_bonds(dpdk_mappings, dpdk_driver)
+    _create_dpdk_ports_and_bonds(ovs_cli, dpdk_mappings, dpdk_driver)
 
 
 def _process_dpdk_netplan_config(  # noqa: C901
@@ -1175,7 +1087,7 @@ def _process_dpdk_netplan_config(  # noqa: C901
     return netplan_changes_required
 
 
-def _update_netplan_dpdk_ports(dpdk_mappings: dict):
+def _update_netplan_dpdk_ports(ovs_cli: OVSCli, dpdk_mappings: dict):
     port_mappings = dpdk_mappings["ports"]
     bond_mappings = dpdk_mappings["bonds"]
 
@@ -1188,7 +1100,7 @@ def _update_netplan_dpdk_ports(dpdk_mappings: dict):
             should_reapply_netplan = True
             # Remove existing system bonds and ports so that
             # we can recreate them using DPDK.
-            _remove_ovs_port_from_bridge(bond_config["bridge"], bond_name)
+            ovs_cli.del_port(bond_config["bridge"], bond_name)
 
     for interface_name, interface_config in port_mappings.items():
         if interface_config["bridge"]:
@@ -1197,7 +1109,7 @@ def _update_netplan_dpdk_ports(dpdk_mappings: dict):
             )
             if changes_made:
                 should_reapply_netplan = True
-                _remove_ovs_port_from_bridge(interface_config["bridge"], interface_name)
+                ovs_cli.del_port(interface_config["bridge"], interface_name)
         netplan.remove_ethernet(interface_name)
 
     if should_reapply_netplan:
@@ -1206,7 +1118,7 @@ def _update_netplan_dpdk_ports(dpdk_mappings: dict):
         logging.debug("No Netplan changes made while processing DPDK ports.")
 
 
-def _create_dpdk_ports_and_bonds(dpdk_mappings: dict, dpdk_driver: str):
+def _create_dpdk_ports_and_bonds(ovs_cli: OVSCli, dpdk_mappings: dict, dpdk_driver: str):
     port_mappings = dpdk_mappings["ports"]
     bond_mappings = dpdk_mappings["bonds"]
 
@@ -1215,8 +1127,9 @@ def _create_dpdk_ports_and_bonds(dpdk_mappings: dict, dpdk_driver: str):
         if port_config["bond"]:
             # Created separately.
             continue
-        _add_ovs_bridge(port_config["bridge"], "netdev")
+        ovs_cli.add_bridge(port_config["bridge"], "netdev")
         _add_dpdk_port(
+            ovs_cli,
             bridge_name=port_config["bridge"],
             dpdk_port_name=port_config["dpdk_port_name"],
             pci_address=port_config["pci_address"],
@@ -1236,8 +1149,9 @@ def _create_dpdk_ports_and_bonds(dpdk_mappings: dict, dpdk_driver: str):
                     "mtu": port_info["mtu"],
                 }
             )
-        _add_ovs_bridge(bond_config["bridge"], "netdev")
+        ovs_cli.add_bridge(bond_config["bridge"], "netdev")
         _add_dpdk_bond(
+            ovs_cli,
             bridge_name=bond_config["bridge"],
             bond_name=bond_name,
             dpdk_ports=bond_ports,
@@ -1248,25 +1162,8 @@ def _create_dpdk_ports_and_bonds(dpdk_mappings: dict, dpdk_driver: str):
         )
 
 
-def _add_ovs_bridge(bridge_name: str, datapath_type: str, *cmd_args):
-    subprocess.check_call(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "--may-exist",
-            "add-br",
-            bridge_name,
-            "--",
-            "set",
-            "bridge",
-            bridge_name,
-            f"datapath_type={datapath_type}",
-            *cmd_args,
-        ]
-    )
-
-
 def _add_dpdk_port(
+    ovs_cli: OVSCli,
     bridge_name: str,
     dpdk_port_name: str,
     pci_address: str,
@@ -1279,25 +1176,17 @@ def _add_dpdk_port(
         pci_address,
         mtu,
     )
-    cmd = [
-        "ovs-vsctl",
-        "--may-exist",
-        "add-port",
+    ovs_cli.add_port(
         bridge_name,
         dpdk_port_name,
-        "--",
-        "set",
-        "Interface",
-        dpdk_port_name,
-        "type=dpdk",
-        f"options:dpdk-devargs={pci_address}",
-    ]
-    if mtu:
-        cmd.append(f"mtu-request={mtu}")
-    subprocess.check_call(cmd)
+        port_type="dpdk",
+        options={"dpdk-devargs": pci_address},
+        mtu=mtu,
+    )
 
 
 def _add_dpdk_bond(
+    ovs_cli: OVSCli,
     bridge_name: str,
     bond_name: str,
     dpdk_ports: list[dict],
@@ -1308,13 +1197,16 @@ def _add_dpdk_bond(
 ):
     """Create a bond using DPDK ports.
 
+    :param ovs_cli: OVSCli instance to use.
     :param bridge_name: add the bond to the specified bridge
+    :param bond_name: the name of the bond
     :param dpdk_ports: a list of dictionaries that are expected to
         contain the following keys:
             * name - the dpdk port name
             * pci_address - the PCI address of the underlying interface
-            * mtu (optional) - the MTU address
-    :param bond_mode, one of the following:
+            * mtu (optional) - the MTU value
+    :param mtu: default mtu for the port
+    :param bond_mode: one of the following:
             * "active-backup" - No load balancing, using one member at a time
             * "balance-slb" - Balancing based on source MAC and output VLAN,
                               periodic rebalancing based on traffic patterns
@@ -1324,7 +1216,6 @@ def _add_dpdk_bond(
                               be used as a fallback.
         See "man ovs-vswitchd.conf.db" for more details about
         the ovs bond parameters.
-    :param bond: the MTU value, optional.
     :param lacp_mode: allows the switches to negotiate which links will be bonded
         * "active" - the ports can initiate LACP negotiations
         * "passive" - the ports can participate in LACP negotiations but not initiate
@@ -1333,48 +1224,62 @@ def _add_dpdk_bond(
     """
     logging.info(
         "Adding bond %s to bridge %s. Ports: %s, bond settings: %s/%s/%s.",
-        bridge_name,
         bond_name,
+        bridge_name,
         dpdk_ports,
         bond_mode,
         lacp_mode,
         lacp_time,
     )
 
-    cmd = ["ovs-vsctl", "--may-exist", "add-bond", bridge_name, bond_name]
+    try:
+        # Create the bond with port names
+        port_names = [port["name"] for port in dpdk_ports]
+        logging.debug("Creating bond %s with ports: %s", bond_name, port_names)
+        ovs_cli.add_bond(
+            bridge_name,
+            bond_name,
+            port_names,
+            bond_mode=bond_mode,
+            lacp_mode=lacp_mode,
+            lacp_time=lacp_time,
+        )
+        logging.debug("Bond %s created successfully", bond_name)
+    except OVSCommandError as exc:
+        logging.error("Failed to create bond %s: %s", bond_name, exc)
+        raise
+
+    # Configure DPDK interfaces
     for port in dpdk_ports:
-        cmd.append(port["name"])
-
-    if bond_mode:
-        cmd += ["--", "set", "port", bond_name, f"bond_mode={bond_mode}"]
-    if lacp_mode:
-        cmd += ["--", "set", "port", bond_name, f"lacp={lacp_mode}"]
-    if lacp_time:
-        cmd += ["--", "set", "port", bond_name, f"other-config:lacp-time={lacp_time}"]
-
-    for port in dpdk_ports:
-        cmd += [
-            "--",
-            "set",
-            "Interface",
-            port["name"],
-            "type=dpdk",
-            f"options:dpdk-devargs={port['pci_address']}",
-        ]
-        mtu = mtu or port.get("mtu")
-        if mtu:
-            cmd.append(f"mtu-request={mtu}")
-
-    subprocess.check_call(cmd)
-
-
-def _remove_ovs_port_from_bridge(bridge_name: str, port_name: str):
-    logging.debug("Removing ovs port %s from bridge %s.", port_name, bridge_name)
-    cmd = ["ovs-vsctl", "--if-exists", "del-port", bridge_name, port_name]
-    subprocess.check_call(cmd)
+        try:
+            port_mtu = mtu or port.get("mtu")
+            logging.debug(
+                "Configuring DPDK port %s with PCI address %s, MTU: %s",
+                port["name"],
+                port["pci_address"],
+                port_mtu,
+            )
+            ovs_cli.add_port(
+                bridge_name,
+                port["name"],
+                port_type="dpdk",
+                options={"dpdk-devargs": port["pci_address"]},
+                mtu=port_mtu,
+            )
+            logging.debug("Port %s configured successfully", port["name"])
+        except OVSCommandError as exc:
+            logging.error(
+                "Failed to configure DPDK port %s on bond %s: %s",
+                port["name"],
+                bond_name,
+                exc,
+            )
+            raise
 
 
-def _config_get(snap: Snap) -> typing.Callable[typing.Concatenate[str, ...], typing.Any]:
+def _config_get(
+    snap: Snap,
+) -> typing.Callable[typing.Concatenate[str, ...], typing.Any]:
     """Get a config value with a default fallback.
 
     :param snap: the snap reference
@@ -1402,7 +1307,9 @@ def get_machine_id() -> str:
         return f.read().strip()
 
 
-def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:  # noqa: C901
+def _configure_ovn_external_networking(  # noqa: C901
+    snap: Snap, ovs_cli: OVSCli, context: dict
+) -> None:
     """Configure OVS/OVN external networking.
 
     :param snap: the snap reference
@@ -1437,7 +1344,7 @@ def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:  # no
         )
         return
 
-    current_mappings = detect_current_mappings()
+    current_mappings = detect_current_mappings(ovs_cli)
 
     changes = resolve_ovs_changes(current_mappings, mappings)
     logging.debug("OVS external networking changes: %s", changes)
@@ -1447,27 +1354,22 @@ def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:  # no
     for bridge, change in changes["interface_changes"].items():
         for iface in change["removed"]:
             logging.info(f"Removing interface {iface} from bridge {bridge}")
-            _del_interface_from_bridge(bridge, iface)
+            _del_interface_from_bridge(ovs_cli, bridge, iface)
             # Adding interfaces is handled later.
 
     for bridge in changes["removed_bridges"]:
         logging.info(f"Removing ovs bridge {bridge}")
-        subprocess.check_call(["ovs-vsctl", "--retry", "del-br", bridge])
+        ovs_cli.del_bridge(bridge)
 
     for bridge in changes["added_bridges"]:
         logging.info(f"Adding ovs bridge {bridge}")
-        _add_ovs_bridge(bridge, _get_datapath_type(context), "protocols=OpenFlow13,OpenFlow15")
+        ovs_cli.add_bridge(bridge, _get_datapath_type(context), "protocols=OpenFlow13,OpenFlow15")
 
-    subprocess.check_call(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "set",
-            "open",
-            ".",
-            "external_ids:ovn-bridge-mappings="
-            + ",".join(mapping.physnet_bridge_pair() for mapping in mappings),
-        ]
+    ovs_cli.set(
+        "open",
+        ".",
+        "external_ids",
+        {"ovn-bridge-mappings": ",".join(mapping.physnet_bridge_pair() for mapping in mappings)},
     )
 
     for mapping in mappings:
@@ -1481,7 +1383,7 @@ def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:  # no
         _add_ip_to_interface(mapping.bridge, external_bridge_address)
         external_network = ipaddress.ip_interface(external_bridge_address).network
         _add_iptable_postrouting_rule(str(external_network), comment)
-        _enable_chassis_as_gateway()
+        _enable_chassis_as_gateway(ovs_cli)
         return
 
     # We're in external net mode
@@ -1492,64 +1394,48 @@ def _configure_ovn_external_networking(snap: Snap, context: dict) -> None:  # no
         _delete_ips_from_interface(mapping.bridge)
         if mapping.interface:
             logging.info(f"Adding {mapping.interface} to {mapping.bridge}")
-            _ensure_single_nic_on_bridge(mapping.bridge, mapping.interface)
+            _ensure_single_nic_on_bridge(ovs_cli, mapping.bridge, mapping.interface)
             _ensure_link_up(mapping.interface)
             enable_as_gateway = True
         else:
             logging.info(f"Removing nics from {mapping.bridge}")
-            _del_external_nics_from_bridge(mapping.bridge)
+            _del_external_nics_from_bridge(ovs_cli, mapping.bridge)
 
     machine_id = get_machine_id()
 
-    subprocess.check_call(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "set",
-            "open",
-            ".",
-            "external_ids:ovn-chassis-mac-mappings="
-            + ",".join(mapping.physnet_mac_pair(machine_id) for mapping in mappings),
-        ]
+    ovs_cli.set(
+        "open",
+        ".",
+        "external_ids",
+        {
+            "ovn-chassis-mac-mappings": ",".join(
+                mapping.physnet_mac_pair(machine_id) for mapping in mappings
+            )
+        },
     )
 
     # If we have at least one external nic, enable chassis as gateway
     if enable_as_gateway:
-        _enable_chassis_as_gateway()
+        _enable_chassis_as_gateway(ovs_cli)
     else:
-        _disable_chassis_as_gateway()
+        _disable_chassis_as_gateway(ovs_cli)
 
 
-def _enable_chassis_as_gateway():
+def _enable_chassis_as_gateway(ovs_cli: OVSCli):
     """Enable OVS as an external chassis gateway."""
     logging.info("Enabling OVS as external gateway")
-    subprocess.check_call(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "set",
-            "open",
-            ".",
-            "external_ids:ovn-cms-options=enable-chassis-as-gw",
-        ]
+    ovs_cli.set(
+        "open",
+        ".",
+        "external_ids",
+        {"ovn-cms-options": "enable-chassis-as-gw"},
     )
 
 
-def _disable_chassis_as_gateway():
-    """Enable OVS as an external chassis gateway."""
+def _disable_chassis_as_gateway(ovs_cli: OVSCli):
+    """Disable OVS as an external chassis gateway."""
     logging.info("Disabling OVS as external gateway")
-    subprocess.check_call(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "remove",
-            "open",
-            ".",
-            "external_ids",
-            "ovn-cms-options",
-            "enable-chassis-as-gw",
-        ]
-    )
+    ovs_cli.remove("open", ".", "external_ids", "ovn-cms-options")
 
 
 def _ensure_link_up(interface: str):
@@ -1578,9 +1464,9 @@ def _parse_tls(snap: Snap, config_key: str) -> bytes | None:
     return None
 
 
-def _configure_tls(snap: Snap) -> None:
+def _configure_tls(snap: Snap, ovs_cli: OVSCli) -> None:
     """Configure TLS."""
-    _configure_ovn_tls(snap)
+    _configure_ovn_tls(snap, ovs_cli)
     _configure_libvirt_tls(snap)
     _configure_cabundle_tls(snap)
 
@@ -1597,7 +1483,11 @@ def _template_tls_file(
 
 
 def _secure_copy(
-    src: Path, dst: Path, mode: int = 0o600, user: str = "snap_daemon", group: str = "snap_daemon"
+    src: Path,
+    dst: Path,
+    mode: int = 0o600,
+    user: str = "snap_daemon",
+    group: str = "snap_daemon",
 ) -> None:
     """Securely copy a file with atomic write and proper permissions.
 
@@ -1978,7 +1868,7 @@ def _configure_webdav_apache(snap: Snap, context: dict) -> None:
     webdav_cfg_path.chmod(0o644)
 
 
-def _configure_ovn_tls(snap: Snap) -> None:
+def _configure_ovn_tls(snap: Snap, ovs_cli: OVSCli) -> None:
     """Configure OVS/OVN TLS.
 
     :param snap: the snap reference
@@ -2007,16 +1897,7 @@ def _configure_ovn_tls(snap: Snap) -> None:
     ssl_key.write_bytes(ovn_key)
     ssl_key.chmod(PRIVATE_PERMS)
 
-    subprocess.check_call(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "set-ssl",
-            str(ssl_key),
-            str(ssl_cert),
-            str(ssl_cacert),
-        ]
-    )
+    ovs_cli.set_ssl(str(ssl_key), str(ssl_cert), str(ssl_cacert))
 
 
 def _is_kvm_api_available() -> bool:
@@ -2526,6 +2407,8 @@ def configure(snap: Snap) -> None:
     _setup_secrets(snap)
     _detect_compute_flavors(snap)
 
+    ovs_cli = OVSCli()
+
     context = _get_configure_context(snap)
     exclude_services = _get_exclude_services(context)
     services = snap.services.list()
@@ -2534,12 +2417,12 @@ def configure(snap: Snap) -> None:
 
     with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         _render_templates(snap, context)
-        _configure_tls(snap)
+        _configure_tls(snap, ovs_cli)
         _configure_webdav_apache(snap, context)
 
-    _configure_ovn_base(snap, context)
-    _configure_ovn_external_networking(snap, context)
-    ovs_restart_required = _configure_ovs(snap, context)
+    _configure_ovn_base(snap, ovs_cli, context)
+    _configure_ovn_external_networking(snap, ovs_cli, context)
+    ovs_restart_required = _configure_ovs(snap, ovs_cli, context)
 
     if ovs_restart_required:
         logging.info("Restarting ovs-vswitchd to apply changes.")
@@ -2549,7 +2432,7 @@ def configure(snap: Snap) -> None:
     else:
         logging.info("ovs-vswitchd restart not required.")
 
-    _process_dpdk_ports(snap, context)
+    _process_dpdk_ports(snap, ovs_cli, context)
 
     _configure_kvm(snap)
     _configure_monitoring_services(snap)

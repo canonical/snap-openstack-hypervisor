@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import json
 import logging
 import subprocess
 from dataclasses import dataclass
@@ -61,6 +62,23 @@ def _normalize_ovs_vsctl_value(raw_value: str) -> str | None:
     if cleaned.startswith('"') and cleaned.endswith('"'):
         cleaned = cleaned[1:-1]
     return cleaned or None
+
+
+def _parse_ovsdb_data(data):
+    """Parse OVSDB data according to RFC 7047.
+
+    https://tools.ietf.org/html/rfc7047#section-5.1
+    """
+    if isinstance(data, list) and len(data) == 2:
+        if data[0] == "set":
+            return [_parse_ovsdb_data(element) for element in data[1]]
+        if data[0] == "map":
+            return {_parse_ovsdb_data(key): _parse_ovsdb_data(value) for key, value in data[1]}
+        if data[0] == "uuid":
+            import uuid
+
+            return uuid.UUID(data[1])
+    return data
 
 
 class OVSCli:
@@ -183,6 +201,325 @@ class OVSCli:
                 mapping[bridge] = physnet
 
         return mapping
+
+    def set(self, table: str, record: str, column: str, settings: dict[str, str]) -> None:
+        """Set column values in an OVS table.
+
+        Args:
+            table: OVS table name (e.g., 'open', 'Open_vSwitch', 'Port').
+            record: Record to modify.
+            column: Column to modify (e.g., 'external_ids', 'other_config').
+            settings: Dictionary of key=value pairs to set.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        if not settings:
+            logging.warning("No ovs values to set, skipping...")
+            return
+
+        args = ["set", table, record]
+        for key, value in settings.items():
+            args.append(f"{column}:{key}={value}")
+        self.vsctl(*args)
+
+    def list_table(self, table: str, record: str, columns: list[str] | None = None) -> dict:
+        """List table entries and parse JSON output.
+
+        Args:
+            table: OVS table name.
+            record: Record to query.
+            columns: Optional list of column names to retrieve.
+
+        Returns:
+            Dictionary of parsed table data.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        args = ["--format", "json", "--if-exists"]
+        if columns:
+            args.append(f"--columns={','.join(columns)}")
+        args.extend(["list", table, record])
+
+        try:
+            output = self.vsctl(*args, retry=True)
+        except OVSCommandError:
+            # The columns may not exist. --if-exists only applies to the record, not columns.
+            return {}
+
+        raw_json = json.loads(output)
+        headings = raw_json["headings"]
+        data = raw_json["data"]
+
+        parsed = {}
+        # We've requested a single record.
+        for record_data in data:
+            for position, heading in enumerate(headings):
+                parsed[heading] = _parse_ovsdb_data(record_data[position])
+
+        return parsed
+
+    def find(self, table: str, *conditions: str) -> dict:
+        """Find rows in a table matching conditions and parse JSON output.
+
+        Args:
+            table: OVS table name.
+            *conditions: Query conditions (e.g., "external-ids:key=value").
+
+        Returns:
+            Dictionary with 'headings' and 'data' keys from JSON output.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        args = ["-f", "json", "find", table]
+        args.extend(conditions)
+        output = self.vsctl(*args, retry=True)
+        return json.loads(output)
+
+    def add_bridge(self, bridge_name: str, datapath_type: str = "system", *cmd_args: str) -> None:
+        """Add a bridge to OVS.
+
+        Args:
+            bridge_name: Name of the bridge to add.
+            datapath_type: Datapath type ("system" or "netdev").
+            *cmd_args: Additional arguments to pass (e.g., "protocols=OpenFlow13").
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        args = [
+            "--may-exist",
+            "add-br",
+            bridge_name,
+            "--",
+            "set",
+            "bridge",
+            bridge_name,
+            f"datapath_type={datapath_type}",
+        ]
+        args.extend(cmd_args)
+        self.vsctl(*args)
+
+    def del_bridge(self, bridge_name: str) -> None:
+        """Delete a bridge from OVS.
+
+        Args:
+            bridge_name: Name of the bridge to delete.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        self.vsctl("del-br", bridge_name)
+
+    def add_port(
+        self,
+        bridge_name: str,
+        port_name: str,
+        port_type: str | None = None,
+        options: dict[str, str] | None = None,
+        external_ids: dict[str, str] | None = None,
+        mtu: int | None = None,
+    ) -> None:
+        """Add a port to a bridge.
+
+        Args:
+            bridge_name: Name of the bridge.
+            port_name: Name of the port to add.
+            port_type: Optional port type (e.g., "dpdk", "patch").
+            options: Optional port options dictionary.
+            external_ids: Optional external IDs dictionary.
+            mtu: Optional MTU value.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        args = ["--may-exist", "add-port", bridge_name, port_name]
+
+        set_interface = ["--", "set", "Interface", port_name]
+        if port_type:
+            args.extend(set_interface + [f"type={port_type}"])
+        if mtu:
+            args.extend(set_interface + [f"mtu-request={mtu}"])
+        if options:
+            args.extend(set_interface)
+            for key, value in options.items():
+                args.append(f"options:{key}={value}")
+        if external_ids:
+            args.extend(["--", "set", "Port", port_name])
+            for key, value in external_ids.items():
+                args.append(f"external_ids:{key}={value}")
+
+        self.vsctl(*args)
+
+    def del_port(self, bridge_name: str, port_name: str) -> None:
+        """Delete a port from a bridge.
+
+        Args:
+            bridge_name: Name of the bridge.
+            port_name: Name of the port to delete.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        self.vsctl("--if-exists", "del-port", bridge_name, port_name)
+
+    def add_bond(
+        self,
+        bridge_name: str,
+        bond_name: str,
+        ports: list[str],
+        bond_mode: str | None = None,
+        lacp_mode: str | None = None,
+        lacp_time: str | None = None,
+    ) -> None:
+        """Add a bond to a bridge.
+
+        Args:
+            bridge_name: Name of the bridge.
+            bond_name: Name of the bond to create.
+            ports: List of port names to include in the bond.
+            bond_mode: Bond mode (e.g., "balance-tcp", "active-backup").
+            lacp_mode: LACP mode ("active", "passive", or "off").
+            lacp_time: LACP time ("fast" or "slow").
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        args = ["--may-exist", "add-bond", bridge_name, bond_name]
+        args.extend(ports)
+
+        # Build arguments for port settings after bond creation
+        if bond_mode or lacp_mode or lacp_time:
+            args.extend(["--", "set", "port", bond_name])
+
+            if bond_mode:
+                args.append(f"bond_mode={bond_mode}")
+
+            if lacp_mode:
+                args.append(f"lacp={lacp_mode}")
+
+            if lacp_time:
+                args.append(f"other-config:lacp-time={lacp_time}")
+
+        self.vsctl(*args)
+
+    def set_external_ids(self, table: str, record: str, external_ids: dict[str, str]) -> None:
+        """Set external_ids on a table record.
+
+        Args:
+            table: OVS table name.
+            record: Record to modify.
+            external_ids: Dictionary of external ID key=value pairs.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        self.set(table, record, "external_ids", external_ids)
+
+    def set_other_config(self, table: str, record: str, config: dict[str, str]) -> None:
+        """Set other_config on a table record.
+
+        Args:
+            table: OVS table name.
+            record: Record to modify.
+            config: Dictionary of config key=value pairs.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        self.set(table, record, "other_config", config)
+
+    def set_check(self, table: str, record: str, column: str, settings: dict[str, str]) -> bool:
+        """Apply settings and return whether changes were made.
+
+        Args:
+            table: OVS table name.
+            record: Record to modify.
+            column: Column to modify.
+            settings: Dictionary of settings to apply.
+
+        Returns:
+            True if changes were made, False otherwise.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        config_changed = False
+        current_values = self.list_table(table, record, [column]).get(column, {})
+        for key, new_val in settings.items():
+            if key not in current_values or str(new_val) != str(current_values[key]):
+                config_changed = True
+
+        if config_changed:
+            self.set(table, record, column, settings)
+
+        return config_changed
+
+    def remove(self, table: str, record: str, column: str, key: str) -> bool:
+        """Remove a key from a column in an OVS table.
+
+        This method is idempotent - it will not raise an error if the key
+        doesn't exist.
+
+        Args:
+            table: OVS table name.
+            record: Record to modify.
+            column: Column name (e.g., 'external_ids', 'other_config').
+            key: Key to remove from the column.
+
+        Returns:
+            True if the key was removed, False if it didn't exist.
+
+        Raises:
+            OVSCommandError: If the command fails for reasons other than missing key.
+        """
+        args = ["remove", table, record, column, key]
+        try:
+            self.vsctl(*args)
+            logging.debug("Removed %s:%s from %s.%s", column, key, table, record)
+            return True
+        except OVSCommandError as exc:
+            # Check if error is due to key not existing
+            error_msg = str(exc).lower()
+            if "not found" in error_msg or "no such key" in error_msg:
+                logging.debug("Key %s not found in %s.%s, treating as no-op", key, table, record)
+                return False
+            # Re-raise if it's a different error
+            raise
+
+    def set_ssl(self, private_key: str, certificate: str, ca_cert: str) -> None:
+        """Configure SSL for OVS.
+
+        Args:
+            private_key: Path to the private key file.
+            certificate: Path to the certificate file.
+            ca_cert: Path to the CA certificate file.
+
+        Raises:
+            OVSCommandError: If the command fails.
+            FileNotFoundError: If any required file doesn't exist or is unreadable.
+        """
+        import os
+
+        # Validate all files exist and are readable
+        files = {
+            "private key": private_key,
+            "certificate": certificate,
+            "CA certificate": ca_cert,
+        }
+
+        for file_type, file_path in files.items():
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"SSL {file_type} file not found: {file_path}")
+            if not os.path.isfile(file_path):
+                raise FileNotFoundError(f"SSL {file_type} path is not a file: {file_path}")
+            if not os.access(file_path, os.R_OK):
+                raise FileNotFoundError(f"SSL {file_type} file is not readable: {file_path}")
+
+        logging.info("Configuring OVS SSL with certificate: %s", certificate)
+        self.vsctl("set-ssl", private_key, certificate, ca_cert)
 
 
 def resolve_bridge_mappings(  # noqa: C901
