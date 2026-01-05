@@ -1122,44 +1122,45 @@ def _create_dpdk_ports_and_bonds(ovs_cli: OVSCli, dpdk_mappings: dict, dpdk_driv
     port_mappings = dpdk_mappings["ports"]
     bond_mappings = dpdk_mappings["bonds"]
 
-    for port_name, port_config in port_mappings.items():
-        pci.ensure_driver_override(port_config["pci_address"], dpdk_driver)
-        if port_config["bond"]:
-            # Created separately.
-            continue
-        ovs_cli.add_bridge(port_config["bridge"], "netdev")
-        _add_dpdk_port(
-            ovs_cli,
-            bridge_name=port_config["bridge"],
-            dpdk_port_name=port_config["dpdk_port_name"],
-            pci_address=port_config["pci_address"],
-            mtu=port_config["mtu"],
-        )
-
-    for bond_name, bond_config in bond_mappings.items():
-        bond_ports = []
-        for port_name in bond_config["ports"]:
-            port_info = port_mappings.get(port_name)
-            if not port_info:
-                raise Exception("Missing dpdk port info: %s", port_name)
-            bond_ports.append(
-                {
-                    "name": port_info["dpdk_port_name"],
-                    "pci_address": port_info["pci_address"],
-                    "mtu": port_info["mtu"],
-                }
+    with ovs_cli.transaction() as ovs_txn:
+        for port_name, port_config in port_mappings.items():
+            pci.ensure_driver_override(port_config["pci_address"], dpdk_driver)
+            if port_config["bond"]:
+                # Created separately.
+                continue
+            ovs_txn.add_bridge(port_config["bridge"], "netdev")
+            _add_dpdk_port(
+                ovs_txn,
+                bridge_name=port_config["bridge"],
+                dpdk_port_name=port_config["dpdk_port_name"],
+                pci_address=port_config["pci_address"],
+                mtu=port_config["mtu"],
             )
-        ovs_cli.add_bridge(bond_config["bridge"], "netdev")
-        _add_dpdk_bond(
-            ovs_cli,
-            bridge_name=bond_config["bridge"],
-            bond_name=bond_name,
-            dpdk_ports=bond_ports,
-            mtu=bond_config["mtu"],
-            bond_mode=bond_config["bond_mode"],
-            lacp_mode=bond_config["lacp_mode"],
-            lacp_time=bond_config["lacp_time"],
-        )
+
+        for bond_name, bond_config in bond_mappings.items():
+            bond_ports = []
+            for port_name in bond_config["ports"]:
+                port_info = port_mappings.get(port_name)
+                if not port_info:
+                    raise Exception("Missing dpdk port info: %s", port_name)
+                bond_ports.append(
+                    {
+                        "name": port_info["dpdk_port_name"],
+                        "pci_address": port_info["pci_address"],
+                        "mtu": port_info["mtu"],
+                    }
+                )
+            ovs_txn.add_bridge(bond_config["bridge"], "netdev")
+            _add_dpdk_bond(
+                ovs_txn,
+                bridge_name=bond_config["bridge"],
+                bond_name=bond_name,
+                dpdk_ports=bond_ports,
+                mtu=bond_config["mtu"],
+                bond_mode=bond_config["bond_mode"],
+                lacp_mode=bond_config["lacp_mode"],
+                lacp_time=bond_config["lacp_time"],
+            )
 
 
 def _add_dpdk_port(
