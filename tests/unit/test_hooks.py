@@ -19,8 +19,9 @@ from openstack_hypervisor.cli import pci_devices
 class TestHooks:
     """Contains tests for openstack_hypervisor.hooks."""
 
-    def test_install_hook(self, snap):
+    def test_install_hook(self, mocker, snap):
         """Tests the install hook."""
+        mocker.patch.object(hooks, "_secure_copy")
         hooks.install(snap)
 
     def test_get_local_ip_by_default_route(self, mocker, ifaddresses):
@@ -108,6 +109,7 @@ class TestHooks:
     ):
         """Tests the configure hook."""
         mock_template = mocker.Mock()
+        mocker.patch.object(hooks, "_secure_copy")
         mocker.patch.object(hooks, "_ovs_vsctl_set_check")
         mocker.patch.object(hooks, "_process_dpdk_ports")
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
@@ -722,6 +724,7 @@ def test_nova_conf_cpu_pinning_injection(
         "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
         return_value=(cpu_shared_set, allocated_cores),
     )
+    mocker.patch("openstack_hypervisor.hooks._secure_copy")
     mock_template = mock.Mock()
     mocker.patch("openstack_hypervisor.hooks._get_template", return_value=mock_template)
     mocker.patch("openstack_hypervisor.hooks.Path.write_text")
