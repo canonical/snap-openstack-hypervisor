@@ -175,4 +175,5 @@ def ovs_cli():
     from openstack_hypervisor.bridge_datapath import OVSCli
 
     ovs_cli_instance = MagicMock(spec=OVSCli)
+    ovs_cli_instance.transaction.return_value.__enter__.return_value = ovs_cli_instance
     yield ovs_cli_instance

@@ -348,7 +348,7 @@ class TestResolveBridgeMappings:
 
 class TestDetectCurrentMappings:
     def test_detect_current_mappings_success(self):
-        def fake_vsctl(*args, retry=True):
+        def fake_vsctl(*args, retry=True, skip_transaction=False):
             command = tuple(args)
             if command == ("list-br",):
                 return "br-data\nbr-ex\n"
@@ -384,7 +384,7 @@ class TestDetectCurrentMappings:
             result = detect_current_mappings(ovs_cli)
 
         assert result == []
-        mock_vsctl.assert_called_once_with("list-br")
+        mock_vsctl.assert_called_once_with("list-br", skip_transaction=True)
 
 
 def _is_byte_hex(s: str) -> bool:
@@ -479,7 +479,7 @@ class TestOVSCli:
         ovs = OVSCli()
         with patch.object(ovs, "vsctl") as mock_vsctl:
 
-            def fake_vsctl(*args, retry=True):
+            def fake_vsctl(*args, retry=True, skip_transaction=False):
                 if args[0] == "list-ifaces":
                     return "eth0\npatch-port\ninternal-port\n"
                 if args[0] == "--bare" and "find" in args:
@@ -491,7 +491,7 @@ class TestOVSCli:
             ifaces = ovs.list_bridge_interfaces("br-ex")
             assert ifaces == ["eth0"]
 
-            mock_vsctl.assert_any_call("list-ifaces", "br-ex")
+            mock_vsctl.assert_any_call("list-ifaces", "br-ex", skip_transaction=True)
             mock_vsctl.assert_any_call(
                 "--bare",
                 "--columns=name",
@@ -499,6 +499,7 @@ class TestOVSCli:
                 "Interface",
                 "type!=patch",
                 "type!=internal",
+                skip_transaction=True,
             )
 
     def test_list_table(self):
