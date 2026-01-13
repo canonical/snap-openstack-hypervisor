@@ -6,7 +6,7 @@ description: |
   The OpenStack Hypervisor snap provides the requires components
   to operate a cloud hypervisor as part of an OpenStack deployment.
 assumes:
-- snapd2.72
+- snapd2.73
 grade: stable
 confinement: strict
 environment:
@@ -68,6 +68,8 @@ layout:
     symlink: $SNAP_DATA/var/lib/libvirt
   /var/lib/openstack-hypervisor:
     bind: $SNAP_COMMON
+  /usr/lib/multipath:
+    symlink: $SNAP/lib/multipath
 
 apps:
   openstack-hypervisor:
@@ -107,6 +109,9 @@ apps:
       - block-devices
       - microstack-support
       - system-observe
+      - dm-multipath
+      - nvme-control
+      - iscsi-initiator
     # Make sure KillMode=process is set in the resulting systemd unit instead of
     # the default KillMode=control-group to avoid the situation where stopping
     # libvirtd causes the forced power off scenario for all VMs; it also affects
@@ -239,6 +244,11 @@ apps:
       - microstack-support
       # Needs access to block devices so that blockdev --flushbufs works.
       - block-devices
+      - iscsi-initiator
+      - dm-multipath
+      - process-control
+      - mount-observe
+      - nvme-control
 
   neutron-ovn-metadata-agent:
     command: 'bin/neutron-ovn-metadata-agent-service'
@@ -700,6 +710,7 @@ parts:
       - python3-tz
       - haproxy
       - util-linux
+      - multipath-tools
       # following packages are explicitly declared, because they are inside core24
       # removed when core24 bug is fixed
       - python3-attr
