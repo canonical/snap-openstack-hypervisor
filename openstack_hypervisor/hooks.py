@@ -746,6 +746,12 @@ def _configure_ovn_base(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:
         },
     )
 
+    # note(gboutry): previously, this value was set to true by default. However,
+    # it broke when there's a mismatch between ovn-northd and ovn-controller.
+    # As part of #123, the setting has been removed from being set. But not cleared
+    # on upgrade. Clear the setting so that it can return to its default value.
+    ovs_cli.remove("open", ".", "external_ids", "ovn-match-northd-version")
+
     try:
         sb_conn = snap.config.get("network.ovn-sb-connection")
     except UnknownConfigKey:
