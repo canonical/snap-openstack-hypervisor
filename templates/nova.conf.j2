@@ -42,6 +42,7 @@ reserved_host_memory_mb  = {{ sev.reserved_host_memory_mb }}
 disable_rootwrap = True
 
 [libvirt]
+volume_use_multipath = True
 virt_type = {{ compute.virt_type }}
 cpu_mode = {{ compute.cpu_mode }}
 {% if compute.cpu_mode == 'custom' -%}
