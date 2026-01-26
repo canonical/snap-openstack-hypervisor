@@ -40,60 +40,50 @@ class TestHooks:
 
     def test__get_default_gw_iface_fallback(self):
         """Test default gateway iface fallback returns iface."""
-        proc_net_route = textwrap.dedent(
-            """\
+        proc_net_route = textwrap.dedent("""\
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000000	020A010A	0003	0	0	0	00000000	0	0	0
         ens10f3	000A010A	00000000	0001	0	0	0	00FEFFFF	0	0	0
         ens10f2	000A010A	00000000	0001	0	0	0	00FEFFFF	0	0	0
         ens10f0	000A010A	00000000	0001	0	0	0	00FEFFFF	0	0	0
         ens4f0	0018010A	00000000	0001	0	0	0	00FCFFFF	0	0	0
-        ens10f1	0080F50A	00000000	0001	0	0	0	00F8FFFF	0	0	0"""
-        )
+        ens10f1	0080F50A	00000000	0001	0	0	0	00F8FFFF	0	0	0""")
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() == "ens10f0"
 
     def test__get_default_gw_iface_fallback_no_0_dest(self):
         """Test route has 000 mask but no 000 dest, then returns None."""
-        proc_net_route = textwrap.dedent(
-            """
+        proc_net_route = textwrap.dedent("""
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000001	020A010A	0003	0	0	0	00000000	0	0	0
-        """
-        )
+        """)
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() is None
 
     def test__get_default_gw_iface_fallback_no_0_mask(self):
         """Test route has a 000 dest but no 000 mask, then returns None."""
-        proc_net_route = textwrap.dedent(
-            """
+        proc_net_route = textwrap.dedent("""
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000000	020A010A	0003	0	0	0	0000000F	0	0	0
-        """
-        )
+        """)
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() is None
 
     def test__get_default_gw_iface_fallback_not_up(self):
         """Tests route is a gateway but not up, then returns None."""
-        proc_net_route = textwrap.dedent(
-            """
+        proc_net_route = textwrap.dedent("""
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000000	020A010A	0002	0	0	0	00000000	0	0	0
-        """
-        )
+        """)
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() is None
 
     def test__get_default_gw_iface_fallback_up_but_not_gateway(self):
         """Tests route is up but not a gateway, then returns None."""
-        proc_net_route = textwrap.dedent(
-            """
+        proc_net_route = textwrap.dedent("""
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000000	020A010A	0001	0	0	0	00000000	0	0	0
-        """
-        )
+        """)
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() is None
 

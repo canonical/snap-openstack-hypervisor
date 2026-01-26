@@ -140,16 +140,14 @@ LAYOUT_DIRS = [
     Path("run/apache2"),
     Path("etc/apache2"),
 ]
-SECRET_XML = string.Template(
-    """
+SECRET_XML = string.Template("""
 <secret ephemeral='no' private='no'>
    <uuid>$uuid</uuid>
    <usage type='ceph'>
      <name>client.cinder-ceph secret</name>
    </usage>
 </secret>
-"""
-)
+""")
 
 # As defined in the snap/snapcraft.yaml
 MONITORING_SERVICES = [
