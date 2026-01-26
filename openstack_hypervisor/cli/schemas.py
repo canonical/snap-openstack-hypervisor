@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2024 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
 """Pydantic schemas for socket communication."""
+
 from enum import Enum
 from typing import Annotated, Dict, List, Literal, Optional, Union
 
