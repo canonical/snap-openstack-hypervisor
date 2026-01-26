@@ -5,6 +5,7 @@ import io
 import json
 import random
 import textwrap
+from pathlib import Path
 from unittest import mock
 
 import mock_netplan_configs
@@ -14,15 +15,95 @@ from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import hooks
 from openstack_hypervisor.cli import pci_devices
+from openstack_hypervisor.hooks import OwnedPath
+
+
+class TestOwnedPath:
+    """Tests for the OwnedPath class."""
+
+    def test_owned_path_stores_owner_and_group(self):
+        """Test that OwnedPath stores owner and group attributes."""
+        path = OwnedPath("some/path", owner="testuser", group="testgroup")
+        assert path._owner == "testuser"
+        assert path._group == "testgroup"
+        assert str(path) == "some/path"
+
+    def test_owned_path_with_only_owner(self):
+        """Test OwnedPath with only owner specified."""
+        path = OwnedPath("some/path", owner="testuser")
+        assert path._owner == "testuser"
+        assert path._group is None
+
+    def test_owned_path_with_only_group(self):
+        """Test OwnedPath with only group specified."""
+        path = OwnedPath("some/path", group="testgroup")
+        assert path._owner is None
+        assert path._group == "testgroup"
+
+    def test_owned_path_with_no_ownership(self):
+        """Test OwnedPath without owner or group specified."""
+        path = OwnedPath("some/path")
+        assert path._owner is None
+        assert path._group is None
+
+    def test_owned_path_is_path_subclass(self):
+        """Test that OwnedPath is a subclass of Path."""
+        path = OwnedPath("some/path", owner="user", group="group")
+        assert isinstance(path, Path)
 
 
 class TestHooks:
     """Contains tests for openstack_hypervisor.hooks."""
 
-    def test_install_hook(self, mocker, snap):
+    def test_install_hook(self, mocker, snap, shutil_chown):
         """Tests the install hook."""
         mocker.patch.object(hooks, "_secure_copy")
         hooks.install(snap)
+
+    def test_mkdirs_calls_chown_for_owned_paths(self, mocker, snap):
+        """Test that _mkdirs calls shutil.chown for OwnedPath directories."""
+        mock_chown = mocker.patch("shutil.chown")
+        mocker.patch("os.makedirs")
+
+        # Patch DATA_DIRS and COMMON_DIRS to test OwnedPath behavior
+        test_owned_path = OwnedPath("test/owned", owner="testuser", group="testgroup")
+        test_regular_path = Path("test/regular")
+        mocker.patch.object(hooks, "DATA_DIRS", [test_owned_path, test_regular_path])
+        mocker.patch.object(hooks, "COMMON_DIRS", [])
+
+        hooks._mkdirs(snap)
+
+        # chown should be called only for OwnedPath with owner/group
+        mock_chown.assert_called_once()
+        call_args = mock_chown.call_args
+        assert call_args.kwargs["user"] == "testuser"
+        assert call_args.kwargs["group"] == "testgroup"
+
+    def test_mkdirs_skips_chown_for_regular_paths(self, mocker, snap):
+        """Test that _mkdirs does not call shutil.chown for regular Path objects."""
+        mock_chown = mocker.patch("shutil.chown")
+        mocker.patch("os.makedirs")
+
+        test_regular_path = Path("test/regular")
+        mocker.patch.object(hooks, "DATA_DIRS", [test_regular_path])
+        mocker.patch.object(hooks, "COMMON_DIRS", [])
+
+        hooks._mkdirs(snap)
+
+        mock_chown.assert_not_called()
+
+    def test_mkdirs_skips_chown_for_owned_path_without_ownership(self, mocker, snap):
+        """Test that _mkdirs skips chown for OwnedPath without owner/group."""
+        mock_chown = mocker.patch("shutil.chown")
+        mocker.patch("os.makedirs")
+
+        test_owned_path = OwnedPath("test/owned")  # No owner or group
+        mocker.patch.object(hooks, "DATA_DIRS", [test_owned_path])
+        mocker.patch.object(hooks, "COMMON_DIRS", [])
+
+        hooks._mkdirs(snap)
+
+        mock_chown.assert_not_called()
 
     def test_get_local_ip_by_default_route(self, mocker, ifaddresses):
         """Test get local ip by default route."""
@@ -95,7 +176,7 @@ class TestHooks:
         mock_fs_loader.assert_called_once_with(searchpath=str(snap.paths.snap / "templates"))
 
     def test_configure_hook(
-        self, mocker, snap, check_call, link_lookup, split, addr, link, ip_interface
+        self, mocker, snap, check_call, link_lookup, split, addr, link, ip_interface, shutil_chown
     ):
         """Tests the configure hook."""
         mock_template = mocker.Mock()
@@ -106,21 +187,23 @@ class TestHooks:
         mock_write_text = mocker.patch.object(hooks.Path, "write_text")
         mock_chmod = mocker.patch.object(hooks.Path, "chmod")
         mocker.patch(
-            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket", return_value=("0-3", "4-7")
+            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
+            return_value=("0-3", "4-7"),
         )
         hooks.configure(snap)
         mock_template.render.assert_called()
         mock_write_text.assert_called()
         mock_chmod.assert_called()
 
-    def test_configure_hook_exception(self, mocker, snap, os_makedirs, check_call):
+    def test_configure_hook_exception(self, mocker, snap, os_makedirs, check_call, shutil_chown):
         """Tests the configure hook raising an exception while writing file."""
         mock_template = mocker.Mock()
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mocker.patch.object(hooks.Path, "write_text")
         mocker.patch.object(hooks.Path, "chmod")
         mocker.patch(
-            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket", return_value=("0-3", "4-7")
+            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
+            return_value=("0-3", "4-7"),
         )
         with pytest.raises(FileNotFoundError):
             hooks.configure(snap)
@@ -310,7 +393,10 @@ class TestHooks:
         mock_del_interface_from_bridge = mocker.patch.object(hooks, "_del_interface_from_bridge")
         mock_get_external_ports_on_bridge.return_value = ["eth0", "eth1"]
         hooks._del_external_nics_from_bridge(ovs_cli, "br-ex")
-        expect = [mock.call(ovs_cli, "br-ex", "eth0"), mock.call(ovs_cli, "br-ex", "eth1")]
+        expect = [
+            mock.call(ovs_cli, "br-ex", "eth0"),
+            mock.call(ovs_cli, "br-ex", "eth1"),
+        ]
         mock_del_interface_from_bridge.assert_has_calls(expect)
 
     def test_set_secret(self, mocker):
@@ -611,7 +697,14 @@ class TestHooks:
     ],
 )
 def test_nova_conf_cpu_pinning_injection(
-    mocker, snap, cpu_shared_set, allocated_cores, should_include, check_call, check_output
+    mocker,
+    snap,
+    cpu_shared_set,
+    allocated_cores,
+    should_include,
+    check_call,
+    check_output,
+    shutil_chown,
 ):
     mocker.patch(
         "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
@@ -925,7 +1018,10 @@ def test_create_dpdk_ports_and_bonds(
     hooks._create_dpdk_ports_and_bonds(ovs_cli, dpdk_mappings, "mock-driver")
 
     mock_ensure_driver_override.assert_has_calls(
-        [mock.call("pci-addr-eth1", "mock-driver"), mock.call("pci-addr-eth2", "mock-driver")]
+        [
+            mock.call("pci-addr-eth1", "mock-driver"),
+            mock.call("pci-addr-eth2", "mock-driver"),
+        ]
     )
     ovs_cli.add_bridge.assert_called_with("br0", "netdev")
     ovs_cli.add_bond.assert_called_once()

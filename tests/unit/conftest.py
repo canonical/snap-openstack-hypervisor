@@ -49,6 +49,12 @@ def os_makedirs():
 
 
 @pytest.fixture
+def shutil_chown():
+    with patch("shutil.chown") as p:
+        yield p
+
+
+@pytest.fixture
 def check_call():
     with patch("subprocess.check_call") as p:
         yield p
