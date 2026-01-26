@@ -7,3 +7,8 @@ remember_owner = 0
 default_tls_x509_cert_dir = "{{ snap_common }}/etc/pki/qemu"
 default_tls_x509_verify = 1
 {% endif -%}
+
+{% if compute.key_manager_enabled %}
+swtpm_user = "snap_daemon"
+swtpm_group = "snap_daemon"
+{% endif %}

@@ -47,6 +47,8 @@ layout:
     symlink: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/qemu
   /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pulseaudio:
     symlink: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pulseaudio
+  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/swtpm:
+    symlink: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/swtpm
   /usr/lib/libvirt:
     symlink: $SNAP/usr/lib/libvirt
   /usr/share/libvirt:
@@ -65,6 +67,8 @@ layout:
     bind: $SNAP_COMMON
   /usr/lib/multipath:
     symlink: $SNAP/lib/multipath
+  /etc/swtpm_setup.conf:
+    symlink: $SNAP_COMMON/etc/swtpm_setup.conf
 
 apps:
   openstack-hypervisor:
@@ -562,6 +566,9 @@ parts:
     - ebtables
     - apparmor
     - libapparmor1
+    - swtpm
+    - swtpm-tools
+    - libtpms0
     meson-parameters:
     # Hypervisors
     - -Ddriver_qemu=enabled

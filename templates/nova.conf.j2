@@ -59,6 +59,11 @@ file_server_read_timeout = 900
 file_server_ca_file = {{ snap_common }}/etc/pki/nova/ca-cert.pem
 file_server_client_cert_file = {{ snap_common }}/etc/pki/libvirt/clientcert.pem
 file_server_client_key_file = {{ snap_common }}/etc/pki/libvirt/private/clientkey.pem
+{% if compute.key_manager_enabled %}
+swtpm_enabled = True
+swtpm_user = snap_daemon
+swtpm_group = snap_daemon
+{% endif %}
 
 # The following [compute] section controls CPU pinning for dedicated and shared vCPUs.
 # Setting cpu_dedicated_set and cpu_shared_set determines which host CPUs are used for
@@ -193,6 +198,24 @@ username = {{ identity.username }}
 password = {{ identity.password }}
 {% if ca and ca.bundle -%}
 cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
+{% endif -%}
+
+{% if compute.key_manager_enabled %}
+[key_manager]
+backend = barbican
+
+[barbican]
+auth_url = {{ identity.auth_url }}
+auth_type = password
+project_domain_name = {{ identity.project_domain_name }}
+user_domain_name = {{ identity.user_domain_name }}
+region_name = {{ identity.region_name }}
+project_name = {{ identity.project_name }}
+username = {{ identity.username }}
+password = {{ identity.password }}
+{% if ca and ca.bundle -%}
+cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
+{% endif -%}
 {% endif -%}
 
 {% if telemetry.enable -%}
