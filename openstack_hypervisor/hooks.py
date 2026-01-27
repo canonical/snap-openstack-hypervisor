@@ -115,11 +115,25 @@ COMMON_DIRS = [
     Path("lock"),
     # Instances
     Path("lib/nova/instances"),
+    Path("etc/swtpm"),
 ]
 
 DEFAULT_PERMS = 0o640
 PRIVATE_PERMS = 0o600
 LAYOUT_BASE = Path("/var/lib/openstack-hypervisor")
+
+SNAP_USER = "snap_daemon"
+SNAP_GROUP = "snap_daemon"
+
+
+class OwnedPath(Path):
+    """Path subclass that includes ownership information."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args)
+        self._owner: str | None = kwargs.pop("owner", None)
+        self._group: str | None = kwargs.pop("group", None)
+
 
 DATA_DIRS = [
     Path("lib/libvirt/images"),
@@ -127,6 +141,7 @@ DATA_DIRS = [
     Path("lib/neutron"),
     Path("run/hypervisor-config"),
     Path("var/lib/libvirt/qemu"),
+    OwnedPath("var/lib/swtpm-localca", owner=SNAP_USER, group=SNAP_GROUP),
 ]
 
 # Host-side layout directories used by Apache WebDAV and related runtime state.
@@ -140,16 +155,14 @@ LAYOUT_DIRS = [
     Path("run/apache2"),
     Path("etc/apache2"),
 ]
-SECRET_XML = string.Template(
-    """
+SECRET_XML = string.Template("""
 <secret ephemeral='no' private='no'>
    <uuid>$uuid</uuid>
    <usage type='ceph'>
      <name>client.cinder-ceph secret</name>
    </usage>
 </secret>
-"""
-)
+""")
 
 # As defined in the snap/snapcraft.yaml
 MONITORING_SERVICES = [
@@ -178,9 +191,15 @@ def _mkdirs(snap: Snap) -> None:
     :return: None
     """
     for dir in COMMON_DIRS:
-        os.makedirs(snap.paths.common / dir, exist_ok=True)
+        full_dir = snap.paths.common / dir
+        os.makedirs(full_dir, exist_ok=True)
+        if isinstance(dir, OwnedPath) and (dir._owner or dir._group):
+            shutil.chown(full_dir, user=dir._owner, group=dir._group)
     for dir in DATA_DIRS:
-        os.makedirs(snap.paths.data / dir, exist_ok=True)
+        full_dir = snap.paths.data / dir
+        os.makedirs(full_dir, exist_ok=True)
+        if isinstance(dir, OwnedPath) and (dir._owner or dir._group):
+            shutil.chown(full_dir, user=dir._owner, group=dir._group)
 
 
 def _mkdir_layout_dirs() -> None:
@@ -327,6 +346,7 @@ DEFAULT_CONFIG = {
     "compute.pci-device-specs": [],
     "compute.pci-excluded-devices": [],
     "compute.pci-aliases": [],
+    "compute.key-manager-enabled": False,
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
     # These 2 options are deprecated, kept as a compatibility layer
@@ -477,10 +497,20 @@ TEMPLATES = {
     },
     Path("etc/libvirt/qemu.conf"): {
         "template": "qemu.conf.j2",
+        "services": ["libvirtd"],
     },
     Path("etc/libvirt/virtlogd.conf"): {
         "template": "virtlogd.conf.j2",
         "services": ["virtlogd"],
+    },
+    OwnedPath("etc/swtpm_setup.conf", owner=SNAP_USER, group=SNAP_GROUP): {
+        "template": "swtpm_setup.conf.j2",
+    },
+    OwnedPath("etc/swtpm/swtpm-localca.conf", owner=SNAP_USER, group=SNAP_GROUP): {
+        "template": "swtpm-localca.conf.j2",
+    },
+    OwnedPath("etc/swtpm/swtpm-localca.options", owner=SNAP_USER, group=SNAP_GROUP): {
+        "template": "swtpm-localca.options.j2",
     },
     Path("etc/openvswitch/system-id.conf"): {
         "template": "system-id.conf.j2",
@@ -2536,10 +2566,22 @@ def _render_templates(snap: Snap, context: dict) -> None:
         if tpl_name is None:
             continue
         template = _get_template(snap, tpl_name)
+        user = getattr(config_file, "_owner", None)
+        group = getattr(config_file, "_group", None)
+        # get user and group before config_file is converted to Path
         config_file = snap.paths.common / config_file
         logging.info(f"Rendering {config_file}")
         try:
             output = template.render(context)
+            config_file.touch(DEFAULT_PERMS)
+            if user is not None or group is not None:
+                logging.debug(
+                    "Setting ownership of %s to user: %s, group: %s",
+                    config_file,
+                    user,
+                    group,
+                )
+                shutil.chown(config_file, user=user, group=group)
             config_file.write_text(output)
             config_file.chmod(DEFAULT_PERMS)
         except Exception:  # noqa
