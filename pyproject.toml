@@ -47,6 +47,7 @@ dev= [
     "pyroute2",
     "pytest",
     "pytest-mock",
+    "python-novaclient",
 ]
 
 [project.urls]

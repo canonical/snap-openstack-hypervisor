@@ -109,7 +109,7 @@ lock_path = {{ snap_common }}/lock
 # OVSDB. This is done via a TCP connection to localhost by default so we override this to
 # use a unix socket instead.
 # See os-vif/releasenotes/notes/add-ovsdb-native-322fffb49c91503d.yaml
-ovsdb_connection = unix:{{ snap_common }}/run/openvswitch/db.sock
+ovsdb_connection = {{ network.ovs_socket_path }}
 
 [cinder]
 service_type = volume
