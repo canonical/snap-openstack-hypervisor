@@ -5,6 +5,7 @@ import base64
 import binascii
 import datetime
 import errno
+import functools
 import glob
 import hashlib
 import ipaddress
@@ -42,6 +43,7 @@ from openstack_hypervisor import netplan, pci
 from openstack_hypervisor.bridge_datapath import (
     OVSCli,
     OVSCommandError,
+    OVSTimeoutError,
     detect_current_mappings,
     resolve_bridge_mappings,
     resolve_ovs_changes,
@@ -68,6 +70,8 @@ SECRETS = ["credentials.ovn-metadata-proxy-shared-secret"]
 
 DEFAULT_SECRET_LENGTH = 32
 TRUE_STRINGS = ("1", "t", "true", "on", "y", "yes")
+
+OVN_CHASSIS_PLUG = "ovn-chassis"
 
 # NOTE(dmitriis): there is currently no way to make sure this directory gets
 # recreated on reboot which would normally be done via systemd-tmpfiles.
@@ -383,6 +387,8 @@ DEFAULT_CONFIG = {
     "ca.bundle": UNSET,
     # Masakari
     "masakari.enable": False,
+    # Option to signal external switch restart is required
+    "network.external-switch-restart": False,
 }
 
 
@@ -742,6 +748,39 @@ def _delete_iptable_postrouting_rule(comment: str) -> None:
         logging.info(f"Error in deletion of IPtable rule: {e.stderr}")
 
 
+def _configure_ovn_base_external_ovs(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:
+    """Configure OVS/OVN for external OVS.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: None
+    """
+    ovn_encap_ip = snap.config.get("network.ip-address")
+    if not ovn_encap_ip:
+        # Fallback to general node IP
+        ovn_encap_ip = snap.config.get("node.ip-address")
+    if not ovn_encap_ip:
+        logging.info("OVN IP not configured, skipping external OVS base config.")
+        return
+    datapath_type = _get_datapath_type(context)
+    logging.info(
+        "Configuring Open vSwitch geneve tunnels and datapath. "
+        "ovn-encap-ip = %s, datapath-type = %s",
+        ovn_encap_ip,
+        datapath_type,
+    )
+    ovs_cli.set(
+        "open",
+        ".",
+        "external_ids",
+        {
+            "ovn-encap-type": "geneve",
+            "ovn-encap-ip": ovn_encap_ip,
+            "ovn-bridge-datapath-type": datapath_type,
+        },
+    )
+
+
 def _configure_ovn_base(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:
     """Configure OVS/OVN.
 
@@ -761,8 +800,11 @@ def _configure_ovn_base(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:
     datapath_type = _get_datapath_type(context)
     logging.info(
         "Configuring Open vSwitch geneve tunnels and system id. "
-        f"ovn-encap-ip = {ovn_encap_ip}, system-id = {system_id}, "
-        f"datapath-type = {datapath_type}"
+        "ovn-encap-ip = %s, system-id = %s, "
+        "datapath-type = %s",
+        ovn_encap_ip,
+        system_id,
+        datapath_type,
     )
     ovs_cli.set(
         "open",
@@ -821,7 +863,17 @@ def _get_dpdk_pmd_dir(snap: Snap) -> str:
 
 
 def _configure_ovs(snap: Snap, ovs_cli: OVSCli, context: dict) -> bool:
-    """Configure OVS and return a boolean stating whether there were any changes made."""
+    """Configure OVS and return a boolean stating whether there were any changes made.
+
+    Args:
+        snap: The snap reference.
+        ovs_cli: The OVSCli instance.
+        context: The configuration context dictionary.
+
+    Returns:
+        True if any OVS configuration changes were made that require a restart,
+        False otherwise (including when external OVS is being used).
+    """
     config_changed = False
 
     # See the "Open_vSwitch TABLE" section of "man ovs-vswitchd.conf.db" for more
@@ -858,8 +910,9 @@ def _configure_ovs(snap: Snap, ovs_cli: OVSCli, context: dict) -> bool:
 
     if dpdk_settings:
         logging.debug("Applying DPDK settings: %s", dpdk_settings)
-        if ovs_cli.set_check("Open_vSwitch", ".", "other_config", dpdk_settings):
-            config_changed = True
+        with ovs_cli.with_timeout(15) as ovs_ctx:
+            if ovs_ctx.set_check("Open_vSwitch", ".", "other_config", dpdk_settings):
+                config_changed = True
     else:
         logging.debug("No OVS DPDK settings provided.")
 
@@ -978,12 +1031,250 @@ def _get_dpdk_mappings(snap: Snap, context: dict) -> dict:
     return mappings
 
 
-def _set_dpdk_mappings(snap: Snap, mappings: dict):
+def _set_dpdk_mappings(snap: Snap, mappings: dict) -> None:
+    """Store DPDK port mappings in snap configuration.
+
+    Args:
+        snap: The snap reference.
+        mappings: Dictionary containing DPDK port and bond mappings.
+    """
     logging.debug("Updated DPDK port mappings: %s", mappings)
     snap.config.set({"internal.dpdk-port-mappings": json.dumps(mappings or {})})
 
 
-def _process_dpdk_ports(snap: Snap, ovs_cli: OVSCli, context: dict):
+def _hwoffloading_ready(ovs_cli: OVSCli, current_config: dict) -> bool:
+    """Check if hardware offloading is ready in OVS.
+
+    This function checks if hardware offloading is enabled in OVS
+    when requested in the configuration context.
+
+    Args:
+        ovs_cli: The OVSCli instance connected to OVS.
+        current_config: The current OVS configuration dictionary.
+
+    Returns:
+        True if hardware offloading is ready, False otherwise.
+    """
+    actual_hw_offload = current_config.get("hw-offload", "")
+    if actual_hw_offload != "true":
+        logging.debug("hw-offload not enabled in OVS: actual=%s", actual_hw_offload)
+        return False
+
+    # Try to validate hardware offload is active via appctl
+    try:
+        offload_stats = ovs_cli.appctl("dpctl/offload-stats-show")
+        # A non-error response indicates offload is configured
+        logging.debug("Hardware offload stats: %s", offload_stats.strip()[:200])
+    except OVSCommandError as e:
+        logging.debug("Failed to query offload stats (may not be critical): %s", e)
+        # This is not necessarily a failure - the command might not be available
+        return False
+    return True
+
+
+def _get_ovs_other_config(ovs_cli: OVSCli) -> dict:
+    """Get OVS other_config from Open_vSwitch table.
+
+    Args:
+        ovs_cli: The OVSCli instance connected to OVS.
+
+    Returns:
+        Dictionary of other_config settings, or empty dict on error.
+    """
+    try:
+        return ovs_cli.list_table("Open_vSwitch", ".", ["other_config"]).get("other_config", {})
+    except OVSCommandError:
+        logging.debug("Failed to query OVS other_config")
+        return {}
+
+
+def _check_dpdk_init_config(ovs_cli: OVSCli, current_config: dict) -> bool:
+    """Check if dpdk-init setting matches expected value.
+
+    Args:
+        ovs_cli: The OVSCli instance connected to OVS.
+        current_config: The current OVS configuration dictionary.
+
+    Returns:
+        True if dpdk-init is correctly set or DPDK is not supported/expected,
+        False if there's a mismatch.
+    """
+    if not _dpdk_supported():
+        return True
+
+    expected_dpdk_init = "try"
+    actual_dpdk_init = current_config.get("dpdk-init", "")
+    if actual_dpdk_init != expected_dpdk_init:
+        logging.debug(
+            "dpdk-init mismatch: expected=%s, actual=%s",
+            expected_dpdk_init,
+            actual_dpdk_init,
+        )
+        return False
+    return True
+
+
+def _collect_all_ovs_interfaces(ovs_cli: OVSCli) -> set[str] | None:
+    """Collect all interfaces across all OVS bridges.
+
+    Args:
+        ovs_cli: The OVSCli instance connected to OVS.
+
+    Returns:
+        Set of all interface names, or None if bridges could not be listed.
+    """
+    try:
+        bridges = ovs_cli.list_bridges()
+    except OVSCommandError:
+        logging.debug("Failed to list OVS bridges")
+        return None
+
+    all_interfaces: set[str] = set()
+    for bridge in bridges:
+        try:
+            bridge_interfaces = ovs_cli.list_bridge_interfaces(bridge)
+            all_interfaces.update(bridge_interfaces)
+        except OVSCommandError:
+            logging.debug("Failed to list interfaces for bridge %s", bridge)
+
+    return all_interfaces
+
+
+def _check_dpdk_ports_exist(ports: dict, all_interfaces: set[str]) -> bool:
+    """Check if all expected DPDK ports exist in OVS.
+
+    Args:
+        ports: Dictionary of port mappings.
+        all_interfaces: Set of all OVS interface names.
+
+    Returns:
+        True if all ports exist, False otherwise.
+    """
+    for port_name, port_info in ports.items():
+        dpdk_port_name = port_info.get("dpdk_port_name", f"dpdk-{port_name}")
+        if dpdk_port_name not in all_interfaces:
+            logging.debug("DPDK port %s not found in OVS", dpdk_port_name)
+            return False
+    return True
+
+
+def _check_dpdk_bond_exists(ovs_cli: OVSCli, bond_name: str, bond_info: dict) -> bool:
+    """Check if a DPDK bond exists on its designated bridge.
+
+    Args:
+        ovs_cli: The OVSCli instance connected to OVS.
+        bond_name: Name of the bond.
+        bond_info: Dictionary containing bond configuration.
+
+    Returns:
+        True if bond exists, False otherwise.
+    """
+    bridge = bond_info.get("bridge")
+    if not bridge:
+        return True
+
+    try:
+        bridge_ports = ovs_cli.list_bridge_interfaces(bridge)
+        bond_ports = bond_info.get("ports", [])
+        dpdk_bond_ports = [f"dpdk-{p}" for p in bond_ports]
+        found = bond_name in bridge_ports or any(p in bridge_ports for p in dpdk_bond_ports)
+        if not found:
+            logging.debug("Bond %s not found on bridge %s", bond_name, bridge)
+            return False
+    except OVSCommandError:
+        logging.debug("Failed to query bridge %s for bond %s", bridge, bond_name)
+        return False
+
+    return True
+
+
+def _expected_dpdk_ports_ready(snap: Snap, ovs_cli: OVSCli, context: dict) -> bool:
+    """Check if all expected DPDK ports and bonds exist in OVS.
+
+    Args:
+        snap: The snap reference.
+        ovs_cli: The OVSCli instance connected to OVS.
+        context: The configuration context dictionary.
+
+    Returns:
+        True if all expected DPDK ports and bonds are present in OVS, False otherwise.
+    """
+    dpdk_mappings = _get_dpdk_mappings(snap, context)
+    ports = dpdk_mappings.get("ports", {})
+    bonds = dpdk_mappings.get("bonds", {})
+
+    all_interfaces = _collect_all_ovs_interfaces(ovs_cli)
+    if all_interfaces is None:
+        return False
+
+    if not _check_dpdk_ports_exist(ports, all_interfaces):
+        return False
+
+    for bond_name, bond_info in bonds.items():
+        if not _check_dpdk_bond_exists(ovs_cli, bond_name, bond_info):
+            return False
+
+    return True
+
+
+def _dpdk_config_is_ready(snap: Snap, ovs_cli: OVSCli, context: dict) -> bool:
+    """Validate comprehensive DPDK and hardware offload readiness.
+
+    This function validates that:
+    - DPDK is initialized when enabled
+    - OVS configuration (dpdk-init, hw-offload) matches expected values
+    - All expected DPDK ports and bonds exist in OVS
+
+    This is particularly useful when using external OVS where configuration
+    changes may require an OVS restart to take effect.
+
+    Args:
+        snap: The snap reference.
+        ovs_cli: The OVSCli instance connected to OVS.
+        context: The configuration context dictionary.
+
+    Returns:
+        True if DPDK configuration is fully ready, False if any mismatch detected.
+    """
+    ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
+    hw_offloading = context.get("network", {}).get("hw_offloading")
+
+    # If DPDK is not enabled and hw_offloading is not requested, configuration is ready
+    if not ovs_dpdk_enabled and not hw_offloading:
+        logging.debug("DPDK and hw_offloading not enabled, configuration is ready")
+        return True
+
+    # (a) Validate DPDK is initialized when enabled
+    if ovs_dpdk_enabled and not ovs_cli.get_dpdk_initialized():
+        logging.debug("DPDK enabled but not initialized in OVS")
+        return False
+
+    # (b) Verify dpdk-init and hw-offload settings match context values
+    current_config = _get_ovs_other_config(ovs_cli)
+    if not current_config:
+        logging.debug("Failed to get OVS configuration")
+        return False
+
+    # Check dpdk-init setting
+    if ovs_dpdk_enabled and not _check_dpdk_init_config(ovs_cli, current_config):
+        logging.debug("dpdk-init config mismatch")
+        return False
+
+    # Check hw-offload setting
+    if hw_offloading and not _hwoffloading_ready(ovs_cli, current_config):
+        logging.debug("Hardware offloading not ready in OVS")
+        return False
+
+    # (c) Verify all expected DPDK ports and bonds exist in OVS
+    if ovs_dpdk_enabled and not _expected_dpdk_ports_ready(snap, ovs_cli, context):
+        logging.debug("Not all expected DPDK ports/bonds are present in OVS")
+        return False
+
+    logging.debug("DPDK configuration is as expected")
+    return True
+
+
+def _process_dpdk_ports(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:
     ovs_dpdk_enabled = context.get("network", {}).get("ovs_dpdk_enabled")
     dpdk_ifaces = (context.get("network", {}).get("ovs_dpdk_ports") or "").split(",")
     dpdk_ifaces = [iface.strip() for iface in dpdk_ifaces if iface]
@@ -1158,45 +1449,44 @@ def _create_dpdk_ports_and_bonds(ovs_cli: OVSCli, dpdk_mappings: dict, dpdk_driv
     port_mappings = dpdk_mappings["ports"]
     bond_mappings = dpdk_mappings["bonds"]
 
-    with ovs_cli.transaction() as ovs_txn:
-        for port_name, port_config in port_mappings.items():
-            pci.ensure_driver_override(port_config["pci_address"], dpdk_driver)
-            if port_config["bond"]:
-                # Created separately.
-                continue
-            ovs_txn.add_bridge(port_config["bridge"], "netdev")
-            _add_dpdk_port(
-                ovs_txn,
-                bridge_name=port_config["bridge"],
-                dpdk_port_name=port_config["dpdk_port_name"],
-                pci_address=port_config["pci_address"],
-                mtu=port_config["mtu"],
-            )
+    for port_name, port_config in port_mappings.items():
+        pci.ensure_driver_override(port_config["pci_address"], dpdk_driver)
+        if port_config["bond"]:
+            # Created separately.
+            continue
+        ovs_cli.add_bridge(port_config["bridge"], "netdev")
+        _add_dpdk_port(
+            ovs_cli,
+            bridge_name=port_config["bridge"],
+            dpdk_port_name=port_config["dpdk_port_name"],
+            pci_address=port_config["pci_address"],
+            mtu=port_config["mtu"],
+        )
 
-        for bond_name, bond_config in bond_mappings.items():
-            bond_ports = []
-            for port_name in bond_config["ports"]:
-                port_info = port_mappings.get(port_name)
-                if not port_info:
-                    raise Exception("Missing dpdk port info: %s", port_name)
-                bond_ports.append(
-                    {
-                        "name": port_info["dpdk_port_name"],
-                        "pci_address": port_info["pci_address"],
-                        "mtu": port_info["mtu"],
-                    }
-                )
-            ovs_txn.add_bridge(bond_config["bridge"], "netdev")
-            _add_dpdk_bond(
-                ovs_txn,
-                bridge_name=bond_config["bridge"],
-                bond_name=bond_name,
-                dpdk_ports=bond_ports,
-                mtu=bond_config["mtu"],
-                bond_mode=bond_config["bond_mode"],
-                lacp_mode=bond_config["lacp_mode"],
-                lacp_time=bond_config["lacp_time"],
+    for bond_name, bond_config in bond_mappings.items():
+        bond_ports = []
+        for port_name in bond_config["ports"]:
+            port_info = port_mappings.get(port_name)
+            if not port_info:
+                raise Exception("Missing dpdk port info: %s", port_name)
+            bond_ports.append(
+                {
+                    "name": port_info["dpdk_port_name"],
+                    "pci_address": port_info["pci_address"],
+                    "mtu": port_info["mtu"],
+                }
             )
+        ovs_cli.add_bridge(bond_config["bridge"], "netdev")
+        _add_dpdk_bond(
+            ovs_cli,
+            bridge_name=bond_config["bridge"],
+            bond_name=bond_name,
+            dpdk_ports=bond_ports,
+            mtu=bond_config["mtu"],
+            bond_mode=bond_config["bond_mode"],
+            lacp_mode=bond_config["lacp_mode"],
+            lacp_time=bond_config["lacp_time"],
+        )
 
 
 def _add_dpdk_port(
@@ -1296,13 +1586,16 @@ def _add_dpdk_bond(
                 port["pci_address"],
                 port_mtu,
             )
-            ovs_cli.add_port(
-                bridge_name,
+            set_interface = [
+                "set",
+                "Interface",
                 port["name"],
-                port_type="dpdk",
-                options={"dpdk-devargs": port["pci_address"]},
-                mtu=port_mtu,
-            )
+                "type=dpdk",
+                f"options:dpdk-devargs={port['pci_address']}",
+            ]
+            if port_mtu:
+                set_interface.append(f"mtu-request={port_mtu}")
+            ovs_cli.vsctl(*set_interface)
             logging.debug("Port %s configured successfully", port["name"])
         except OVSCommandError as exc:
             logging.error(
@@ -1502,8 +1795,15 @@ def _parse_tls(snap: Snap, config_key: str) -> bytes | None:
 
 
 def _configure_tls(snap: Snap, ovs_cli: OVSCli) -> None:
-    """Configure TLS."""
-    _configure_ovn_tls(snap, ovs_cli)
+    """Configure TLS.
+
+    Configures TLS for OVN (when using internal OVS), libvirt, and CA bundles.
+
+    Args:
+        snap: The snap reference.
+        ovs_cli: The OVSCli instance.
+    """
+    _configure_ovn_tls(snap, ovs_cli, is_ovs_external())
     _configure_libvirt_tls(snap)
     _configure_cabundle_tls(snap)
 
@@ -1905,11 +2205,15 @@ def _configure_webdav_apache(snap: Snap, context: dict) -> None:
     webdav_cfg_path.chmod(0o644)
 
 
-def _configure_ovn_tls(snap: Snap, ovs_cli: OVSCli) -> None:
+def _configure_ovn_tls(snap: Snap, ovs_cli: OVSCli, external: bool) -> None:
     """Configure OVS/OVN TLS.
 
     :param snap: the snap reference
     :type snap: Snap
+    :param ovs_cli: the OVSCli instance
+    :type ovs_cli: OVSCli
+    :param external: whether OVS is external
+    :type external: bool
     :return: None
     """
     try:
@@ -1934,7 +2238,10 @@ def _configure_ovn_tls(snap: Snap, ovs_cli: OVSCli) -> None:
     ssl_key.write_bytes(ovn_key)
     ssl_key.chmod(PRIVATE_PERMS)
 
-    ovs_cli.set_ssl(str(ssl_key), str(ssl_cert), str(ssl_cacert))
+    if not external:
+        ovs_cli.set_ssl(str(ssl_key), str(ssl_cert), str(ssl_cacert))
+    else:
+        logging.info("Skipping OVS TLS configuration for external OVS")
 
 
 def _is_kvm_api_available() -> bool:
@@ -2122,6 +2429,49 @@ def _configure_ceph(snap) -> None:
     )
     if all(k in context for k in ("rbd-key", "rbd-secret-uuid")):
         _ensure_secret(context["rbd-secret-uuid"], context["rbd-key"])
+
+
+def _configure_networking(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:
+    """Configure networking."""
+    # Only configure OVS/OVN base settings when using internal OVS
+    is_external_ovs = is_ovs_external()
+    is_internal_ovs = not is_external_ovs
+    if is_internal_ovs:
+        _configure_ovn_base(snap, ovs_cli, context)
+        _configure_ovn_external_networking(snap, ovs_cli, context)
+    else:
+        _configure_ovn_base_external_ovs(snap, ovs_cli, context)
+
+    ovs_restart_required = _configure_ovs(snap, ovs_cli, context)
+
+    if ovs_restart_required:
+        if is_internal_ovs:
+            logging.info("internal-ovs: Restarting ovs-vswitchd to apply changes.")
+            ovs_vswitchd_service = snap.services.list()["ovs-vswitchd"]
+            ovs_vswitchd_service.stop()
+            ovs_vswitchd_service.start(enable=True)
+        else:
+            logging.info("external-ovs: Marking ovs-vswitchd for restart to apply changes.")
+            snap.config.set({"network.external-switch-restart": True})
+    else:
+        logging.info("ovs-vswitchd restart not required.")
+        # Do not override if the context already has the key set, it means
+        # it has not been restarted yet by the external caller.
+        if not context.get("network", {}).get("external_switch_restart"):
+            snap.config.set({"network.external-switch-restart": False})
+
+    _process_dpdk_ports(snap, ovs_cli, context)
+
+    # Check DPDK readiness when using external OVS
+    if is_external_ovs:
+        dpdk_ready = _dpdk_config_is_ready(snap, ovs_cli, context)
+        if not dpdk_ready:
+            logging.warning("DPDK configuration not ready - external OVS restart may be required")
+        else:
+            logging.info("DPDK configuration is ready")
+        # Do not set the network.external-switch-restart on detecting the current config,
+        # it's a bit unreliable for now. Set it when we actually change settings that require
+        # the restart
 
 
 def _configure_kvm(snap: Snap) -> None:
@@ -2425,6 +2775,74 @@ def _to_json_list(val):
     return [json.dumps(element) for element in val]
 
 
+def is_connected(name: str) -> bool:
+    """Check if a plug or slot is connected.
+
+    :param name: the plug/slot name.
+    :return: whether the plug/slot is connected.
+    """
+    try:
+        subprocess.check_call(["snapctl", "is-connected", name])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def is_ovs_external() -> bool:
+    """Check if OVN chassis plug is connected.
+
+    Result is cached during configure hook execution to avoid repeated
+    subprocess calls.
+    """
+    return is_connected(OVN_CHASSIS_PLUG)
+
+
+def ovs_switch_path(snap: Snap) -> Path:
+    """Get the OVS switch path.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: the OVS switch path
+    :rtype: Path
+    """
+    if not is_ovs_external():
+        logging.debug("%s not connected, internal ovs.", OVN_CHASSIS_PLUG)
+        switch_path = snap.paths.common / "run/openvswitch/"
+    else:
+        logging.debug("%s connected, external ovs.", OVN_CHASSIS_PLUG)
+        switch_path = snap.paths.data / "microovn/chassis/switch/"
+    return switch_path
+
+
+def ovs_switch_socket(snap: Snap) -> str:
+    """Get the OVSDB socket path.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: the OVSDB socket path
+    :rtype: str
+    """
+    switch_path = ovs_switch_path(snap)
+    return "unix:" + str(switch_path / "db.sock")
+
+
+def ovs_switchd_ctl_socket(snap: Snap) -> str | None:
+    """Get the OVS switchd ctl socket path.
+
+    :param snap: the snap reference
+    :type snap: Snap
+    :return: the OVS switchd ctl socket path
+    :rtype: str | None
+    """
+    switch_path = ovs_switch_path(snap)
+    pid_file = switch_path / "ovs-vswitchd.pid"
+    if not pid_file.exists():
+        return None
+    pid_value = pid_file.read_text(encoding="utf-8").strip()
+    return str(switch_path / f"ovs-vswitchd.{pid_value}.ctl")
+
+
 def configure(snap: Snap) -> None:
     """Runs the `configure` hook for the snap.
 
@@ -2444,33 +2862,33 @@ def configure(snap: Snap) -> None:
     _setup_secrets(snap)
     _detect_compute_flavors(snap)
 
-    ovs_cli = OVSCli()
+    ovs_socket = ovs_switch_socket(snap)
+    switchd_ctl_socket = ovs_switchd_ctl_socket(snap)
+    logging.info("Using OVS socket: %s, ctl socket: %s", ovs_socket, switchd_ctl_socket)
+    ovs_cli = OVSCli(ovs_socket, switchd_ctl_socket=switchd_ctl_socket)
 
     context = _get_configure_context(snap)
     exclude_services = _get_exclude_services(context)
     services = snap.services.list()
     for service in exclude_services:
-        services[service].stop()
+        services[service].stop(disable=True)
+
+    if not is_ovs_external():
+        _ensure_internal_ovs_services(snap, exclude_services)
 
     with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         _render_templates(snap, context)
         _configure_tls(snap, ovs_cli)
         _configure_webdav_apache(snap, context)
 
-    _configure_ovn_base(snap, ovs_cli, context)
-    _configure_ovn_external_networking(snap, ovs_cli, context)
-    ovs_restart_required = _configure_ovs(snap, ovs_cli, context)
-
-    if ovs_restart_required:
-        logging.info("Restarting ovs-vswitchd to apply changes.")
-        ovs_vswitchd_service = snap.services.list()["ovs-vswitchd"]
-        ovs_vswitchd_service.stop()
-        ovs_vswitchd_service.start(enable=True)
-    else:
-        logging.info("ovs-vswitchd restart not required.")
-
-    _process_dpdk_ports(snap, ovs_cli, context)
-
+    try:
+        _configure_networking(snap, ovs_cli, context)
+    except OVSTimeoutError as e:
+        if not is_ovs_external():
+            # Don't suppress timeouts when using internal OVS
+            # Only on refreshing with an external OVS does a timeout occur
+            raise
+        logging.warning(f"Suppressing timeout, expected during a refresh of the snap: {e}")
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
@@ -2530,12 +2948,62 @@ def _get_configure_context(snap: Snap) -> dict:
     _set_sriov_context(snap, context)
     _set_pci_context(snap, context)
 
+    # Add OVS socket path to network context for template rendering
+    context["network"]["ovs_socket_path"] = ovs_switch_socket(snap)
+
     return context
 
 
-def _get_exclude_services(context: dict) -> list:
-    exclude_services = _services_not_ready(context)
+# Services to exclude when using external OVS (ovn-chassis plug connected)
+EXTERNAL_OVS_SERVICES = [
+    "ovsdb-server",
+    "ovs-vswitchd",
+    "ovn-controller",
+    "ovs-exporter",
+]
+
+
+def _ensure_internal_ovs_services(snap: Snap, exclude_services: list[str]) -> None:
+    """Ensure internal OVS services are enabled when not excluded.
+
+    Args:
+        snap: The snap reference.
+        exclude_services: Services that should remain stopped.
+    """
+    services = snap.services.list()
+    enable_monitoring = snap.config.get("monitoring.enable")
+
+    for service in EXTERNAL_OVS_SERVICES:
+        if service in exclude_services:
+            continue
+        # ovs-exporter should only be enabled if monitoring is enabled
+        if service in MONITORING_SERVICES and not enable_monitoring:
+            continue
+        logging.info("Ensuring internal OVS service is enabled: %s", service)
+        services[service].start(enable=True)
+
+
+def _get_exclude_services(context: dict) -> list[str]:
+    """Get list of services to exclude based on configuration and external OVS state.
+
+    Returns a list of services that should be stopped because they are:
+    - Missing required configuration
+    - Not enabled by configuration
+    - Handled by external OVS when ovn-chassis plug is connected
+
+    Args:
+        context: The configuration context dictionary.
+
+    Returns:
+        List of service names to exclude.
+    """
+    exclude_services: list[str] = _services_not_ready(context)
     exclude_services.extend(_services_not_enabled_by_config(context))
+
+    if is_ovs_external():
+        logging.info("External OVS detected, excluding internal OVS services")
+        exclude_services.extend(EXTERNAL_OVS_SERVICES)
+
     logging.warning(f"{exclude_services} are missing required config, stopping")
     return exclude_services
 
@@ -2561,6 +3029,14 @@ def _set_pci_context(snap: Snap, context: dict) -> None:
 
 
 def _render_templates(snap: Snap, context: dict) -> None:
+    """Render configuration templates.
+
+    Renders all templates defined in TEMPLATES to their respective config files.
+
+    Args:
+        snap: The snap reference.
+        context: The configuration context dictionary.
+    """
     for config_file, template in TEMPLATES.items():
         tpl_name = template.get("template")
         if tpl_name is None:

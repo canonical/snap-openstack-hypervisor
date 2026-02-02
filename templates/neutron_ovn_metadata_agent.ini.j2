@@ -4,9 +4,10 @@
 [DEFAULT]
 nova_metadata_host = {{ node.ip_address }}
 metadata_proxy_shared_secret = {{ credentials.ovn_metadata_proxy_shared_secret }}
+debug = {{ logging.debug }}
 
 [ovs]
-ovsdb_connection = unix:{{ snap_common }}/run/openvswitch/db.sock
+ovsdb_connection = {{ network.ovs_socket_path }}
 
 [ovn]
 {% if network.ovn_sb_connection %}

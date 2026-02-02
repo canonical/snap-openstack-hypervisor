@@ -85,6 +85,7 @@ apps:
       - network
       - network-observe
       - network-setup-control
+      - ovn-chassis
       - hardware-observe
 
   # Libvirt
@@ -194,19 +195,21 @@ apps:
       - network
       - network-bind
       - microstack-support
+      - ovn-chassis
   ovn-trace:
     command: usr/bin/ovn-trace
     plugs:
       - network
       - network-bind
       - microstack-support
+      - ovn-chassis
   ovn-detrace:
     command: usr/bin/ovn-detrace
     plugs:
       - network
       - network-bind
       - microstack-support
-
+      - ovn-chassis
   ovs-vsctl:
     command: usr/bin/ovs-vsctl
     plugs:
@@ -214,18 +217,21 @@ apps:
       - network-control
       - process-control
       - microstack-support
+      - ovn-chassis
   ovs-appctl:
     command: usr/bin/ovs-appctl
     plugs:
       - network
       - process-control
       - microstack-support
+      - ovn-chassis
   ovs-ofctl:
     command: usr/bin/ovs-ofctl
     plugs:
       - network
       - process-control
       - microstack-support
+      - ovn-chassis
   ovs-dpctl:
     command: usr/bin/ovs-dpctl
     plugs:
@@ -233,6 +239,7 @@ apps:
       - network-control
       - process-control
       - microstack-support
+      - ovn-chassis
 
   nova-compute:
     command: 'bin/nova-compute-service'
@@ -242,6 +249,7 @@ apps:
       - network
       - network-bind
       - network-control
+      - ovn-chassis
       - firewall-control
       - hardware-observe
       - kvm
@@ -262,6 +270,7 @@ apps:
       - network-bind
       - network-control
       - network-observe
+      - ovn-chassis
       - microstack-support
       - firewall-control
 
@@ -865,6 +874,7 @@ hooks:
       - kvm
       - epa-info
       - etc-driverctl
+      - ovn-chassis
   connect-slot-hypervisor-config:
     plugs:
       - network
@@ -881,3 +891,7 @@ plugs:
     interface: system-files
     write:
     - /etc/driverctl.d
+  ovn-chassis:
+    interface: content
+    target: $SNAP_DATA/microovn/chassis
+    default-provider: microovn
