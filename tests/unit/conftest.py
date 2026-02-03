@@ -49,6 +49,12 @@ def os_makedirs():
 
 
 @pytest.fixture
+def shutil_chown():
+    with patch("shutil.chown") as p:
+        yield p
+
+
+@pytest.fixture
 def check_call():
     with patch("subprocess.check_call") as p:
         yield p
@@ -167,3 +173,13 @@ def get_pci_address():
     with patch("openstack_hypervisor.cli.pci_devices.get_pci_address") as p:
         p.side_effect = lambda iface: "pci-addr-%s" % iface
         yield p
+
+
+@pytest.fixture()
+def ovs_cli():
+    """Create a mock OVSCli instance for testing."""
+    from openstack_hypervisor.bridge_datapath import OVSCli
+
+    ovs_cli_instance = MagicMock(spec=OVSCli)
+    ovs_cli_instance.transaction.return_value.__enter__.return_value = ovs_cli_instance
+    yield ovs_cli_instance

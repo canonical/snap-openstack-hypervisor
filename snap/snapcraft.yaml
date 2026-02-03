@@ -6,7 +6,7 @@ description: |
   The OpenStack Hypervisor snap provides the requires components
   to operate a cloud hypervisor as part of an OpenStack deployment.
 assumes:
-- snapd2.72
+- snapd2.73
 grade: stable
 confinement: strict
 environment:
@@ -47,6 +47,8 @@ layout:
     symlink: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/qemu
   /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pulseaudio:
     symlink: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pulseaudio
+  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/swtpm:
+    symlink: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/swtpm
   /usr/lib/libvirt:
     symlink: $SNAP/usr/lib/libvirt
   /usr/share/libvirt:
@@ -63,6 +65,10 @@ layout:
     symlink: $SNAP_DATA/var/lib/libvirt
   /var/lib/openstack-hypervisor:
     bind: $SNAP_COMMON
+  /usr/lib/multipath:
+    symlink: $SNAP/lib/multipath
+  /etc/swtpm_setup.conf:
+    symlink: $SNAP_COMMON/etc/swtpm_setup.conf
 
 apps:
   openstack-hypervisor:
@@ -101,6 +107,9 @@ apps:
       - block-devices
       - microstack-support
       - system-observe
+      - dm-multipath
+      - nvme-control
+      - iscsi-initiator
     # Make sure KillMode=process is set in the resulting systemd unit instead of
     # the default KillMode=control-group to avoid the situation where stopping
     # libvirtd causes the forced power off scenario for all VMs; it also affects
@@ -233,6 +242,11 @@ apps:
       - microstack-support
       # Needs access to block devices so that blockdev --flushbufs works.
       - block-devices
+      - iscsi-initiator
+      - dm-multipath
+      - process-control
+      - mount-observe
+      - nvme-control
 
   neutron-ovn-metadata-agent:
     command: 'bin/neutron-ovn-metadata-agent-service'
@@ -552,6 +566,9 @@ parts:
     - ebtables
     - apparmor
     - libapparmor1
+    - swtpm
+    - swtpm-tools
+    - libtpms0
     meson-parameters:
     # Hypervisors
     - -Ddriver_qemu=enabled
@@ -687,6 +704,7 @@ parts:
       - python3-tz
       - haproxy
       - util-linux
+      - multipath-tools
       # following packages are explicitly declared, because they are inside core24
       # removed when core24 bug is fixed
       - python3-attr
@@ -720,10 +738,10 @@ parts:
     override-prime: |
       craftctl default
       pushd "$CRAFT_PRIME/usr/lib/python3/dist-packages"
-      # Apply patch, skipping requirements.txt if it doesn't exist (it's not in installed packages)
-      if ! patch -p1 --forward --reject-file=/dev/null < "$CRAFT_PROJECT_DIR/snap/patches/nova/0001-remotefs-http-driver.patch"; then
-          echo "WARNING: nova/0001-remotefs-http-driver.patch failed (likely already applied)" >&2
-      fi
+      path="$CRAFT_PROJECT_DIR/snap/patches/nova/0001-remotefs-http-driver.patch"
+      # Unapply patch, ignore on failure
+      patch -p1 --reverse --forward --quiet --batch --reject-file=/dev/null --input "$path" || true
+      patch -p1 --forward --input="$path"
       popd
 
   openstack-hypervisor:

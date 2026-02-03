@@ -5,6 +5,7 @@ import io
 import json
 import random
 import textwrap
+from pathlib import Path
 from unittest import mock
 
 import mock_netplan_configs
@@ -14,14 +15,95 @@ from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import hooks
 from openstack_hypervisor.cli import pci_devices
+from openstack_hypervisor.hooks import OwnedPath
+
+
+class TestOwnedPath:
+    """Tests for the OwnedPath class."""
+
+    def test_owned_path_stores_owner_and_group(self):
+        """Test that OwnedPath stores owner and group attributes."""
+        path = OwnedPath("some/path", owner="testuser", group="testgroup")
+        assert path._owner == "testuser"
+        assert path._group == "testgroup"
+        assert str(path) == "some/path"
+
+    def test_owned_path_with_only_owner(self):
+        """Test OwnedPath with only owner specified."""
+        path = OwnedPath("some/path", owner="testuser")
+        assert path._owner == "testuser"
+        assert path._group is None
+
+    def test_owned_path_with_only_group(self):
+        """Test OwnedPath with only group specified."""
+        path = OwnedPath("some/path", group="testgroup")
+        assert path._owner is None
+        assert path._group == "testgroup"
+
+    def test_owned_path_with_no_ownership(self):
+        """Test OwnedPath without owner or group specified."""
+        path = OwnedPath("some/path")
+        assert path._owner is None
+        assert path._group is None
+
+    def test_owned_path_is_path_subclass(self):
+        """Test that OwnedPath is a subclass of Path."""
+        path = OwnedPath("some/path", owner="user", group="group")
+        assert isinstance(path, Path)
 
 
 class TestHooks:
     """Contains tests for openstack_hypervisor.hooks."""
 
-    def test_install_hook(self, snap):
+    def test_install_hook(self, mocker, snap, shutil_chown):
         """Tests the install hook."""
+        mocker.patch.object(hooks, "_secure_copy")
         hooks.install(snap)
+
+    def test_mkdirs_calls_chown_for_owned_paths(self, mocker, snap):
+        """Test that _mkdirs calls shutil.chown for OwnedPath directories."""
+        mock_chown = mocker.patch("shutil.chown")
+        mocker.patch("os.makedirs")
+
+        # Patch DATA_DIRS and COMMON_DIRS to test OwnedPath behavior
+        test_owned_path = OwnedPath("test/owned", owner="testuser", group="testgroup")
+        test_regular_path = Path("test/regular")
+        mocker.patch.object(hooks, "DATA_DIRS", [test_owned_path, test_regular_path])
+        mocker.patch.object(hooks, "COMMON_DIRS", [])
+
+        hooks._mkdirs(snap)
+
+        # chown should be called only for OwnedPath with owner/group
+        mock_chown.assert_called_once()
+        call_args = mock_chown.call_args
+        assert call_args.kwargs["user"] == "testuser"
+        assert call_args.kwargs["group"] == "testgroup"
+
+    def test_mkdirs_skips_chown_for_regular_paths(self, mocker, snap):
+        """Test that _mkdirs does not call shutil.chown for regular Path objects."""
+        mock_chown = mocker.patch("shutil.chown")
+        mocker.patch("os.makedirs")
+
+        test_regular_path = Path("test/regular")
+        mocker.patch.object(hooks, "DATA_DIRS", [test_regular_path])
+        mocker.patch.object(hooks, "COMMON_DIRS", [])
+
+        hooks._mkdirs(snap)
+
+        mock_chown.assert_not_called()
+
+    def test_mkdirs_skips_chown_for_owned_path_without_ownership(self, mocker, snap):
+        """Test that _mkdirs skips chown for OwnedPath without owner/group."""
+        mock_chown = mocker.patch("shutil.chown")
+        mocker.patch("os.makedirs")
+
+        test_owned_path = OwnedPath("test/owned")  # No owner or group
+        mocker.patch.object(hooks, "DATA_DIRS", [test_owned_path])
+        mocker.patch.object(hooks, "COMMON_DIRS", [])
+
+        hooks._mkdirs(snap)
+
+        mock_chown.assert_not_called()
 
     def test_get_local_ip_by_default_route(self, mocker, ifaddresses):
         """Test get local ip by default route."""
@@ -39,60 +121,50 @@ class TestHooks:
 
     def test__get_default_gw_iface_fallback(self):
         """Test default gateway iface fallback returns iface."""
-        proc_net_route = textwrap.dedent(
-            """\
+        proc_net_route = textwrap.dedent("""\
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000000	020A010A	0003	0	0	0	00000000	0	0	0
         ens10f3	000A010A	00000000	0001	0	0	0	00FEFFFF	0	0	0
         ens10f2	000A010A	00000000	0001	0	0	0	00FEFFFF	0	0	0
         ens10f0	000A010A	00000000	0001	0	0	0	00FEFFFF	0	0	0
         ens4f0	0018010A	00000000	0001	0	0	0	00FCFFFF	0	0	0
-        ens10f1	0080F50A	00000000	0001	0	0	0	00F8FFFF	0	0	0"""
-        )
+        ens10f1	0080F50A	00000000	0001	0	0	0	00F8FFFF	0	0	0""")
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() == "ens10f0"
 
     def test__get_default_gw_iface_fallback_no_0_dest(self):
         """Test route has 000 mask but no 000 dest, then returns None."""
-        proc_net_route = textwrap.dedent(
-            """
+        proc_net_route = textwrap.dedent("""
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000001	020A010A	0003	0	0	0	00000000	0	0	0
-        """
-        )
+        """)
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() is None
 
     def test__get_default_gw_iface_fallback_no_0_mask(self):
         """Test route has a 000 dest but no 000 mask, then returns None."""
-        proc_net_route = textwrap.dedent(
-            """
+        proc_net_route = textwrap.dedent("""
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000000	020A010A	0003	0	0	0	0000000F	0	0	0
-        """
-        )
+        """)
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() is None
 
     def test__get_default_gw_iface_fallback_not_up(self):
         """Tests route is a gateway but not up, then returns None."""
-        proc_net_route = textwrap.dedent(
-            """
+        proc_net_route = textwrap.dedent("""
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000000	020A010A	0002	0	0	0	00000000	0	0	0
-        """
-        )
+        """)
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() is None
 
     def test__get_default_gw_iface_fallback_up_but_not_gateway(self):
         """Tests route is up but not a gateway, then returns None."""
-        proc_net_route = textwrap.dedent(
-            """
+        proc_net_route = textwrap.dedent("""
         Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
         ens10f0	00000000	020A010A	0001	0	0	0	00000000	0	0	0
-        """
-        )
+        """)
         with mock.patch("builtins.open", mock.mock_open(read_data=proc_net_route)):
             assert hooks._get_default_gw_iface_fallback() is None
 
@@ -104,31 +176,34 @@ class TestHooks:
         mock_fs_loader.assert_called_once_with(searchpath=str(snap.paths.snap / "templates"))
 
     def test_configure_hook(
-        self, mocker, snap, check_call, link_lookup, split, addr, link, ip_interface
+        self, mocker, snap, check_call, link_lookup, split, addr, link, ip_interface, shutil_chown
     ):
         """Tests the configure hook."""
         mock_template = mocker.Mock()
-        mocker.patch.object(hooks, "_ovs_vsctl_set_check")
+        mocker.patch.object(hooks, "_secure_copy")
         mocker.patch.object(hooks, "_process_dpdk_ports")
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
+        mocker.patch.object(hooks, "OVSCli", spec=hooks.OVSCli)
         mock_write_text = mocker.patch.object(hooks.Path, "write_text")
         mock_chmod = mocker.patch.object(hooks.Path, "chmod")
         mocker.patch(
-            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket", return_value=("0-3", "4-7")
+            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
+            return_value=("0-3", "4-7"),
         )
         hooks.configure(snap)
         mock_template.render.assert_called()
         mock_write_text.assert_called()
         mock_chmod.assert_called()
 
-    def test_configure_hook_exception(self, mocker, snap, os_makedirs, check_call):
+    def test_configure_hook_exception(self, mocker, snap, os_makedirs, check_call, shutil_chown):
         """Tests the configure hook raising an exception while writing file."""
         mock_template = mocker.Mock()
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mocker.patch.object(hooks.Path, "write_text")
         mocker.patch.object(hooks.Path, "chmod")
         mocker.patch(
-            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket", return_value=("0-3", "4-7")
+            "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
+            return_value=("0-3", "4-7"),
         )
         with pytest.raises(FileNotFoundError):
             hooks.configure(snap)
@@ -207,45 +282,31 @@ class TestHooks:
         config["masakari"] = {"enable": True}
         assert hooks._services_not_enabled_by_config(config) == []
 
-    def test_list_bridge_ifaces(self, check_output):
-        check_output.return_value = b"int1\nint2\n"
-        assert hooks._list_bridge_ifaces("br1") == ["int1", "int2"]
-        check_output.assert_called_once_with(["ovs-vsctl", "--retry", "list-ifaces", "br1"])
-
-    def test_add_interface_to_bridge(self, check_call, check_output):
-        check_output.return_value = b"int1\nint2\n"
-        hooks._add_interface_to_bridge("br1", "int3")
-        check_call.assert_called_once_with(
-            [
-                "ovs-vsctl",
-                "--retry",
-                "add-port",
-                "br1",
-                "int3",
-                "--",
-                "set",
-                "Port",
-                "int3",
-                "external-ids:microstack-function=ext-port",
-            ]
+    def test_add_interface_to_bridge(self, ovs_cli):
+        ovs_cli.list_bridge_interfaces.return_value = ["int1", "int2"]
+        hooks._add_interface_to_bridge(ovs_cli, "br1", "int3")
+        ovs_cli.add_port.assert_called_once_with(
+            "br1",
+            "int3",
+            external_ids={"microstack-function": "ext-port"},
         )
 
-    def test_add_interface_to_bridge_noop(self, check_call, check_output):
-        check_output.return_value = b"int1\nint2\n"
-        hooks._add_interface_to_bridge("br1", "int2")
-        assert not check_call.called
+    def test_add_interface_to_bridge_noop(self, ovs_cli):
+        ovs_cli.list_bridge_interfaces.return_value = ["int1", "int2"]
+        hooks._add_interface_to_bridge(ovs_cli, "br1", "int2")
+        assert not ovs_cli.add_port.called
 
-    def test_del_interface_from_bridge(self, check_call, check_output):
-        check_output.return_value = b"int1\nint2\n"
-        hooks._del_interface_from_bridge("br1", "int2")
-        check_call.assert_called_once_with(["ovs-vsctl", "--retry", "del-port", "br1", "int2"])
+    def test_del_interface_from_bridge(self, ovs_cli):
+        ovs_cli.list_bridge_interfaces.return_value = ["int1", "int2"]
+        hooks._del_interface_from_bridge(ovs_cli, "br1", "int2")
+        ovs_cli.del_port.assert_called_once_with("br1", "int2")
 
-    def test_del_interface_from_bridge_noop(self, check_call, check_output):
-        check_output.return_value = b"int1\nint2\n"
-        hooks._del_interface_from_bridge("br1", "int3")
-        assert not check_call.called
+    def test_del_interface_from_bridge_noop(self, ovs_cli):
+        ovs_cli.list_bridge_interfaces.return_value = ["int1", "int2"]
+        hooks._del_interface_from_bridge(ovs_cli, "br1", "int3")
+        assert not ovs_cli.del_port.called
 
-    def test_get_external_ports_on_bridge(self, check_output, mocker):
+    def test_get_external_ports_on_bridge(self, ovs_cli):
         port_data = {
             "data": [
                 [
@@ -300,41 +361,42 @@ class TestHooks:
                 "vlan_mode",
             ],
         }
+        ovs_cli.find.return_value = port_data
+        ovs_cli.list_bridge_interfaces.return_value = ["enp6s0"]
+        assert hooks._get_external_ports_on_bridge(ovs_cli, "br-ex") == ["enp6s0"]
+        ovs_cli.list_bridge_interfaces.return_value = []
+        assert hooks._get_external_ports_on_bridge(ovs_cli, "br-ex") == []
 
-        check_output.return_value = str.encode(json.dumps(port_data))
-        mock_list_ifaces = mocker.patch.object(hooks, "_list_bridge_ifaces")
-        mock_list_ifaces.return_value = ["enp6s0"]
-        assert hooks._get_external_ports_on_bridge("br-ex") == ["enp6s0"]
-        mock_list_ifaces.return_value = []
-        assert hooks._get_external_ports_on_bridge("br-ex") == []
-
-    def test_ensure_single_nic_on_bridge(self, mocker):
+    def test_ensure_single_nic_on_bridge(self, ovs_cli, mocker):
         mock_get_external_ports_on_bridge = mocker.patch.object(
             hooks, "_get_external_ports_on_bridge"
         )
         mock_add_interface_to_bridge = mocker.patch.object(hooks, "_add_interface_to_bridge")
         mock_del_interface_from_bridge = mocker.patch.object(hooks, "_del_interface_from_bridge")
         mock_get_external_ports_on_bridge.return_value = ["eth0", "eth1"]
-        hooks._ensure_single_nic_on_bridge("br-ex", "eth1")
+        hooks._ensure_single_nic_on_bridge(ovs_cli, "br-ex", "eth1")
         assert not mock_add_interface_to_bridge.called
-        mock_del_interface_from_bridge.assert_called_once_with("br-ex", "eth0")
+        mock_del_interface_from_bridge.assert_called_once_with(ovs_cli, "br-ex", "eth0")
 
         mock_get_external_ports_on_bridge.reset_mock()
         mock_add_interface_to_bridge.reset_mock()
         mock_del_interface_from_bridge.reset_mock()
         mock_get_external_ports_on_bridge.return_value = []
-        hooks._ensure_single_nic_on_bridge("br-ex", "eth1")
-        mock_add_interface_to_bridge.assert_called_once_with("br-ex", "eth1")
+        hooks._ensure_single_nic_on_bridge(ovs_cli, "br-ex", "eth1")
+        mock_add_interface_to_bridge.assert_called_once_with(ovs_cli, "br-ex", "eth1")
         assert not mock_del_interface_from_bridge.called
 
-    def test_del_external_nics_from_bridge(self, mocker):
+    def test_del_external_nics_from_bridge(self, ovs_cli, mocker):
         mock_get_external_ports_on_bridge = mocker.patch.object(
             hooks, "_get_external_ports_on_bridge"
         )
         mock_del_interface_from_bridge = mocker.patch.object(hooks, "_del_interface_from_bridge")
         mock_get_external_ports_on_bridge.return_value = ["eth0", "eth1"]
-        hooks._del_external_nics_from_bridge("br-ex")
-        expect = [mock.call("br-ex", "eth0"), mock.call("br-ex", "eth1")]
+        hooks._del_external_nics_from_bridge(ovs_cli, "br-ex")
+        expect = [
+            mock.call(ovs_cli, "br-ex", "eth0"),
+            mock.call(ovs_cli, "br-ex", "eth1"),
+        ]
         mock_del_interface_from_bridge.assert_has_calls(expect)
 
     def test_set_secret(self, mocker):
@@ -626,87 +688,6 @@ class TestHooks:
         )
         assert context["network"]["hw_offloading"]
 
-    @mock.patch("subprocess.check_output")
-    def test_ovs_vsctl_list_table(self, mock_check_output):
-        mock_data = """
-{"data":[[["map",[["dpdk-init","try"],["dpdk-socket-mem","4096"]]]]],"headings":["other_config"]}
-"""
-        mock_check_output.return_value = mock_data.encode("utf-8")
-
-        out = hooks._ovs_vsctl_list_table("mock-table", "mock-record", ["mock-column"])
-
-        mock_check_output.assert_called_once_with(
-            [
-                "ovs-vsctl",
-                "--retry",
-                "--format",
-                "json",
-                "--if-exists",
-                "--columns=mock-column",
-                "list",
-                "mock-table",
-                "mock-record",
-            ]
-        )
-
-        exp_out = {
-            "other_config": {
-                "dpdk-init": "try",
-                "dpdk-socket-mem": "4096",
-            }
-        }
-        assert exp_out == out
-
-    @mock.patch("subprocess.check_call")
-    def test_ovs_vsctl_set(self, mock_check_call):
-        hooks._ovs_vsctl_set(
-            "mock-table", "mock-record", "mock-column", {"key1": "val1", "key2": "val2"}
-        )
-
-        mock_check_call.assert_called_once_with(
-            [
-                "ovs-vsctl",
-                "--retry",
-                "set",
-                "mock-table",
-                "mock-record",
-                "mock-column:key1=val1",
-                "mock-column:key2=val2",
-            ]
-        )
-
-    @mock.patch.object(hooks, "_ovs_vsctl_list_table")
-    @mock.patch.object(hooks, "_ovs_vsctl_set")
-    def test_ovs_vsctl_set_check(self, mock_vsctl_set, mock_list_table):
-        mock_current_settings = {
-            "dpdk-init": "try",
-            "dpdk-socket-mem": "4096",
-        }
-        mock_updates = {
-            "hw-offload": True,
-        }
-        mock_applied_settings = dict(mock_current_settings)
-        mock_applied_settings.update(mock_updates)
-
-        mock_list_table.side_effect = [
-            {"other_config": mock_current_settings},
-            {"other_config": mock_applied_settings},
-        ]
-
-        config_changed = hooks._ovs_vsctl_set_check(
-            "mock-table", "mock-record", "other_config", mock_updates
-        )
-        assert config_changed
-
-        config_changed = hooks._ovs_vsctl_set_check(
-            "mock-table", "mock-record", "other_config", mock_updates
-        )
-        assert not config_changed
-
-        mock_vsctl_set.assert_called_once_with(
-            "mock-table", "mock-record", "other_config", mock_updates
-        )
-
 
 @pytest.mark.parametrize(
     "cpu_shared_set,allocated_cores,should_include",
@@ -716,12 +697,20 @@ class TestHooks:
     ],
 )
 def test_nova_conf_cpu_pinning_injection(
-    mocker, snap, cpu_shared_set, allocated_cores, should_include, check_call, check_output
+    mocker,
+    snap,
+    cpu_shared_set,
+    allocated_cores,
+    should_include,
+    check_call,
+    check_output,
+    shutil_chown,
 ):
     mocker.patch(
         "openstack_hypervisor.hooks.get_cpu_pinning_from_socket",
         return_value=(cpu_shared_set, allocated_cores),
     )
+    mocker.patch("openstack_hypervisor.hooks._secure_copy")
     mock_template = mock.Mock()
     mocker.patch("openstack_hypervisor.hooks._get_template", return_value=mock_template)
     mocker.patch("openstack_hypervisor.hooks.Path.write_text")
@@ -920,14 +909,13 @@ def test_process_dpdk_netplan_already_processed(mock_get_netplan_config, get_pci
 @mock.patch("openstack_hypervisor.netplan.remove_bond")
 @mock.patch("openstack_hypervisor.netplan.remove_ethernet")
 @mock.patch("openstack_hypervisor.netplan.apply_netplan")
-@mock.patch.object(hooks, "_remove_ovs_port_from_bridge")
 def test_update_netplan_dpdk_ports_with_bond(
-    mock_remove_ovs_port_from_bridge,
     mock_apply_netplan,
     mock_remove_ethernet,
     mock_remove_bond,
     mock_remove_interface_from_bridge,
     mock_get_netplan_config,
+    ovs_cli,
     get_pci_address,
 ):
     mock_get_netplan_config.return_value = yaml.safe_load(
@@ -938,10 +926,10 @@ def test_update_netplan_dpdk_ports_with_bond(
     dpdk_ifaces = ["eth1", "eth2"]
 
     hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
-    hooks._update_netplan_dpdk_ports(dpdk_mappings)
+    hooks._update_netplan_dpdk_ports(ovs_cli, dpdk_mappings)
 
     mock_remove_interface_from_bridge.assert_called_once_with("br0", "bond0")
-    mock_remove_ovs_port_from_bridge.assert_called_once_with("br0", "bond0")
+    ovs_cli.del_port.assert_called_once_with("br0", "bond0")
     mock_remove_bond.assert_called_once_with("bond0")
     mock_remove_ethernet.assert_has_calls([mock.call(iface) for iface in ["eth1", "eth2"]])
 
@@ -953,14 +941,13 @@ def test_update_netplan_dpdk_ports_with_bond(
 @mock.patch("openstack_hypervisor.netplan.remove_bond")
 @mock.patch("openstack_hypervisor.netplan.remove_ethernet")
 @mock.patch("openstack_hypervisor.netplan.apply_netplan")
-@mock.patch.object(hooks, "_remove_ovs_port_from_bridge")
 def test_update_netplan_dpdk_ports_without_bond(
-    mock_remove_ovs_port_from_bridge,
     mock_apply_netplan,
     mock_remove_ethernet,
     mock_remove_bond,
     mock_remove_interface_from_bridge,
     mock_get_netplan_config,
+    ovs_cli,
     get_pci_address,
 ):
     mock_get_netplan_config.return_value = yaml.safe_load(
@@ -971,10 +958,10 @@ def test_update_netplan_dpdk_ports_without_bond(
     dpdk_ifaces = ["eth1", "eth2"]
 
     hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
-    hooks._update_netplan_dpdk_ports(dpdk_mappings)
+    hooks._update_netplan_dpdk_ports(ovs_cli, dpdk_mappings)
 
     mock_remove_interface_from_bridge.assert_called_once_with("br0", "eth1")
-    mock_remove_ovs_port_from_bridge.assert_called_once_with("br0", "eth1")
+    ovs_cli.del_port.assert_called_once_with("br0", "eth1")
     mock_remove_ethernet.assert_called_once_with("eth1")
 
     mock_apply_netplan.assert_called_once_with()
@@ -985,14 +972,13 @@ def test_update_netplan_dpdk_ports_without_bond(
 @mock.patch("openstack_hypervisor.netplan.remove_bond")
 @mock.patch("openstack_hypervisor.netplan.remove_ethernet")
 @mock.patch("openstack_hypervisor.netplan.apply_netplan")
-@mock.patch.object(hooks, "_remove_ovs_port_from_bridge")
 def test_update_netplan_reapply_not_required(
-    mock_remove_ovs_port_from_bridge,
     mock_apply_netplan,
     mock_remove_ethernet,
     mock_remove_bond,
     mock_remove_interface_from_bridge,
     mock_get_netplan_config,
+    ovs_cli,
     get_pci_address,
 ):
     mock_get_netplan_config.return_value = yaml.safe_load(
@@ -1005,25 +991,20 @@ def test_update_netplan_reapply_not_required(
     dpdk_ifaces = ["fake-iface"]
 
     hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
-    hooks._update_netplan_dpdk_ports(dpdk_mappings)
+    hooks._update_netplan_dpdk_ports(ovs_cli, dpdk_mappings)
 
     mock_remove_interface_from_bridge.assert_not_called()
-    mock_remove_ovs_port_from_bridge.assert_not_called()
+    ovs_cli.del_port.assert_not_called()
     mock_remove_ethernet.assert_not_called()
     mock_apply_netplan.assert_not_called()
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
 @mock.patch("openstack_hypervisor.pci.ensure_driver_override")
-@mock.patch.object(hooks, "_add_ovs_bridge")
-@mock.patch.object(hooks, "_add_dpdk_port")
-@mock.patch.object(hooks, "_add_dpdk_bond")
 def test_create_dpdk_ports_and_bonds(
-    mock_add_dpdk_bond,
-    mock_add_dpdk_port,
-    mock_add_ovs_bridge,
     mock_ensure_driver_override,
     mock_get_netplan_config,
+    ovs_cli,
     get_pci_address,
 ):
     mock_get_netplan_config.return_value = yaml.safe_load(
@@ -1034,46 +1015,26 @@ def test_create_dpdk_ports_and_bonds(
     dpdk_ifaces = ["eth1", "eth2"]
 
     hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
-    hooks._create_dpdk_ports_and_bonds(dpdk_mappings, "mock-driver")
+    hooks._create_dpdk_ports_and_bonds(ovs_cli, dpdk_mappings, "mock-driver")
 
     mock_ensure_driver_override.assert_has_calls(
-        [mock.call("pci-addr-eth1", "mock-driver"), mock.call("pci-addr-eth2", "mock-driver")]
+        [
+            mock.call("pci-addr-eth1", "mock-driver"),
+            mock.call("pci-addr-eth2", "mock-driver"),
+        ]
     )
-    mock_add_ovs_bridge.assert_called_once_with("br0", "netdev")
-    mock_add_dpdk_bond.assert_called_once_with(
-        bridge_name="br0",
-        bond_name="bond0",
-        dpdk_ports=[
-            {
-                "name": "dpdk-eth1",
-                "pci_address": "pci-addr-eth1",
-                "mtu": 1500,
-            },
-            {
-                "name": "dpdk-eth2",
-                "pci_address": "pci-addr-eth2",
-                "mtu": 1500,
-            },
-        ],
-        mtu=1500,
-        bond_mode="balance-tcp",
-        lacp_mode="active",
-        lacp_time="slow",
-    )
-    mock_add_dpdk_port.assert_not_called()
+    ovs_cli.add_bridge.assert_called_with("br0", "netdev")
+    ovs_cli.add_bond.assert_called_once()
+    # _add_dpdk_bond creates the bond and then configures each DPDK port
+    assert ovs_cli.add_port.call_count == 2
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
 @mock.patch("openstack_hypervisor.pci.ensure_driver_override")
-@mock.patch.object(hooks, "_add_ovs_bridge")
-@mock.patch.object(hooks, "_add_dpdk_port")
-@mock.patch.object(hooks, "_add_dpdk_bond")
 def test_create_dpdk_ports(
-    mock_add_dpdk_bond,
-    mock_add_dpdk_port,
-    mock_add_ovs_bridge,
     mock_ensure_driver_override,
     mock_get_netplan_config,
+    ovs_cli,
     get_pci_address,
 ):
     mock_get_netplan_config.return_value = yaml.safe_load(
@@ -1084,62 +1045,45 @@ def test_create_dpdk_ports(
     dpdk_ifaces = ["eth1", "eth2"]
 
     hooks._process_dpdk_netplan_config(dpdk_mappings, dpdk_ifaces)
-    hooks._create_dpdk_ports_and_bonds(dpdk_mappings, "mock-driver")
+    hooks._create_dpdk_ports_and_bonds(ovs_cli, dpdk_mappings, "mock-driver")
 
     mock_ensure_driver_override.assert_called_once_with("pci-addr-eth1", "mock-driver")
-    mock_add_ovs_bridge.assert_called_once_with("br0", "netdev")
-    mock_add_dpdk_port.assert_called_once_with(
-        bridge_name="br0", dpdk_port_name="dpdk-eth1", pci_address="pci-addr-eth1", mtu=1500
+    ovs_cli.add_bridge.assert_called_once_with("br0", "netdev")
+    # _add_dpdk_port is called with ovs_cli, and then it calls ovs_cli.add_port
+    ovs_cli.add_port.assert_called_once_with(
+        "br0",
+        "dpdk-eth1",
+        port_type="dpdk",
+        options={"dpdk-devargs": "pci-addr-eth1"},
+        mtu=1500,
     )
-    mock_add_dpdk_bond.assert_not_called()
+    ovs_cli.add_bond.assert_not_called()
 
 
-def test_add_ovs_bridge(check_call):
-    hooks._add_ovs_bridge("bridge-name", "datapath-name", "fake-arg")
-
-    check_call.assert_called_once_with(
-        [
-            "ovs-vsctl",
-            "--retry",
-            "--may-exist",
-            "add-br",
-            "bridge-name",
-            "--",
-            "set",
-            "bridge",
-            "bridge-name",
-            "datapath_type=datapath-name",
-            "fake-arg",
-        ]
+def test_add_dpdk_port(ovs_cli):
+    hooks._add_dpdk_port(
+        ovs_cli,
+        bridge_name="bridge-name",
+        dpdk_port_name="dpdk-port-name",
+        pci_address="pci-address",
+        mtu=9000,
     )
 
-
-def test_add_dpdk_port(check_call):
-    hooks._add_dpdk_port("bridge-name", "dpdk-port-name", "pci-address", 9000)
-
-    check_call.assert_called_once_with(
-        [
-            "ovs-vsctl",
-            "--may-exist",
-            "add-port",
-            "bridge-name",
-            "dpdk-port-name",
-            "--",
-            "set",
-            "Interface",
-            "dpdk-port-name",
-            "type=dpdk",
-            "options:dpdk-devargs=pci-address",
-            "mtu-request=9000",
-        ]
-    )
-
-
-def test_add_dpdk_bond(check_call):
-    hooks._add_dpdk_bond(
+    ovs_cli.add_port.assert_called_once_with(
         "bridge-name",
-        "bond-name",
-        [
+        "dpdk-port-name",
+        port_type="dpdk",
+        options={"dpdk-devargs": "pci-address"},
+        mtu=9000,
+    )
+
+
+def test_add_dpdk_bond(ovs_cli):
+    hooks._add_dpdk_bond(
+        ovs_cli,
+        bridge_name="bridge-name",
+        bond_name="bond-name",
+        dpdk_ports=[
             {
                 "name": "dpdk-eth0",
                 "pci_address": "pci-address-eth0",
@@ -1149,66 +1093,33 @@ def test_add_dpdk_bond(check_call):
                 "pci_address": "pci-address-eth1",
             },
         ],
-        9000,
-        "balance-tcp",
-        "active",
-        "fast",
+        mtu=9000,
+        bond_mode="balance-tcp",
+        lacp_mode="active",
+        lacp_time="fast",
     )
 
-    check_call.assert_called_once_with(
-        [
-            "ovs-vsctl",
-            "--may-exist",
-            "add-bond",
-            "bridge-name",
-            "bond-name",
-            "dpdk-eth0",
-            "dpdk-eth1",
-            "--",
-            "set",
-            "port",
-            "bond-name",
-            "bond_mode=balance-tcp",
-            "--",
-            "set",
-            "port",
-            "bond-name",
-            "lacp=active",
-            "--",
-            "set",
-            "port",
-            "bond-name",
-            "other-config:lacp-time=fast",
-            "--",
-            "set",
-            "Interface",
-            "dpdk-eth0",
-            "type=dpdk",
-            "options:dpdk-devargs=pci-address-eth0",
-            "mtu-request=9000",
-            "--",
-            "set",
-            "Interface",
-            "dpdk-eth1",
-            "type=dpdk",
-            "options:dpdk-devargs=pci-address-eth1",
-            "mtu-request=9000",
-        ]
+    ovs_cli.add_bond.assert_called_once_with(
+        "bridge-name",
+        "bond-name",
+        ["dpdk-eth0", "dpdk-eth1"],
+        bond_mode="balance-tcp",
+        lacp_mode="active",
+        lacp_time="fast",
     )
-
-
-def test_remove_ovs_port_from_bridge(check_call):
-    hooks._remove_ovs_port_from_bridge("bridge-name", "port-name")
-    check_call.assert_called_once_with(
-        ["ovs-vsctl", "--if-exists", "del-port", "bridge-name", "port-name"]
-    )
+    assert ovs_cli.add_port.call_count == 2
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
 @mock.patch.object(hooks, "_update_netplan_dpdk_ports")
 @mock.patch.object(hooks, "_create_dpdk_ports_and_bonds")
 def test_process_dpdk_ports(
-    mock_create_dpdk_ports, mock_update_netplan, mock_get_netplan_config, get_pci_address, snap
+    mock_create_dpdk_ports,
+    mock_update_netplan,
+    mock_get_netplan_config,
+    get_pci_address,
+    ovs_cli,
+    snap,
 ):
     mock_get_netplan_config.return_value = yaml.safe_load(
         io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE)
@@ -1221,7 +1132,7 @@ def test_process_dpdk_ports(
         }
     }
 
-    hooks._process_dpdk_ports(snap, context)
+    hooks._process_dpdk_ports(snap, ovs_cli, context)
 
     # eth2 will be skipped since it's not connected to a bridge.
     exp_mappings = {
@@ -1240,15 +1151,20 @@ def test_process_dpdk_ports(
         {"internal.dpdk-port-mappings": json.dumps(exp_mappings)}
     )
 
-    mock_update_netplan.assert_called_once_with(exp_mappings)
-    mock_create_dpdk_ports.assert_called_once_with(exp_mappings, "vfio-pci")
+    mock_update_netplan.assert_called_once_with(ovs_cli, exp_mappings)
+    mock_create_dpdk_ports.assert_called_once_with(ovs_cli, exp_mappings, "vfio-pci")
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
 @mock.patch.object(hooks, "_update_netplan_dpdk_ports")
 @mock.patch.object(hooks, "_create_dpdk_ports_and_bonds")
 def test_process_dpdk_ports_skipped(
-    mock_create_dpdk_ports, mock_update_netplan, mock_get_netplan_config, get_pci_address, snap
+    mock_create_dpdk_ports,
+    mock_update_netplan,
+    mock_get_netplan_config,
+    get_pci_address,
+    ovs_cli,
+    snap,
 ):
     mock_get_netplan_config.return_value = yaml.safe_load(
         io.StringIO(mock_netplan_configs.MOCK_NETPLAN_OVS_BRIDGE)
@@ -1260,7 +1176,7 @@ def test_process_dpdk_ports_skipped(
             "ovs_dpdk_ports": "eth1,eth2",
         }
     }
-    hooks._process_dpdk_ports(snap, context)
+    hooks._process_dpdk_ports(snap, ovs_cli, context)
 
     context = {
         "network": {
@@ -1268,8 +1184,7 @@ def test_process_dpdk_ports_skipped(
             "ovs_dpdk_ports": "",
         }
     }
-    hooks._process_dpdk_ports(snap, context)
-
-    snap.config.set.assert_not_called()
+    hooks._process_dpdk_ports(snap, ovs_cli, context)
     mock_update_netplan.assert_not_called()
     mock_create_dpdk_ports.assert_not_called()
+    snap.config.set.assert_not_called()
