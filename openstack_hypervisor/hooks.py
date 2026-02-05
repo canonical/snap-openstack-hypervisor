@@ -347,6 +347,7 @@ DEFAULT_CONFIG = {
     "compute.pci-excluded-devices": [],
     "compute.pci-aliases": [],
     "compute.key-manager-enabled": False,
+    "compute.multipath-forced": False,
     "sev.reserved-host-memory-mb": UNSET,
     # Neutron
     # These 2 options are deprecated, kept as a compatibility layer
@@ -2410,6 +2411,15 @@ def _set_config_context(context, group, key, val):
     context[group][key] = val
 
 
+def _is_multipathd_available() -> bool:
+    """Check if multipath tools are available on the system."""
+    process = subprocess.run(["multipathd", "show", "status"])
+    if process.returncode != 0:
+        logging.warning("Multipath daemon is not running or multipath tools are not available.")
+        return False
+    return True
+
+
 def _to_json_list(val):
     """Convert a list of dictionaries (optionally as a string) to a list of JSONs.
 
@@ -2509,6 +2519,10 @@ def _get_configure_context(snap: Snap) -> dict:
     ).as_dict()
     context["compute"]["allocated_cores"] = allocated_cores
     context["compute"]["cpu_shared_set"] = cpu_shared_set
+
+    context["compute"]["multipath_enabled"] = (
+        context["compute"].get("multipath_forced", False) or _is_multipathd_available()
+    )
 
     context.update(
         {
