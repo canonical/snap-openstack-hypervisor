@@ -715,6 +715,7 @@ def test_nova_conf_cpu_pinning_injection(
     mocker.patch("openstack_hypervisor.hooks._get_template", return_value=mock_template)
     mocker.patch("openstack_hypervisor.hooks.Path.write_text")
     mocker.patch("openstack_hypervisor.hooks.Path.chmod")
+    mocker.patch("openstack_hypervisor.hooks._is_multipathd_available")
     for fn in [
         "_configure_ovs",
         "_configure_ovn_base",
