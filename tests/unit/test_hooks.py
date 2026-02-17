@@ -720,6 +720,7 @@ def test_nova_conf_cpu_pinning_injection(
         "_configure_ovs",
         "_configure_ovn_base",
         "_configure_ovn_external_networking",
+        "_configure_ovn_base_external_ovs",
         "_configure_kvm",
         "_configure_monitoring_services",
         "_configure_ceph",
@@ -1027,7 +1028,7 @@ def test_create_dpdk_ports_and_bonds(
     ovs_cli.add_bridge.assert_called_with("br0", "netdev")
     ovs_cli.add_bond.assert_called_once()
     # _add_dpdk_bond creates the bond and then configures each DPDK port
-    assert ovs_cli.add_port.call_count == 2
+    assert ovs_cli.vsctl.call_count == 2
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
@@ -1108,7 +1109,7 @@ def test_add_dpdk_bond(ovs_cli):
         lacp_mode="active",
         lacp_time="fast",
     )
-    assert ovs_cli.add_port.call_count == 2
+    assert ovs_cli.vsctl.call_count == 2
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
@@ -1189,3 +1190,295 @@ def test_process_dpdk_ports_skipped(
     mock_update_netplan.assert_not_called()
     mock_create_dpdk_ports.assert_not_called()
     snap.config.set.assert_not_called()
+
+
+class TestExternalOVS:
+    """Tests for external OVS (ovn-chassis plug) functionality."""
+
+    def test_external_ovs_connected(self, mocker):
+        """Test external_ovs returns True when plug is connected."""
+        mock_check_call = mocker.patch("subprocess.check_call")
+        mock_check_call.return_value = 0
+        assert hooks.is_ovs_external() is True
+        mock_check_call.assert_called_once_with(
+            ["snapctl", "is-connected", hooks.OVN_CHASSIS_PLUG]
+        )
+
+    def test_external_ovs_disconnected(self, mocker):
+        """Test external_ovs returns False when plug is disconnected."""
+        import subprocess
+
+        mock_check_call = mocker.patch("subprocess.check_call")
+        mock_check_call.side_effect = subprocess.CalledProcessError(1, "cmd")
+        assert hooks.is_ovs_external() is False
+
+    def test_ovs_switch_socket_internal(self, mocker, snap):
+        """Test ovs_switch_socket returns internal socket when not connected."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        result = hooks.ovs_switch_socket(snap)
+        assert "run/openvswitch/db.sock" in result
+        assert result.startswith("unix:")
+
+    def test_ovs_switch_socket_external(self, mocker, snap):
+        """Test ovs_switch_socket returns external socket when connected."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        result = hooks.ovs_switch_socket(snap)
+        assert "microovn/chassis/switch/db.sock" in result
+        assert result.startswith("unix:")
+
+    def test_configure_ovn_base_external_ovs_skips_without_ip(self, mocker, snap, ovs_cli):
+        """Test external OVS base config skips when no IP is set."""
+        snap.config.get.side_effect = lambda key: None
+
+        hooks._configure_ovn_base_external_ovs(snap, ovs_cli, {"network": {}})
+
+        ovs_cli.set.assert_not_called()
+
+
+class TestExcludeServices:
+    """Tests for _get_exclude_services function."""
+
+    def test_exclude_external_ovs_services(self, mocker, snap):
+        """Test that external OVS services are excluded when plug is connected."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        mocker.patch.object(hooks, "_services_not_ready", return_value=[])
+        mocker.patch.object(hooks, "_services_not_enabled_by_config", return_value=[])
+
+        result = hooks._get_exclude_services({})
+
+        assert "ovsdb-server" in result
+        assert "ovs-vswitchd" in result
+        assert "ovn-controller" in result
+        assert "ovs-exporter" in result
+
+    def test_exclude_services_internal_ovs(self, mocker, snap):
+        """Test that OVS services are not excluded when plug is disconnected."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        mocker.patch.object(hooks, "_services_not_ready", return_value=[])
+        mocker.patch.object(hooks, "_services_not_enabled_by_config", return_value=[])
+
+        result = hooks._get_exclude_services({})
+
+        assert "ovsdb-server" not in result
+        assert "ovs-vswitchd" not in result
+        assert "ovn-controller" not in result
+
+
+class TestEnsureInternalOVSServices:
+    """Tests for _ensure_internal_ovs_services function."""
+
+    def test_starts_non_excluded_services(self, snap):
+        services = {name: mock.Mock() for name in hooks.EXTERNAL_OVS_SERVICES}
+        snap.services.list.return_value = services
+        snap.config.get.return_value = True  # monitoring.enable = True
+
+        hooks._ensure_internal_ovs_services(snap, exclude_services=["ovsdb-server"])
+
+        services["ovsdb-server"].start.assert_not_called()
+        services["ovs-vswitchd"].start.assert_called_once_with(enable=True)
+        services["ovn-controller"].start.assert_called_once_with(enable=True)
+        services["ovs-exporter"].start.assert_called_once_with(enable=True)
+
+    def test_does_not_enable_ovs_exporter_when_monitoring_disabled(self, snap):
+        services = {name: mock.Mock() for name in hooks.EXTERNAL_OVS_SERVICES}
+        snap.services.list.return_value = services
+        snap.config.get.return_value = False  # monitoring.enable = False
+
+        hooks._ensure_internal_ovs_services(snap, exclude_services=[])
+
+        services["ovsdb-server"].start.assert_called_once_with(enable=True)
+        services["ovs-vswitchd"].start.assert_called_once_with(enable=True)
+        services["ovn-controller"].start.assert_called_once_with(enable=True)
+        services["ovs-exporter"].start.assert_not_called()
+
+
+class TestConfigureNetworking:
+    """Tests for _configure_networking function."""
+
+    def test_external_ovs_clears_restart_flag_when_ready(self, mocker, snap, ovs_cli):
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        mocker.patch.object(hooks, "_configure_ovn_base_external_ovs")
+        mocker.patch.object(hooks, "_configure_ovs", return_value=False)
+        mocker.patch.object(hooks, "_process_dpdk_ports")
+        mocker.patch.object(hooks, "_dpdk_config_is_ready", return_value=True)
+
+        hooks._configure_networking(snap, ovs_cli, {"network": {}})
+
+        snap.config.set.assert_any_call({"network.external-switch-restart": False})
+
+    def test_external_ovs_keeps_restart_flag_when_context_set(self, mocker, snap, ovs_cli):
+        """Test that external-switch-restart is not overridden if already set in context."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        mocker.patch.object(hooks, "_configure_ovn_base_external_ovs")
+        mocker.patch.object(hooks, "_configure_ovs", return_value=False)
+        mocker.patch.object(hooks, "_process_dpdk_ports")
+        mocker.patch.object(hooks, "_dpdk_config_is_ready", return_value=True)
+
+        # Context has external_switch_restart already set to True (set by external caller)
+        context = {"network": {"external_switch_restart": True}}
+
+        hooks._configure_networking(snap, ovs_cli, context)
+
+        # Verify config.set was NOT called with False when context had it set to True
+        for call in snap.config.set.call_args_list:
+            if call[0][0].get("network.external-switch-restart") is False:
+                # This should not happen when context has it set
+                assert False, "Should not override external_switch_restart when set in context"
+
+    def test_internal_ovs_always_restarts_when_required(self, mocker, snap, ovs_cli):
+        """Test that internal OVS restarts immediately when changes require it."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        mocker.patch.object(hooks, "_configure_ovn_base")
+        mocker.patch.object(hooks, "_configure_ovn_external_networking")
+        mocker.patch.object(hooks, "_configure_ovs", return_value=True)
+        mocker.patch.object(hooks, "_process_dpdk_ports")
+
+        # Mock the service
+        mock_service = mocker.MagicMock()
+        snap.services.list.return_value = {"ovs-vswitchd": mock_service}
+
+        hooks._configure_networking(snap, ovs_cli, {"network": {}})
+
+        # Should restart the service immediately
+        mock_service.stop.assert_called_once()
+        mock_service.start.assert_called_once_with(enable=True)
+
+
+class TestDPDKConfigReady:
+    """Tests for _dpdk_config_is_ready function."""
+
+    def test_ready_when_dpdk_not_enabled(self, mocker, snap, ovs_cli):
+        """Test returns True when DPDK is not enabled."""
+        context = {"network": {"ovs_dpdk_enabled": False, "hw_offloading": False}}
+
+        result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
+
+        assert result is True
+
+    def test_not_ready_when_dpdk_not_initialized(self, mocker, snap, ovs_cli):
+        """Test returns False when DPDK is enabled but not initialized."""
+        ovs_cli.get_dpdk_initialized.return_value = False
+
+        context = {"network": {"ovs_dpdk_enabled": True, "hw_offloading": False}}
+
+        result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
+
+        assert result is False
+        ovs_cli.get_dpdk_initialized.assert_called_once()
+
+    def test_ready_when_dpdk_initialized(self, mocker, snap, ovs_cli):
+        """Test returns True when DPDK is properly initialized."""
+        mocker.patch.object(hooks, "_dpdk_supported", return_value=True)
+        ovs_cli.get_dpdk_initialized.return_value = True
+        ovs_cli.list_table.return_value = {"other_config": {"dpdk-init": "try"}}
+        ovs_cli.list_bridges.return_value = []
+
+        # Mock internal.dpdk_port_mappings to return empty
+        mocker.patch.object(hooks, "_get_dpdk_mappings", return_value={"ports": {}, "bonds": {}})
+
+        context = {
+            "network": {"ovs_dpdk_enabled": True, "hw_offloading": False},
+            "internal": {},
+        }
+
+        result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
+
+        assert result is True
+
+    def test_not_ready_when_config_mismatch(self, mocker, snap, ovs_cli):
+        """Test returns False when DPDK config doesn't match expected."""
+        mocker.patch.object(hooks, "_dpdk_supported", return_value=True)
+        ovs_cli.get_dpdk_initialized.return_value = True
+        ovs_cli.list_table.return_value = {"other_config": {"dpdk-init": "false"}}
+
+        context = {
+            "network": {"ovs_dpdk_enabled": True, "hw_offloading": False},
+            "internal": {},
+        }
+
+        result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
+
+        assert result is False
+
+    def test_not_ready_when_hw_offload_not_enabled(self, mocker, snap, ovs_cli):
+        """Test returns False when hw-offload is expected but not enabled."""
+        ovs_cli.list_table.return_value = {"other_config": {"hw-offload": "false"}}
+
+        context = {"network": {"ovs_dpdk_enabled": False, "hw_offloading": True}}
+
+        result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
+
+        assert result is False
+
+    def test_ready_when_hw_offload_enabled(self, mocker, snap, ovs_cli):
+        """Test returns True when hw-offload is properly configured."""
+        ovs_cli.list_table.return_value = {"other_config": {"hw-offload": "true"}}
+        ovs_cli.appctl.return_value = "offload stats"
+
+        context = {"network": {"ovs_dpdk_enabled": False, "hw_offloading": True}}
+
+        result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
+
+        assert result is True
+
+    def test_not_ready_when_dpdk_port_missing(self, mocker, snap, ovs_cli):
+        """Test returns False when expected DPDK port is missing."""
+        mocker.patch.object(hooks, "_dpdk_supported", return_value=True)
+        ovs_cli.get_dpdk_initialized.return_value = True
+        ovs_cli.list_table.return_value = {"other_config": {"dpdk-init": "try"}}
+        ovs_cli.list_bridges.return_value = ["br0"]
+        ovs_cli.list_bridge_interfaces.return_value = []  # No interfaces
+
+        mocker.patch.object(
+            hooks,
+            "_get_dpdk_mappings",
+            return_value={
+                "ports": {
+                    "eth0": {
+                        "dpdk_port_name": "dpdk-eth0",
+                        "bridge": "br0",
+                    }
+                },
+                "bonds": {},
+            },
+        )
+
+        context = {
+            "network": {"ovs_dpdk_enabled": True, "hw_offloading": False},
+            "internal": {},
+        }
+
+        result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
+
+        assert result is False
+
+    def test_ready_when_all_dpdk_ports_exist(self, mocker, snap, ovs_cli):
+        """Test returns True when all expected DPDK ports exist."""
+        mocker.patch.object(hooks, "_dpdk_supported", return_value=True)
+        ovs_cli.get_dpdk_initialized.return_value = True
+        ovs_cli.list_table.return_value = {"other_config": {"dpdk-init": "try"}}
+        ovs_cli.list_bridges.return_value = ["br0"]
+        ovs_cli.list_bridge_interfaces.return_value = ["dpdk-eth0"]
+
+        mocker.patch.object(
+            hooks,
+            "_get_dpdk_mappings",
+            return_value={
+                "ports": {
+                    "eth0": {
+                        "dpdk_port_name": "dpdk-eth0",
+                        "bridge": "br0",
+                    }
+                },
+                "bonds": {},
+            },
+        )
+
+        context = {
+            "network": {"ovs_dpdk_enabled": True, "hw_offloading": False},
+            "internal": {},
+        }
+
+        result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
+
+        assert result is True

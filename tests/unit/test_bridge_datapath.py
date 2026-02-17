@@ -625,3 +625,81 @@ class TestOVSCli:
                 "port-name",
                 "options:dpdk-devargs=pci-address",
             )
+
+    def test_appctl_success(self):
+        """Test appctl executes successfully and returns output."""
+        ovs = OVSCli("unix:/some/db.sock", switchd_ctl_socket="unix:/some/ctl.sock")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = "dpctl/show output"
+            mock_run.return_value.returncode = 0
+
+            result = ovs.appctl("dpctl/show")
+
+            assert result == "dpctl/show output"
+            mock_run.assert_called_once()
+            call_args = mock_run.call_args
+            assert call_args[0][0] == [
+                "ovs-appctl",
+                "--target",
+                "unix:/some/ctl.sock",
+                "dpctl/show",
+            ]
+
+    def test_appctl_no_socket_raises_error(self):
+        """Test appctl raises OVSCommandError when switchd_ctl_socket is not set."""
+        ovs = OVSCli("unix:/some/db.sock")
+        with pytest.raises(OVSCommandError, match="switchd_ctl_socket is not configured"):
+            ovs.appctl("dpctl/show")
+
+    def test_appctl_binary_not_found(self):
+        """Test appctl raises OVSCommandError when binary not found."""
+        ovs = OVSCli("unix:/some/db.sock", switchd_ctl_socket="unix:/some/ctl.sock")
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = FileNotFoundError()
+
+            with pytest.raises(OVSCommandError, match="ovs-appctl binary not found"):
+                ovs.appctl("dpctl/show")
+
+    def test_appctl_command_error(self):
+        """Test appctl raises OVSCommandError on command failure."""
+        import subprocess
+
+        ovs = OVSCli("unix:/some/db.sock", switchd_ctl_socket="unix:/some/ctl.sock")
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.CalledProcessError(1, "cmd", stderr="error message")
+
+            with pytest.raises(OVSCommandError, match="error message"):
+                ovs.appctl("dpctl/show")
+
+    def test_get_dpdk_initialized_true(self):
+        """Test get_dpdk_initialized returns True when DPDK is initialized."""
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl") as mock_vsctl:
+            mock_vsctl.return_value = '"true"\n'
+
+            result = ovs.get_dpdk_initialized()
+
+            assert result is True
+            mock_vsctl.assert_called_once_with(
+                "get", "Open_vSwitch", ".", "dpdk_initialized", skip_transaction=True
+            )
+
+    def test_get_dpdk_initialized_false(self):
+        """Test get_dpdk_initialized returns False when DPDK is not initialized."""
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl") as mock_vsctl:
+            mock_vsctl.return_value = '"false"\n'
+
+            result = ovs.get_dpdk_initialized()
+
+            assert result is False
+
+    def test_get_dpdk_initialized_on_error(self):
+        """Test get_dpdk_initialized returns False on command error."""
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl") as mock_vsctl:
+            mock_vsctl.side_effect = OVSCommandError("error")
+
+            result = ovs.get_dpdk_initialized()
+
+            assert result is False

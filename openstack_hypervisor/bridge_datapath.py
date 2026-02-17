@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TypedDict
@@ -60,6 +61,10 @@ class OVSCommandError(OVSError):
     """Raised when querying OVS state fails."""
 
 
+class OVSTimeoutError(OVSError, TimeoutError):
+    """Raised when an OVS command times out."""
+
+
 def _normalize_ovs_vsctl_value(raw_value: str) -> str | None:
     """Normalize ovs-vsctl output values into plain strings."""
     cleaned = raw_value.strip()
@@ -81,7 +86,6 @@ def _parse_ovsdb_data(data):
         if data[0] == "map":
             return {_parse_ovsdb_data(key): _parse_ovsdb_data(value) for key, value in data[1]}
         if data[0] == "uuid":
-            import uuid
 
             return uuid.UUID(data[1])
     return data
@@ -90,15 +94,24 @@ def _parse_ovsdb_data(data):
 class OVSCli:
     """Client for interacting with Open vSwitch via ovs-vsctl."""
 
-    def __init__(self, db_sock: str | None = None):
+    def __init__(
+        self,
+        db_sock: str | None = None,
+        switchd_ctl_socket: str | None = None,
+        timeout: int | None = None,
+    ):
         """Initialize OVS CLI client.
 
         Args:
             db_sock: Optional database socket path to use for all commands.
+            switchd_ctl_socket: Optional vswitchd control socket path for appctl commands.
+            timeout: Optional default timeout in seconds for commands.
         """
         self.db_sock = db_sock
+        self.switchd_ctl_socket = switchd_ctl_socket
         self._in_transaction: bool = False
         self._transaction_commands: list[list[str]] = []
+        self._timeout = timeout
 
     @contextlib.contextmanager
     def transaction(self, retry: bool = True) -> Generator["OVSCli", None, None]:
@@ -134,6 +147,23 @@ class OVSCli:
         finally:
             self._in_transaction = False
             self._transaction_commands = []
+
+    @contextlib.contextmanager
+    def with_timeout(self, timeout: int) -> Generator["OVSCli", None, None]:
+        """Context manager to temporarily set a command timeout.
+
+        Args:
+            timeout: Timeout in seconds to set for commands within the context.
+
+        Yields:
+            self: The OVSCli instance with updated timeout.
+        """
+        original_timeout = self._timeout
+        self._timeout = timeout
+        try:
+            yield self
+        finally:
+            self._timeout = original_timeout
 
     def commit(self, retry) -> str:
         """Execute all batched commands in a single ovs-vsctl transaction.
@@ -187,6 +217,7 @@ class OVSCli:
             cmd.append("--db=" + self.db_sock)
         if retry:
             cmd.append("--retry")
+        timeout = timeout or self._timeout
         if timeout is not None:
             cmd.append(f"--timeout={timeout}")
         cmd.extend(args)
@@ -205,6 +236,8 @@ class OVSCli:
             stderr = (exc.stderr or "").strip()
             stdout = (exc.stdout or "").strip()
             details = stderr or stdout or f"Command failed with exit code {exc.returncode}"
+            if "Alarm clock" in details:
+                raise OVSTimeoutError(details) from exc
             raise OVSCommandError(details) from exc
 
         return completed.stdout
@@ -608,6 +641,73 @@ class OVSCli:
 
         logging.info("Configuring OVS SSL with certificate: %s", certificate)
         self.vsctl("set-ssl", private_key, certificate, ca_cert)
+
+    def appctl(self, *args: str) -> str:
+        """Run ovs-appctl with the provided arguments and return stdout.
+
+        ovs-appctl is used to query and control OVS daemons at runtime.
+        Common use cases include querying DPDK status and hardware offload statistics.
+
+        Args:
+            *args: Arguments to pass to ovs-appctl (e.g., "dpctl/show", "dpif/show").
+
+        Returns:
+            The stdout output from the command.
+
+        Raises:
+            OVSCommandError: If the command fails, ovs-appctl is not found,
+                            or if switchd_ctl_socket is not configured.
+
+        Example:
+            >>> ovs_cli.appctl("dpctl/show")  # Query datapath
+            >>> ovs_cli.appctl("dpctl/offload-stats-show")  # Query offload stats
+        """
+        if not self.switchd_ctl_socket:
+            raise OVSCommandError(
+                "switchd_ctl_socket is not configured. Cannot run appctl command. "
+                "Ensure external OVS is properly connected."
+            )
+
+        cmd = ["ovs-appctl", "--target", self.switchd_ctl_socket]
+        cmd.extend(args)
+        logging.debug("Executing command: %s", " ".join(cmd))
+
+        try:
+            completed = subprocess.run(  # nosec B603
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise OVSCommandError("ovs-appctl binary not found") from exc
+        except subprocess.CalledProcessError as exc:  # pragma: no cover - defensive
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = stderr or stdout or f"Command failed with exit code {exc.returncode}"
+            raise OVSCommandError(details) from exc
+
+        return completed.stdout
+
+    def get_dpdk_initialized(self) -> bool:
+        """Check if DPDK is initialized in OVS.
+
+        Queries the Open_vSwitch table to determine if DPDK has been
+        successfully initialized.
+
+        Returns:
+            True if DPDK is initialized (dpdk_initialized="true"), False otherwise.
+
+        Raises:
+            OVSCommandError: If the command fails.
+        """
+        try:
+            result = self.vsctl(
+                "get", "Open_vSwitch", ".", "dpdk_initialized", skip_transaction=True
+            )
+            return result.strip().strip('"').lower() == "true"
+        except OVSCommandError:
+            return False
 
 
 def resolve_bridge_mappings(  # noqa: C901

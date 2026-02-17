@@ -8,6 +8,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from snaphelpers import Snap, SnapConfig, SnapServices
 
+from openstack_hypervisor import hooks
+
+
+@pytest.fixture(autouse=True)
+def clear_ovs_external_cache():
+    """Clear the lru_cache on is_ovs_external before each test."""
+    hooks.is_ovs_external.cache_clear()
+
+
 libvirt_mock = MagicMock()
 libvirt_mock.VIR_DOMAIN_RUNNING = 1
 libvirt_mock.VIR_DOMAIN_SHUTDOWN = 5
@@ -182,4 +191,6 @@ def ovs_cli():
 
     ovs_cli_instance = MagicMock(spec=OVSCli)
     ovs_cli_instance.transaction.return_value.__enter__.return_value = ovs_cli_instance
+    # Set default switchd_ctl_socket to avoid errors in tests
+    ovs_cli_instance.switchd_ctl_socket = "unix:/some/ctl.sock"
     yield ovs_cli_instance
