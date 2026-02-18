@@ -189,6 +189,9 @@ cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
 {% if telemetry.enable -%}
 [oslo_messaging_notifications]
 driver = messagingv2
+
+[notifications]
+notification_format = versioned
 {%- endif %}
 
 [oslo_messaging_rabbit]
