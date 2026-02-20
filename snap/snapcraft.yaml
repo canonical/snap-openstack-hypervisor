@@ -895,4 +895,3 @@ plugs:
   ovn-chassis:
     interface: content
     target: $SNAP_DATA/microovn/chassis
-    default-provider: microovn
