@@ -875,6 +875,7 @@ hooks:
       - epa-info
       - etc-driverctl
       - ovn-chassis
+      - dm-multipath
   connect-slot-hypervisor-config:
     plugs:
       - network
