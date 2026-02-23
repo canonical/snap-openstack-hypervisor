@@ -157,7 +157,6 @@ LAYOUT_DIRS = [
     Path("var/webdav-lock"),
     Path("log/apache2"),
     Path("run/apache2"),
-    Path("etc/apache2"),
 ]
 SECRET_XML = string.Template("""
 <secret ephemeral='no' private='no'>
@@ -2120,17 +2119,14 @@ def _configure_webdav_tls(snap: Snap, cacert: bytes, cert: bytes, key: bytes) ->
     nova_ca = nova_dir / "ca-cert.pem"
     _template_tls_file(cacert, nova_ca, [])
 
+    # To cleanup drop old folder:
     common_base = snap.paths.common
     tls_parent = common_base / Path("apache-webdav")
     webdav_tls_dir = tls_parent / "tls"
-
-    apache_cert = webdav_tls_dir / "servercert.pem"
-    apache_key = webdav_tls_dir / "serverkey.pem"
-    apache_ca = webdav_tls_dir / "ca-cert.pem"
-
-    _secure_copy(nova_cert, apache_cert, mode=0o644)
-    _secure_copy(nova_key, apache_key, mode=0o600)
-    _secure_copy(nova_ca, apache_ca, mode=0o644)
+    try:
+        shutil.rmtree(webdav_tls_dir)
+    except FileNotFoundError:
+        pass
 
 
 def _configure_webdav_apache(snap: Snap, context: dict) -> None:
@@ -2186,6 +2182,15 @@ def _configure_webdav_apache(snap: Snap, context: dict) -> None:
     listen_port = "10099"
     listen_address = f"{listen_ip}:{listen_port}"
 
+    certs_hash = hashlib.blake2b(digest_size=16)
+    for item in ("cacert", "cert", "key"):
+        try:
+            if value := snap.config.get(f"compute.{item}"):
+                certs_hash.update(bytes(value, encoding="utf-8"))
+        except UnknownConfigKey:
+            # TLS not ready yet, will be configured later. Use default hash value.
+            pass
+
     template_context = {
         "server_root": str(server_root),
         "pid_file": str(pid_file),
@@ -2198,6 +2203,7 @@ def _configure_webdav_apache(snap: Snap, context: dict) -> None:
         "client_log": str(client_log),
         "dav_lock_db": str(dav_lock_db),
         "webdav_root": str(webdav_root_fs),
+        "certs_hash": certs_hash.hexdigest(),
     }
 
     template = _get_template(snap, "webdav.conf.j2")

@@ -63,6 +63,7 @@ neutron-sriov-nic-agent-service = "openstack_hypervisor.services:neutron_sriov_n
 ceilometer-compute-agent-service = "openstack_hypervisor.services:ceilometer_compute_agent"
 ovs-exporter-service = "openstack_hypervisor.services:ovs_exporter"
 masakari-instancemonitor-service = "openstack_hypervisor.services:masakari_instancemonitor"
+file-transfer-service = "openstack_hypervisor.services:file_transfer"
 hypervisor = "openstack_hypervisor.cli.main:main"
 
 [project.entry-points.'snaphelpers.hooks']

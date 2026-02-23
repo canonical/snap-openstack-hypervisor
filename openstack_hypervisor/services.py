@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: 2022 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
+import binascii
 import logging
+import os
 import subprocess
 import sys
 from functools import partial
 from pathlib import Path
 
-from snaphelpers import Snap
+from snaphelpers import Snap, UnknownConfigKey
 
 from openstack_hypervisor.log import setup_logging
 
@@ -261,3 +264,108 @@ class OVSExporterService:
 
 
 ovs_exporter = partial(entry_point, OVSExporterService)
+
+
+class FileTransferService:
+    """A python service object used to run the Apache WebDAV file transfer service."""
+
+    def run(self, snap: Snap) -> int:
+        """Runs the Apache WebDAV file transfer service.
+
+        Starts Apache with mTLS WebDAV for Nova live-migration file transfers.
+        TLS material is loaded into anonymous memfds (FDs 3-5) so Apache
+        inherits them via /proc/self/fd/{3,4,5} without ever holding a
+        filesystem path to the key.  The config is opened directly as FD 6.
+
+        :param snap: the snap context
+        :type snap: Snap
+        :return: exit code of the process
+        :rtype: int
+        """
+        setup_logging(snap.paths.common / "file-transfer-service.log")
+
+        config_file = snap.paths.common / "etc" / "apache2" / "webdav.conf"
+        # TLS material is decoded directly from snap config and written into
+        # anonymous memfds. No filesystem path to the key is ever visible in
+        # /proc/self/fd/N that Apache uses.
+        tls_sources = [
+            (3, "cert", "compute.cert"),
+            (4, "key", "compute.key"),
+            (5, "ca", "compute.cacert"),
+        ]
+
+        try:
+            # FDs 3-5: decode TLS from snap config, write into anonymous memfds.
+            for target_fd, label, config_key in tls_sources:
+                try:
+                    data = base64.b64decode(snap.config.get(config_key))
+                except (binascii.Error, TypeError, UnknownConfigKey):
+                    logging.error("TLS %s not configured or invalid (%s)", label, config_key)
+                    return 1
+                fd = os.memfd_create(label)
+                os.write(fd, data)
+                os.lseek(fd, 0, os.SEEK_SET)
+                if fd != target_fd:
+                    os.dup2(fd, target_fd)
+                    os.close(fd)
+                os.set_inheritable(target_fd, True)
+
+            # FD 6: config file (root:root 0o644, readable without DAC_OVERRIDE).
+            try:
+                fd = os.open(str(config_file), os.O_RDONLY)
+            except OSError as e:
+                logging.error("Cannot open config (%s): %s", config_file, e)
+                return 1
+            if fd != 6:
+                os.dup2(fd, 6)
+                os.close(fd)
+            os.set_inheritable(6, True)
+
+            run_dir = snap.paths.common / "run" / "apache2"
+            log_dir = snap.paths.common / "log" / "apache2"
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "APACHE_RUN_DIR": str(run_dir),
+                    "APACHE_LOG_DIR": str(log_dir),
+                    "APACHE_PID_FILE": str(run_dir / "apache2.pid"),
+                    "APACHE_LOCK_DIR": str(run_dir),
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                }
+            )
+
+            apache_bin = snap.paths.snap / "usr" / "sbin" / "apache2"
+            cmd = [
+                "/usr/bin/setpriv",
+                "--reuid",
+                "snap_daemon",
+                "--regid",
+                "snap_daemon",
+                "--clear-groups",
+                "--inh-caps=-all",
+                "--no-new-privs",
+                "--",
+                str(apache_bin),
+                "-e",
+                "info",
+                "-f",
+                "/proc/self/fd/6",
+                "-DFOREGROUND",
+            ]
+
+            completed_process = subprocess.run(
+                cmd,
+                env=env,
+                pass_fds=(3, 4, 5, 6),
+            )
+
+            logging.info(f"Exiting with code {completed_process.returncode}")
+            return completed_process.returncode
+        except Exception:
+            logging.exception("Failed to start file transfer service")
+            return 1
+
+
+file_transfer = partial(entry_point, FileTransferService)
