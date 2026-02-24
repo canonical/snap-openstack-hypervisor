@@ -717,6 +717,7 @@ parts:
       - python3-os-vif
       - python3-os-brick
       - python3-setuptools
+      - python3-pkg-resources
       - python3-systemd
       - python3-tz
       - haproxy
