@@ -181,6 +181,7 @@ class TestHooks:
         """Tests the configure hook."""
         mock_template = mocker.Mock()
         mocker.patch.object(hooks, "_secure_copy")
+        mocker.patch.object(hooks, "_configure_webdav_apache")
         mocker.patch.object(hooks, "_process_dpdk_ports")
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mocker.patch.object(hooks, "OVSCli", spec=hooks.OVSCli)
