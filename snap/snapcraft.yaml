@@ -79,6 +79,8 @@ apps:
     plugs:
       - network
       - network-observe
+      - network-setup-control
+      - ovn-chassis
       - hardware-observe
 
   # Libvirt
@@ -188,19 +190,21 @@ apps:
       - network
       - network-bind
       - microstack-support
+      - ovn-chassis
   ovn-trace:
     command: usr/bin/ovn-trace
     plugs:
       - network
       - network-bind
       - microstack-support
+      - ovn-chassis
   ovn-detrace:
     command: usr/bin/ovn-detrace
     plugs:
       - network
       - network-bind
       - microstack-support
-
+      - ovn-chassis
   ovs-vsctl:
     command: usr/bin/ovs-vsctl
     plugs:
@@ -208,18 +212,21 @@ apps:
       - network-control
       - process-control
       - microstack-support
+      - ovn-chassis
   ovs-appctl:
     command: usr/bin/ovs-appctl
     plugs:
       - network
       - process-control
       - microstack-support
+      - ovn-chassis
   ovs-ofctl:
     command: usr/bin/ovs-ofctl
     plugs:
       - network
       - process-control
       - microstack-support
+      - ovn-chassis
   ovs-dpctl:
     command: usr/bin/ovs-dpctl
     plugs:
@@ -227,6 +234,7 @@ apps:
       - network-control
       - process-control
       - microstack-support
+      - ovn-chassis
 
   nova-compute:
     command: 'bin/nova-compute-service'
@@ -236,6 +244,7 @@ apps:
       - network
       - network-bind
       - network-control
+      - ovn-chassis
       - firewall-control
       - hardware-observe
       - kvm
@@ -256,6 +265,7 @@ apps:
       - network-bind
       - network-control
       - network-observe
+      - ovn-chassis
       - microstack-support
       - firewall-control
 
@@ -383,6 +393,7 @@ parts:
     plugin: autotools
     stage-packages:
       - seabios
+      - qemu-system-data
       - ipxe-qemu
       # UEFI Support, required on arm64
       - on arm64:
@@ -487,6 +498,7 @@ parts:
       - gcc
       - meson
       - ninja-build
+      - execstack
     autotools-configure-parameters:
       - --enable-system
       - --target-list=x86_64-softmmu,aarch64-softmmu
@@ -506,6 +518,11 @@ parts:
 
       # Install keymaps as the qemu build process does not!
       install -Dp -m0644 -t $CRAFT_PART_INSTALL/usr/share/qemu/keymaps $(ls -1 $CRAFT_PART_SRC/pc-bios/keymaps/* | fgrep -v /meson.build)
+    override-prime: |
+      craftctl default
+      for f in $(execstack -q $CRAFT_PRIME/usr/share/qemu/* 2>/dev/null| grep -e "^X" | cut -d " " -f2); do
+          execstack --clear-execstack $f
+      done
 
   libvirt:
     source: https://git.launchpad.net/ubuntu/+source/libvirt
@@ -844,12 +861,16 @@ hooks:
     plugs:
       - network
       - network-control
+      - network-setup-control
       - hardware-observe
       - kernel-module-control
       - firewall-control
       - microstack-support
       - kvm
       - epa-info
+      - etc-driverctl
+      - ovn-chassis
+      - dm-multipath
   connect-slot-hypervisor-config:
     plugs:
       - network
@@ -861,3 +882,11 @@ plugs:
     interface: content
     content: epa-info
     target: $SNAP_DATA
+  # Required in order to persistently bind drivers such as vfio-pci.
+  etc-driverctl:
+    interface: system-files
+    write:
+    - /etc/driverctl.d
+  ovn-chassis:
+    interface: content
+    target: $SNAP_DATA/microovn/chassis

@@ -200,12 +200,13 @@ def apply_exclusion_list(pci_device_specs: list[dict], excluded_devices: list[st
         # a granular whitelist.
         matched_excluded_devices = False
         for device in all_pci_devices:
+            # We won't pass "parent_addr", the VF list gets populated separately and
+            # we want to avoid duplicates, see "process_whitelisted_sriov_pfs".
             match = pci_spec.match(
                 {
                     "vendor_id": device["vendor_id"].replace("0x", ""),
                     "product_id": device["product_id"].replace("0x", ""),
                     "address": device["address"],
-                    "parent_addr": device["physfn_address"],
                 }
             )
             if match:

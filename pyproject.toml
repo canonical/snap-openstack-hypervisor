@@ -33,11 +33,12 @@ dependencies = [
     "snap-helpers @ git+https://github.com/albertodonato/snap-helpers@46803aa9d52cc0bb24f76df878dd1010fc08e6a0",
     "jinja2",
     "netifaces",
-    "pydantic",
+    "pydantic>=2.11.0,<2.12.0", # incompatibility with typing-extensions 4.14.0, while distro is 4.10.0
     "cryptography>=38.0.0,<42,!=40.0.0,!=40.0.1",  # PyOpenSSL requirements
     "pyroute2==0.7.11",  # matched to caracal cloud-archive
     "click",
     "prettytable",
+    "psutil",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +47,7 @@ dev= [
     "pyroute2",
     "pytest",
     "pytest-mock",
+    "python-novaclient",
 ]
 
 [project.urls]
@@ -61,6 +63,7 @@ neutron-sriov-nic-agent-service = "openstack_hypervisor.services:neutron_sriov_n
 ceilometer-compute-agent-service = "openstack_hypervisor.services:ceilometer_compute_agent"
 ovs-exporter-service = "openstack_hypervisor.services:ovs_exporter"
 masakari-instancemonitor-service = "openstack_hypervisor.services:masakari_instancemonitor"
+file-transfer-service = "openstack_hypervisor.services:file_transfer"
 hypervisor = "openstack_hypervisor.cli.main:main"
 
 [project.entry-points.'snaphelpers.hooks']

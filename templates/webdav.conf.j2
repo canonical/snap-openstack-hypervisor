@@ -37,6 +37,7 @@ DavLockDB "{{ dav_lock_db }}"
     SSLProtocol -all +TLSv1.2 +TLSv1.3
     SSLCipherSuite ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
     SSLHonorCipherOrder on
+    # Cert hash for triggering restart {{ certs_hash }}
     SSLCertificateFile "/proc/self/fd/3"
     SSLCertificateKeyFile "/proc/self/fd/4"
     SSLCACertificateFile "/proc/self/fd/5"

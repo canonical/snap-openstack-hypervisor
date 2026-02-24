@@ -4,6 +4,7 @@
 import base64
 import json
 import logging
+import sys
 import typing
 
 import click
@@ -11,11 +12,18 @@ from novaclient import client
 from snaphelpers import Snap, UnknownConfigKey
 
 from openstack_hypervisor import manage_guests
+from openstack_hypervisor.bridge_datapath import OVSCli
 from openstack_hypervisor.cli.common import (
     JSON_FORMAT,
     JSON_INDENT_FORMAT,
     VALUE_FORMAT,
     click_option_format,
+)
+from openstack_hypervisor.hooks import (
+    _dpdk_config_is_ready,
+    _get_configure_context,
+    ovs_switch_socket,
+    ovs_switchd_ctl_socket,
 )
 
 if typing.TYPE_CHECKING:
@@ -137,3 +145,36 @@ def running_guests(format: str):
     elif format in (JSON_FORMAT, JSON_INDENT_FORMAT):
         indent = 2 if format == JSON_INDENT_FORMAT else None
         click.echo(json.dumps(running_openstack_guests, indent=indent))
+
+
+@hypervisor.command("dpdk-ready")
+def dpdk_ready() -> None:
+    """Check if DPDK configuration is ready.
+
+    Validates that DPDK and hardware offload configuration is properly
+    applied in OVS. This is particularly useful when using external OVS
+    (e.g., MicroOVN) where configuration changes may require an OVS restart.
+
+    The command checks:
+    - DPDK initialization status when enabled
+    - OVS configuration (dpdk-init, hw-offload) matches expected values
+    - All expected DPDK ports and bonds exist in OVS
+
+    Exit codes:
+    - 0: DPDK configuration is ready
+    - 1: DPDK configuration is not ready (restart may be required)
+    """
+    snap = Snap()
+    ovs_socket = ovs_switch_socket(snap)
+    switchd_ctl_socket = ovs_switchd_ctl_socket(snap)
+    ovs_cli = OVSCli(ovs_socket, switchd_ctl_socket)
+    context = _get_configure_context(snap)
+
+    ready = _dpdk_config_is_ready(snap, ovs_cli, context)
+
+    if ready:
+        click.echo("DPDK configuration is ready")
+        sys.exit(0)
+    else:
+        click.echo("DPDK configuration is NOT ready - external OVS restart may be required")
+        sys.exit(1)
