@@ -814,6 +814,7 @@ def _configure_ovn_base(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:
             "ovn-encap-type": "geneve",
             "ovn-encap-ip": ovn_encap_ip,
             "system-id": system_id,
+            "hostname": system_id,
             "ovn-bridge-datapath-type": datapath_type,
         },
     )
