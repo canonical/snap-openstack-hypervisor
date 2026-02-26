@@ -1,19 +1,20 @@
 name: openstack-hypervisor
-version: '2025.1'
-base: core24
+version: '2026.1'
+base: core26
+build-base: devel
 summary: OpenStack Hypervisor
 description: |
   The OpenStack Hypervisor snap provides the requires components
   to operate a cloud hypervisor as part of an OpenStack deployment.
 assumes:
 - snapd2.73
-grade: stable
+grade: devel
 confinement: strict
 environment:
   LC_ALL: C
   PATH: $SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$SNAP/usr/local/bin:$SNAP/usr/local/sbin:$PATH
   # Standard library components must have priority in module name resolution: https://storyboard.openstack.org/#!/story/2007806
-  PYTHONPATH: $PYTHONPATH:$SNAP/usr/lib/python3.12:$SNAP/usr/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages:$SNAP/lib/python3.12:$SNAP/lib/python3.12/site-packages
+  PYTHONPATH: $PYTHONPATH:$SNAP/usr/lib/python3.14:$SNAP/usr/lib/python3.14/site-packages:$SNAP/usr/lib/python3/dist-packages:$SNAP/lib/python3.14:$SNAP/lib/python3.14/site-packages
   # OVN runtime configuration
   OVN_LOGDIR: $SNAP_COMMON/log/ovn
   OVN_RUNDIR: $SNAP_COMMON/run/ovn
@@ -34,11 +35,6 @@ platforms:
   amd64:
   arm64:
   s390x:
-
-package-repositories:
-  - type: apt
-    cloud: epoxy
-    priority: always
 
 system-usernames:
   snap_daemon: shared
@@ -79,7 +75,7 @@ apps:
   openstack-hypervisor:
     environment:
       # Ensure site packages are loaded first
-      PYTHONPATH: $SNAP/usr/lib/python3.10:$SNAP/usr/lib/python3.10/site-packages:$SNAP/lib/python3.10:$SNAP/lib/python3.10/site-packages:$SNAP/usr/lib/python3/dist-packages:$PYTHONPATH
+      PYTHONPATH: $SNAP/usr/lib/python3.14:$SNAP/usr/lib/python3.14/site-packages:$SNAP/lib/python3.14:$SNAP/lib/python3.14/site-packages:$SNAP/usr/lib/python3/dist-packages:$PYTHONPATH
     command: bin/hypervisor
     plugs:
       - network
@@ -393,7 +389,7 @@ parts:
   qemu:
     source: https://git.launchpad.net/ubuntu/+source/qemu
     source-type: git
-    source-branch: ubuntu/noble-updates
+    source-branch: ubuntu/resolute-updates
     source-depth: 1
     plugin: autotools
     stage-packages:
@@ -413,10 +409,10 @@ parts:
       - libasound2t64
       - libasyncns0
       - libbluetooth3
-      - libboost-iostreams1.74.0
-      - libboost-random1.74.0
-      - libboost-system1.74.0
-      - libboost-thread1.74.0
+      - libboost-iostreams1.90.0
+      - libboost-random1.90.0
+      - libboost-system1.90.0
+      - libboost-thread1.90.0
       - libcaca0
       - libfdt1
       - libflac++10
@@ -532,7 +528,7 @@ parts:
   libvirt:
     source: https://git.launchpad.net/ubuntu/+source/libvirt
     source-type: git
-    source-branch: ubuntu/noble-updates
+    source-branch: ubuntu/resolute-updates
     source-depth: 1
     after:
       - qemu
