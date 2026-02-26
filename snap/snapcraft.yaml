@@ -1,19 +1,20 @@
 name: openstack-hypervisor
-version: '2025.1'
-base: core24
+version: '2026.1'
+base: core26
+build-base: devel
 summary: OpenStack Hypervisor
 description: |
   The OpenStack Hypervisor snap provides the requires components
   to operate a cloud hypervisor as part of an OpenStack deployment.
 assumes:
 - snapd2.73
-grade: stable
+grade: devel
 confinement: strict
 environment:
   LC_ALL: C
   PATH: $SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$SNAP/usr/local/bin:$SNAP/usr/local/sbin:$PATH
   # Standard library components must have priority in module name resolution: https://storyboard.openstack.org/#!/story/2007806
-  PYTHONPATH: $PYTHONPATH:$SNAP/usr/lib/python3.12:$SNAP/usr/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages:$SNAP/lib/python3.12:$SNAP/lib/python3.12/site-packages
+  PYTHONPATH: $PYTHONPATH:$SNAP/usr/lib/python3.14:$SNAP/usr/lib/python3.14/site-packages:$SNAP/usr/lib/python3/dist-packages:$SNAP/lib/python3.14:$SNAP/lib/python3.14/site-packages
   # OVN runtime configuration
   OVN_LOGDIR: $SNAP_COMMON/log/ovn
   OVN_RUNDIR: $SNAP_COMMON/run/ovn
@@ -34,11 +35,6 @@ platforms:
   amd64:
   arm64:
   s390x:
-
-package-repositories:
-  - type: apt
-    cloud: epoxy
-    priority: always
 
 system-usernames:
   snap_daemon: shared
@@ -79,7 +75,7 @@ apps:
   openstack-hypervisor:
     environment:
       # Ensure site packages are loaded first
-      PYTHONPATH: $SNAP/usr/lib/python3.10:$SNAP/usr/lib/python3.10/site-packages:$SNAP/lib/python3.10:$SNAP/lib/python3.10/site-packages:$SNAP/usr/lib/python3/dist-packages:$PYTHONPATH
+      PYTHONPATH: $SNAP/usr/lib/python3.14:$SNAP/usr/lib/python3.14/site-packages:$SNAP/lib/python3.14:$SNAP/lib/python3.14/site-packages:$SNAP/usr/lib/python3/dist-packages:$PYTHONPATH
     command: bin/hypervisor
     plugs:
       - network
@@ -393,7 +389,7 @@ parts:
   qemu:
     source: https://git.launchpad.net/ubuntu/+source/qemu
     source-type: git
-    source-branch: ubuntu/noble-updates
+    source-branch: ubuntu/resolute-devel
     source-depth: 1
     plugin: autotools
     stage-packages:
@@ -413,14 +409,13 @@ parts:
       - libasound2t64
       - libasyncns0
       - libbluetooth3
-      - libboost-iostreams1.74.0
-      - libboost-random1.74.0
-      - libboost-system1.74.0
-      - libboost-thread1.74.0
+      - libboost-iostreams1.90.0
+      - libboost-random1.90.0
+      - libboost-thread1.90.0
       - libcaca0
       - libfdt1
-      - libflac++10
-      - libglib2.0-0
+      - libflac++11
+      - libglib2.0-0t64
       - libglu1-mesa
       - libiscsi7
       - libjpeg-turbo8
@@ -436,7 +431,7 @@ parts:
       - libslang2
       - libsndfile1
       - libusb-1.0-0
-      - libusbredirparser1
+      - libusbredirparser1t64
       - libvorbis0a
       - libvorbisenc2
       - libx11-6
@@ -445,28 +440,28 @@ parts:
       - libxcb1
       - libxdmcp6
       - libxext6
-      - libpng16-16
+      - libpng16-16t64
       - libaio1t64
-      - libasn1-8-heimdal
+      - libasn1-8t64-heimdal
       - libbrotli1
       - libcurl3t64-gnutls
       - libgssapi3t64-heimdal
       - libhcrypto5t64-heimdal
-      - libheimbase1-heimdal
-      - libheimntlm0-heimdal
-      - libhx509-5-heimdal
-      - libkrb5-26-heimdal
+      - libheimbase1t64-heimdal
+      - libheimntlm0t64-heimdal
+      - libhx509-5t64-heimdal
+      - libkrb5-26t64-heimdal
       - libldap2
       - libnghttp2-14
-      - libpsl5
+      - libpsl5t64
       - libroken19t64-heimdal
       - librtmp1
       - libssh-4
-      - libwind0-heimdal
+      - libwind0t64-heimdal
       - libjack0
       - libepoxy0
       - libcacard0
-      - libnettle8
+      - libnettle8t64
     build-packages:
       - bison
       - flex
@@ -503,7 +498,6 @@ parts:
       - gcc
       - meson
       - ninja-build
-      - execstack
     autotools-configure-parameters:
       - --enable-system
       - --target-list=x86_64-softmmu,aarch64-softmmu
@@ -525,14 +519,14 @@ parts:
       install -Dp -m0644 -t $CRAFT_PART_INSTALL/usr/share/qemu/keymaps $(ls -1 $CRAFT_PART_SRC/pc-bios/keymaps/* | fgrep -v /meson.build)
     override-prime: |
       craftctl default
-      for f in $(execstack -q $CRAFT_PRIME/usr/share/qemu/* 2>/dev/null| grep -e "^X" | cut -d " " -f2); do
-          execstack --clear-execstack $f
-      done
+      # execstack is no longer available in Ubuntu 26.04 (removed with prelink).
+      # Modern toolchains produce binaries with correct PT_GNU_STACK by default,
+      # so clearing executable stack flags manually is no longer necessary.
 
   libvirt:
     source: https://git.launchpad.net/ubuntu/+source/libvirt
     source-type: git
-    source-branch: ubuntu/noble-updates
+    source-branch: ubuntu/resolute-devel
     source-depth: 1
     after:
       - qemu
@@ -555,6 +549,7 @@ parts:
     - libnl-route-3-dev
     - libtirpc-dev
     - libxml2-utils
+    - libjson-c-dev
     - uuid-dev
     - libnuma-dev
     - python3-all
@@ -577,11 +572,11 @@ parts:
     - dnsmasq
     - iptables
     - genisoimage
-    - libxml2
+    - libxml2-16
     - libyajl2
     - libnuma1
-    - libcurl3-gnutls
-    - libpcap0.8
+    - libcurl3t64-gnutls
+    - libpcap0.8t64
     - libpciaccess0
     # libvirt uses the pm-is-supported tool.
     - pm-utils
@@ -664,7 +659,17 @@ parts:
       #define EBTABLES \"/snap/$CRAFT_PROJECT_NAME/current/usr/sbin/ebtables-legacy\"
       " >> $CRAFT_PART_SRC/config.h
 
+      # Guard firewall macros in virfirewall.h to prevent redefinition errors
+      # with the snap-specific paths defined in config.h above.
+      sed -i \
+        -e 's/^#define EBTABLES .*/#ifndef EBTABLES\n\0\n#endif/' \
+        -e 's/^#define IPTABLES .*/#ifndef IPTABLES\n\0\n#endif/' \
+        -e 's/^#define IP6TABLES .*/#ifndef IP6TABLES\n\0\n#endif/' \
+        $CRAFT_PART_SRC/src/util/virfirewall.h
+
       pushd $CRAFT_PART_SRC
+      git config user.email "snapcraft@build"
+      git config user.name "snapcraft"
       git am $CRAFT_PROJECT_DIR/snap/patches/libvirt/*.patch
       popd || exit 1
 
@@ -768,20 +773,19 @@ parts:
       popd
 
   openstack-hypervisor:
-    plugin: python
+    plugin: uv
     source: .
     build-snaps: [astral-uv]
     build-packages:
       - git
       - cargo
       - rustc
-    python-requirements:
-      - requirements.txt
+    stage-packages:
+      - python3-venv
     after:
       - openstack
       - apache2-webdav
     override-build: |
-      uv export --frozen --no-hashes --format=requirements-txt -o requirements.txt
       craftctl default
       snap-helpers write-hooks
 
@@ -841,6 +845,9 @@ parts:
       - DEBIAN_FRONTEND: "noninteractive"
     after: [openstack]
     override-build: |
+      # Ensure meson finds system python3 (with cffi) rather than the
+      # staged python3 from netplan.io dependencies which lacks cffi.
+      export PATH=/usr/bin:/usr/sbin:$PATH
       meson setup _build -Dunit_testing=false --prefix=/usr
       meson compile -C _build
       meson install -C _build --destdir $CRAFT_PART_INSTALL
