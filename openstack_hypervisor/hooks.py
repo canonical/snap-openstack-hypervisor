@@ -2527,8 +2527,14 @@ def _configure_monitoring_services(snap: Snap) -> None:
     services = snap.services.list()
     enable_monitoring = snap.config.get("monitoring.enable")
     if enable_monitoring:
-        logging.info("Enabling all exporter services.")
+        ovs_external = is_ovs_external()
+        if ovs_external:
+            logging.info("Enabling exporter services (skipping external OVS exporters).")
+        else:
+            logging.info("Enabling all exporter services.")
         for service in MONITORING_SERVICES:
+            if ovs_external and service in EXTERNAL_OVS_SERVICES:
+                continue
             services[service].start(enable=True)
     else:
         logging.info("Disabling all exporter services.")

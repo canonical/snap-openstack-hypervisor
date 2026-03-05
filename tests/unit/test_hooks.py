@@ -1293,6 +1293,46 @@ class TestEnsureInternalOVSServices:
         services["ovs-exporter"].start.assert_not_called()
 
 
+class TestConfigureMonitoringServices:
+    """Tests for _configure_monitoring_services function."""
+
+    def test_external_ovs_monitoring_enabled_skips_ovs_exporter(self, mocker, snap):
+        """ovs-exporter is not started when OVS is external."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        services = {name: mock.Mock() for name in hooks.MONITORING_SERVICES}
+        snap.services.list.return_value = services
+        snap.config.get.return_value = True  # monitoring.enable = True
+
+        hooks._configure_monitoring_services(snap)
+
+        services["libvirt-exporter"].start.assert_called_once_with(enable=True)
+        services["ovs-exporter"].start.assert_not_called()
+
+    def test_internal_ovs_monitoring_enabled_starts_all(self, mocker, snap):
+        """Test that all exporters are started when OVS is internal and monitoring enabled."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        services = {name: mock.Mock() for name in hooks.MONITORING_SERVICES}
+        snap.services.list.return_value = services
+        snap.config.get.return_value = True  # monitoring.enable = True
+
+        hooks._configure_monitoring_services(snap)
+
+        services["libvirt-exporter"].start.assert_called_once_with(enable=True)
+        services["ovs-exporter"].start.assert_called_once_with(enable=True)
+
+    def test_monitoring_disabled_stops_all(self, mocker, snap):
+        """Test that all exporters are stopped when monitoring is disabled."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        services = {name: mock.Mock() for name in hooks.MONITORING_SERVICES}
+        snap.services.list.return_value = services
+        snap.config.get.return_value = False  # monitoring.enable = False
+
+        hooks._configure_monitoring_services(snap)
+
+        services["libvirt-exporter"].stop.assert_called_once_with(disable=True)
+        services["ovs-exporter"].stop.assert_called_once_with(disable=True)
+
+
 class TestConfigureNetworking:
     """Tests for _configure_networking function."""
 
