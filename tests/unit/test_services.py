@@ -55,7 +55,7 @@ class TestFileTransferService:
     @patch("openstack_hypervisor.services.os.set_inheritable")
     @patch("openstack_hypervisor.services.os.lseek")
     @patch("openstack_hypervisor.services.os.write")
-    @patch("openstack_hypervisor.services.os.memfd_create", return_value=[10, 11, 12])
+    @patch("openstack_hypervisor.services.os.memfd_create", create=True, return_value=[10, 11, 12])
     @patch("openstack_hypervisor.services.os.dup2")
     @patch("openstack_hypervisor.services.os.close")
     def test_returns_1_when_config_missing(
@@ -72,7 +72,7 @@ class TestFileTransferService:
     @patch("openstack_hypervisor.services.os.set_inheritable")
     @patch("openstack_hypervisor.services.os.lseek")
     @patch("openstack_hypervisor.services.os.write")
-    @patch("openstack_hypervisor.services.os.memfd_create", return_value=[10, 11, 12])
+    @patch("openstack_hypervisor.services.os.memfd_create", create=True, return_value=[10, 11, 12])
     def test_success_path(
         self,
         mock_memfd,

@@ -11,8 +11,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openstack-hypervisor"
-version = "2025.1"
-requires-python = "~=3.12.0"
+version = "2026.1"
+requires-python = "~=3.14.0"
 license-files = ["LICENSE"]
 description = "Hypervisor component of OpenStack"
 readme = "README.md"
@@ -26,14 +26,14 @@ classifiers = [
     "Operation System :: POSIX :: Linux",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
 ]
 
 dependencies = [
     "snap-helpers @ git+https://github.com/albertodonato/snap-helpers@46803aa9d52cc0bb24f76df878dd1010fc08e6a0",
     "jinja2",
     "netifaces",
-    "pydantic>=2.11.0,<2.12.0", # incompatibility with typing-extensions 4.14.0, while distro is 4.10.0
+    "pydantic",
     "cryptography>=38.0.0,<42,!=40.0.0,!=40.0.1",  # PyOpenSSL requirements
     "pyroute2==0.7.11",  # matched to caracal cloud-archive
     "click",
