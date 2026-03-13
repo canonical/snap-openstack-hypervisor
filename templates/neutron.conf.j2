@@ -49,6 +49,7 @@ flavor = keystone
 [placement]
 auth_url = {{ identity.auth_url }}
 auth_type = password
+interface = internal
 project_domain_name = {{ identity.project_domain_name }}
 user_domain_name = {{ identity.user_domain_name }}
 region_name = {{ identity.region_name }}
@@ -62,6 +63,7 @@ cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
 [nova]
 auth_url = {{ identity.auth_url }}
 auth_type = password
+interface = internal
 project_domain_name = {{ identity.project_domain_name }}
 user_domain_name = {{ identity.user_domain_name }}
 region_name = {{ identity.region_name }}
