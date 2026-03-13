@@ -5,6 +5,7 @@ import io
 import json
 import random
 import textwrap
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
@@ -1293,6 +1294,88 @@ class TestEnsureInternalOVSServices:
         services["ovs-exporter"].start.assert_not_called()
 
 
+class TestInternalOVSReady:
+    """Tests for internal OVS readiness detection."""
+
+    def test_returns_true_when_socket_and_ctl_are_present(self, mocker, snap):
+        """Internal OVS is ready when both socket paths are present."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        ovs_socket = hooks._ovs_socket_path(snap)
+        ovs_socket.parent.mkdir(parents=True, exist_ok=True)
+        ovs_socket.touch()
+        ctl_socket = snap.paths.common / "run" / "openvswitch" / "ovs-vswitchd.1234.ctl"
+        ctl_socket.touch()
+        mocker.patch.object(hooks, "ovs_switchd_ctl_socket", return_value=str(ctl_socket))
+
+        assert hooks._internal_ovs_ready(snap) is True
+
+    def test_returns_false_when_ctl_socket_is_missing(self, mocker, snap):
+        """Internal OVS is not ready without a switchd control socket."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        ovs_socket = hooks._ovs_socket_path(snap)
+        ovs_socket.parent.mkdir(parents=True, exist_ok=True)
+        ovs_socket.touch()
+        mocker.patch.object(hooks, "ovs_switchd_ctl_socket", return_value=None)
+
+        assert hooks._internal_ovs_ready(snap) is False
+
+
+class TestConfigureMonitoringServices:
+    """Tests for _configure_monitoring_services function."""
+
+    def test_external_ovs_monitoring_enabled_skips_ovs_exporter(self, mocker, snap):
+        """ovs-exporter is not started when OVS is external."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        services = {name: mock.Mock() for name in hooks.MONITORING_SERVICES}
+        snap.services.list.return_value = services
+        snap.config.get.return_value = True  # monitoring.enable = True
+
+        hooks._configure_monitoring_services(snap)
+
+        services["libvirt-exporter"].start.assert_called_once_with(enable=True)
+        services["ovs-exporter"].start.assert_not_called()
+
+    def test_internal_ovs_monitoring_enabled_starts_all(self, mocker, snap):
+        """Test that all exporters are started when OVS is internal and monitoring enabled."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        services = {name: mock.Mock() for name in hooks.MONITORING_SERVICES}
+        snap.services.list.return_value = services
+        snap.config.get.return_value = True  # monitoring.enable = True
+
+        hooks._configure_monitoring_services(snap)
+
+        services["libvirt-exporter"].start.assert_called_once_with(enable=True)
+        services["ovs-exporter"].start.assert_called_once_with(enable=True)
+
+    def test_monitoring_disabled_stops_all(self, mocker, snap):
+        """Test that all exporters are stopped when monitoring is disabled."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        services = {name: mock.Mock() for name in hooks.MONITORING_SERVICES}
+        snap.services.list.return_value = services
+        snap.config.get.return_value = False  # monitoring.enable = False
+
+        hooks._configure_monitoring_services(snap)
+
+        services["libvirt-exporter"].stop.assert_called_once_with(disable=True)
+        services["ovs-exporter"].stop.assert_called_once_with(disable=True)
+
+
+class TestConfigureTLS:
+    """Tests for TLS configuration orchestration."""
+
+    def test_skips_ovn_tls_when_deferred(self, mocker, snap, ovs_cli):
+        """OVN TLS is skipped when internal OVS configuration is deferred."""
+        mock_ovn_tls = mocker.patch.object(hooks, "_configure_ovn_tls")
+        mock_libvirt_tls = mocker.patch.object(hooks, "_configure_libvirt_tls")
+        mock_cabundle_tls = mocker.patch.object(hooks, "_configure_cabundle_tls")
+
+        hooks._configure_tls(snap, ovs_cli, configure_ovn_tls=False)
+
+        mock_ovn_tls.assert_not_called()
+        mock_libvirt_tls.assert_called_once_with(snap)
+        mock_cabundle_tls.assert_called_once_with(snap)
+
+
 class TestConfigureNetworking:
     """Tests for _configure_networking function."""
 
@@ -1343,6 +1426,115 @@ class TestConfigureNetworking:
         # Should restart the service immediately
         mock_service.stop.assert_called_once()
         mock_service.start.assert_called_once_with(enable=True)
+
+
+class TestConfigureOVSDeferred:
+    """Tests for configure-time deferred internal OVS behavior."""
+
+    def test_internal_ovs_not_ready_defers_ovs_configuration(self, mocker, snap):
+        """Internal OVS work is deferred until a later configure hook."""
+        order = []
+        services = {"svc1": mock.Mock()}
+        snap.services.list.return_value = services
+        mocker.patch.object(hooks, "_mkdirs")
+        mocker.patch.object(hooks, "_update_default_config")
+        mocker.patch.object(hooks, "_setup_secrets")
+        mocker.patch.object(hooks, "_detect_compute_flavors")
+        mocker.patch.object(hooks, "_get_configure_context", return_value={"network": {}})
+        mocker.patch.object(hooks, "_get_exclude_services", return_value=["svc1"])
+        mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        mocker.patch.object(hooks, "_internal_ovs_ready", return_value=False)
+        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
+        mocker.patch.object(hooks, "_render_templates")
+        mocker.patch.object(hooks, "_configure_webdav_apache")
+        mocker.patch.object(hooks, "_configure_kvm")
+        mocker.patch.object(hooks, "_configure_monitoring_services")
+        mocker.patch.object(hooks, "_configure_ceph")
+        mocker.patch.object(hooks, "_configure_masakari_services")
+        mocker.patch.object(hooks, "_configure_sriov_agent_service")
+        mocker.patch.object(
+            hooks, "_configure_tls", side_effect=lambda *_, **__: order.append("tls")
+        )
+        mocker.patch.object(
+            hooks, "_configure_networking", side_effect=lambda *_: order.append("network")
+        )
+        mocker.patch.object(
+            hooks,
+            "_ensure_internal_ovs_services",
+            side_effect=lambda *_: order.append("ensure"),
+        )
+
+        hooks.configure(snap)
+
+        services["svc1"].stop.assert_called_once_with(disable=True)
+        assert order == ["tls", "ensure"]
+
+    def test_internal_ovs_ready_runs_configuration(self, mocker, snap):
+        """Internal OVS configuration runs when the services are already ready."""
+        order = []
+        snap.services.list.return_value = {}
+        mocker.patch.object(hooks, "_mkdirs")
+        mocker.patch.object(hooks, "_update_default_config")
+        mocker.patch.object(hooks, "_setup_secrets")
+        mocker.patch.object(hooks, "_detect_compute_flavors")
+        mocker.patch.object(hooks, "_get_configure_context", return_value={"network": {}})
+        mocker.patch.object(hooks, "_get_exclude_services", return_value=[])
+        mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        mocker.patch.object(hooks, "_internal_ovs_ready", return_value=True)
+        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
+        mocker.patch.object(hooks, "_render_templates")
+        mocker.patch.object(hooks, "_configure_webdav_apache")
+        mocker.patch.object(hooks, "_configure_kvm")
+        mocker.patch.object(hooks, "_configure_monitoring_services")
+        mocker.patch.object(hooks, "_configure_ceph")
+        mocker.patch.object(hooks, "_configure_masakari_services")
+        mocker.patch.object(hooks, "_configure_sriov_agent_service")
+        mocker.patch.object(
+            hooks, "_configure_tls", side_effect=lambda *_, **__: order.append("tls")
+        )
+        mocker.patch.object(
+            hooks, "_configure_networking", side_effect=lambda *_: order.append("network")
+        )
+        mocker.patch.object(
+            hooks,
+            "_ensure_internal_ovs_services",
+            side_effect=lambda *_: order.append("ensure"),
+        )
+
+        hooks.configure(snap)
+
+        assert order == ["tls", "network", "ensure"]
+
+    def test_external_ovs_skips_internal_deferral_and_enable(self, mocker, snap):
+        """External OVS never triggers internal OVS bootstrap or enablement."""
+        snap.services.list.return_value = {}
+        mocker.patch.object(hooks, "_mkdirs")
+        mocker.patch.object(hooks, "_update_default_config")
+        mocker.patch.object(hooks, "_setup_secrets")
+        mocker.patch.object(hooks, "_detect_compute_flavors")
+        mocker.patch.object(hooks, "_get_configure_context", return_value={"network": {}})
+        mocker.patch.object(hooks, "_get_exclude_services", return_value=[])
+        mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
+        mocker.patch.object(hooks, "_render_templates")
+        mocker.patch.object(hooks, "_configure_webdav_apache")
+        mocker.patch.object(hooks, "_configure_tls")
+        mocker.patch.object(hooks, "_configure_networking")
+        mocker.patch.object(hooks, "_configure_kvm")
+        mocker.patch.object(hooks, "_configure_monitoring_services")
+        mocker.patch.object(hooks, "_configure_ceph")
+        mocker.patch.object(hooks, "_configure_masakari_services")
+        mocker.patch.object(hooks, "_configure_sriov_agent_service")
+        mock_ready = mocker.patch.object(hooks, "_internal_ovs_ready")
+        mock_ensure = mocker.patch.object(hooks, "_ensure_internal_ovs_services")
+
+        hooks.configure(snap)
+
+        mock_ready.assert_not_called()
+        mock_ensure.assert_not_called()
 
 
 class TestDPDKConfigReady:

@@ -1795,7 +1795,7 @@ def _parse_tls(snap: Snap, config_key: str) -> bytes | None:
     return None
 
 
-def _configure_tls(snap: Snap, ovs_cli: OVSCli) -> None:
+def _configure_tls(snap: Snap, ovs_cli: OVSCli, configure_ovn_tls: bool = True) -> None:
     """Configure TLS.
 
     Configures TLS for OVN (when using internal OVS), libvirt, and CA bundles.
@@ -1803,8 +1803,12 @@ def _configure_tls(snap: Snap, ovs_cli: OVSCli) -> None:
     Args:
         snap: The snap reference.
         ovs_cli: The OVSCli instance.
+        configure_ovn_tls: Whether OVN TLS should be applied to OVS now.
     """
-    _configure_ovn_tls(snap, ovs_cli, is_ovs_external())
+    if configure_ovn_tls:
+        _configure_ovn_tls(snap, ovs_cli, is_ovs_external())
+    else:
+        logging.info("Internal OVS not ready, deferring OVN TLS configuration.")
     _configure_libvirt_tls(snap)
     _configure_cabundle_tls(snap)
 
@@ -2527,8 +2531,14 @@ def _configure_monitoring_services(snap: Snap) -> None:
     services = snap.services.list()
     enable_monitoring = snap.config.get("monitoring.enable")
     if enable_monitoring:
-        logging.info("Enabling all exporter services.")
+        ovs_external = is_ovs_external()
+        if ovs_external:
+            logging.info("Enabling exporter services (skipping external OVS exporters).")
+        else:
+            logging.info("Enabling all exporter services.")
         for service in MONITORING_SERVICES:
+            if ovs_external and service in EXTERNAL_OVS_SERVICES:
+                continue
             services[service].start(enable=True)
     else:
         logging.info("Disabling all exporter services.")
@@ -2844,6 +2854,11 @@ def ovs_switch_socket(snap: Snap) -> str:
     return "unix:" + str(switch_path / "db.sock")
 
 
+def _ovs_socket_path(snap: Snap) -> Path:
+    """Return the filesystem path for the OVS DB socket."""
+    return Path(ovs_switch_socket(snap).removeprefix("unix:"))
+
+
 def ovs_switchd_ctl_socket(snap: Snap) -> str | None:
     """Get the OVS switchd ctl socket path.
 
@@ -2858,6 +2873,13 @@ def ovs_switchd_ctl_socket(snap: Snap) -> str | None:
         return None
     pid_value = pid_file.read_text(encoding="utf-8").strip()
     return str(switch_path / f"ovs-vswitchd.{pid_value}.ctl")
+
+
+def _internal_ovs_ready(snap: Snap) -> bool:
+    """Return whether internal OVS runtime artifacts are present."""
+    ovs_socket_path = _ovs_socket_path(snap)
+    ctl_socket = ovs_switchd_ctl_socket(snap)
+    return ovs_socket_path.exists() and bool(ctl_socket and Path(ctl_socket).exists())
 
 
 def configure(snap: Snap) -> None:
@@ -2887,25 +2909,30 @@ def configure(snap: Snap) -> None:
     context = _get_configure_context(snap)
     exclude_services = _get_exclude_services(context)
     services = snap.services.list()
+    ovs_external = is_ovs_external()
+    internal_ovs_deferred = not ovs_external and not _internal_ovs_ready(snap)
     for service in exclude_services:
         services[service].stop(disable=True)
 
-    if not is_ovs_external():
-        _ensure_internal_ovs_services(snap, exclude_services)
-
     with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
         _render_templates(snap, context)
-        _configure_tls(snap, ovs_cli)
+        _configure_tls(snap, ovs_cli, configure_ovn_tls=not internal_ovs_deferred)
         _configure_webdav_apache(snap, context)
 
-    try:
-        _configure_networking(snap, ovs_cli, context)
-    except OVSTimeoutError as e:
-        if not is_ovs_external():
-            # Don't suppress timeouts when using internal OVS
-            # Only on refreshing with an external OVS does a timeout occur
-            raise
-        logging.warning(f"Suppressing timeout, expected during a refresh of the snap: {e}")
+    if internal_ovs_deferred:
+        logging.info(
+            "Internal OVS is not ready yet, deferring OVS/OVN configuration until the next "
+            "configure hook."
+        )
+    else:
+        try:
+            _configure_networking(snap, ovs_cli, context)
+        except OVSTimeoutError as e:
+            if not is_ovs_external():
+                # Don't suppress timeouts when using internal OVS
+                # Only on refreshing with an external OVS does a timeout occur
+                raise
+            logging.warning(f"Suppressing timeout, expected during a refresh of the snap: {e}")
     _configure_kvm(snap)
     _configure_monitoring_services(snap)
     _configure_ceph(snap)
@@ -2913,6 +2940,8 @@ def configure(snap: Snap) -> None:
     _configure_sriov_agent_service(
         snap, bool(context.get("network", {}).get("sriov_nic_physical_device_mappings"))
     )
+    if not ovs_external:
+        _ensure_internal_ovs_services(snap, exclude_services)
 
 
 def _get_configure_context(snap: Snap) -> dict:
