@@ -41,11 +41,15 @@ region_name = {{ identity.keystone_region_name }}
 [service_credentials]
 auth_type = password
 auth_url = {{ identity.auth_url }}
+interface = internal
 project_domain_id = {{ identity.project_domain_id }}
 user_domain_id = {{ identity.user_domain_id }}
 project_name = {{ identity.project_name }}
 username = {{ identity.username }}
 password = {{ identity.password }}
+{% if ca and ca.bundle -%}
+cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
+{% endif -%}
 region_name = {{ identity.keystone_region_name }}
 
 [oslo_messaging_rabbit]

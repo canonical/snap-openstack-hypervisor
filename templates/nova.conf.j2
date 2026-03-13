@@ -114,6 +114,7 @@ ovsdb_connection = {{ network.ovs_socket_path }}
 [cinder]
 service_type = volume
 service_name = cinder
+valid_interfaces = internal
 region_name = {{ identity.region_name }}
 {% if ca and ca.bundle -%}
 cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
@@ -137,6 +138,7 @@ enabled = False
 [glance]
 service_type = image
 service_name = glance
+valid_interfaces = internal
 region_name = {{ identity.region_name }}
 {% if ca and ca.bundle -%}
 cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
@@ -161,6 +163,7 @@ region_name = {{ identity.keystone_region_name }}
 send_service_user_token = true
 auth_type = password
 auth_url = {{ identity.auth_url }}
+interface = internal
 project_domain_id = {{ identity.project_domain_id }}
 user_domain_id = {{ identity.user_domain_id }}
 project_name = {{ identity.project_name }}
@@ -177,6 +180,7 @@ flavor = keystone
 [neutron]
 auth_url = {{ identity.auth_url }}
 auth_type = password
+interface = internal
 project_domain_name = {{ identity.project_domain_name }}
 user_domain_name = {{ identity.user_domain_name }}
 region_name = {{ identity.region_name }}
@@ -192,6 +196,7 @@ metadata_proxy_shared_secret = {{ credentials.ovn_metadata_proxy_shared_secret }
 [placement]
 auth_url = {{ identity.auth_url }}
 auth_type = password
+interface = internal
 project_domain_name = {{ identity.project_domain_name }}
 user_domain_name = {{ identity.user_domain_name }}
 region_name = {{ identity.region_name }}
@@ -209,6 +214,7 @@ backend = barbican
 [barbican]
 auth_url = {{ identity.auth_url }}
 auth_type = password
+interface = internal
 project_domain_name = {{ identity.project_domain_name }}
 user_domain_name = {{ identity.user_domain_name }}
 region_name = {{ identity.region_name }}
