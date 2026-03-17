@@ -141,6 +141,7 @@ apps:
     stop-command: usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server stop
     after: [ovsdb-server]
     daemon: forking
+    install-mode: disable
     plugs:
       - network
       - network-bind
@@ -157,6 +158,7 @@ apps:
     command: "bin/ovsdb-server-service"
     stop-command: usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd stop
     daemon: forking
+    install-mode: disable
     plugs:
       - network
       - network-bind
@@ -171,6 +173,7 @@ apps:
     command: usr/share/ovn/scripts/ovn-ctl start_controller --no-monitor
     stop-command: usr/share/ovn/scripts/ovn-ctl stop_controller --no-monitor --restart
     daemon: forking
+    install-mode: disable
     plugs:
       - network
       - network-bind
