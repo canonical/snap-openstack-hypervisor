@@ -731,6 +731,8 @@ parts:
       - haproxy
       - util-linux
       - multipath-tools
+      - lvm2
+      - cryptsetup-bin
       # following packages are explicitly declared, because they are inside core24
       # removed when core24 bug is fixed
       - python3-attr
