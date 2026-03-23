@@ -1236,6 +1236,85 @@ class TestExternalOVS:
 
         ovs_cli.set.assert_not_called()
 
+    def test_external_ovs_config_microovn_returns_true_without_plug(self, mocker):
+        """Config 'microovn' returns True even when ovn-chassis plug is disconnected."""
+        import subprocess
+
+        mock_check_call = mocker.patch("subprocess.check_call")
+        mock_check_call.side_effect = subprocess.CalledProcessError(1, "cmd")
+        hooks._OVS_MANAGED_BY = hooks.OVS_MANAGED_BY_MICROOVN
+
+        assert hooks.is_ovs_external() is True
+        mock_check_call.assert_not_called()
+
+    def test_external_ovs_config_hypervisor_returns_false_despite_plug(self, mocker):
+        """Config 'hypervisor' returns False even when ovn-chassis plug is connected."""
+        mock_check_call = mocker.patch("subprocess.check_call")
+        mock_check_call.return_value = 0
+        hooks._OVS_MANAGED_BY = hooks.OVS_MANAGED_BY_HYPERVISOR
+
+        assert hooks.is_ovs_external() is False
+        mock_check_call.assert_not_called()
+
+    def test_external_ovs_config_auto_falls_back_to_plug_connected(self, mocker):
+        """Config 'auto' checks the plug when connected."""
+        mock_check_call = mocker.patch("subprocess.check_call")
+        mock_check_call.return_value = 0
+        hooks._OVS_MANAGED_BY = hooks.OVS_MANAGED_BY_AUTO
+
+        assert hooks.is_ovs_external() is True
+        mock_check_call.assert_called_once_with(
+            ["snapctl", "is-connected", hooks.OVN_CHASSIS_PLUG]
+        )
+
+    def test_external_ovs_config_auto_falls_back_to_plug_disconnected(self, mocker):
+        """Config 'auto' checks the plug when disconnected."""
+        import subprocess
+
+        mock_check_call = mocker.patch("subprocess.check_call")
+        mock_check_call.side_effect = subprocess.CalledProcessError(1, "cmd")
+        hooks._OVS_MANAGED_BY = hooks.OVS_MANAGED_BY_AUTO
+
+        assert hooks.is_ovs_external() is False
+
+    def test_set_ovs_managed_by_microovn(self, snap):
+        """_set_ovs_managed_by caches 'microovn' from snap config."""
+        snap.config.get.return_value = hooks.OVS_MANAGED_BY_MICROOVN
+        hooks._set_ovs_managed_by(snap)
+        assert hooks._OVS_MANAGED_BY == hooks.OVS_MANAGED_BY_MICROOVN
+        snap.config.get.assert_called_once_with("network.ovs-managed-by")
+
+    def test_set_ovs_managed_by_hypervisor(self, snap):
+        """_set_ovs_managed_by caches 'hypervisor' from snap config."""
+        snap.config.get.return_value = hooks.OVS_MANAGED_BY_HYPERVISOR
+        hooks._set_ovs_managed_by(snap)
+        assert hooks._OVS_MANAGED_BY == hooks.OVS_MANAGED_BY_HYPERVISOR
+
+    def test_set_ovs_managed_by_auto(self, snap):
+        """_set_ovs_managed_by caches 'auto' from snap config."""
+        snap.config.get.return_value = hooks.OVS_MANAGED_BY_AUTO
+        hooks._set_ovs_managed_by(snap)
+        assert hooks._OVS_MANAGED_BY == hooks.OVS_MANAGED_BY_AUTO
+
+    def test_set_ovs_managed_by_invalid_falls_back_to_auto(self, snap):
+        """_set_ovs_managed_by falls back to 'auto' for unrecognised values."""
+        snap.config.get.return_value = "unknown-value"
+        hooks._set_ovs_managed_by(snap)
+        assert hooks._OVS_MANAGED_BY == hooks.OVS_MANAGED_BY_AUTO
+
+    def test_set_ovs_managed_by_none_falls_back_to_auto(self, snap):
+        """_set_ovs_managed_by falls back to 'auto' when config returns None."""
+        snap.config.get.return_value = None
+        hooks._set_ovs_managed_by(snap)
+        assert hooks._OVS_MANAGED_BY == hooks.OVS_MANAGED_BY_AUTO
+
+    def test_set_ovs_managed_by_clears_lru_cache(self, mocker, snap):
+        """_set_ovs_managed_by clears the is_ovs_external LRU cache."""
+        mock_cache_clear = mocker.patch.object(hooks.is_ovs_external, "cache_clear")
+        snap.config.get.return_value = hooks.OVS_MANAGED_BY_MICROOVN
+        hooks._set_ovs_managed_by(snap)
+        mock_cache_clear.assert_called_once()
+
 
 class TestExcludeServices:
     """Tests for _get_exclude_services function."""
@@ -1518,6 +1597,7 @@ class TestConfigureOVSDeferred:
         mocker.patch.object(hooks, "_get_exclude_services", return_value=[])
         mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
         mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        mocker.patch.object(hooks, "_external_ovs_ready", return_value=True)
         mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
         mocker.patch.object(hooks, "_render_templates")
         mocker.patch.object(hooks, "_configure_webdav_apache")
@@ -1535,6 +1615,50 @@ class TestConfigureOVSDeferred:
 
         mock_ready.assert_not_called()
         mock_ensure.assert_not_called()
+
+    def test_external_ovs_deferred_when_microovn_not_installed(self, mocker, snap):
+        """When microovn is not yet installed, OVS/OVN configuration is deferred."""
+        snap.services.list.return_value = {}
+        mocker.patch.object(hooks, "_mkdirs")
+        mocker.patch.object(hooks, "_update_default_config")
+        mocker.patch.object(hooks, "_setup_secrets")
+        mocker.patch.object(hooks, "_detect_compute_flavors")
+        mocker.patch.object(hooks, "_get_configure_context", return_value={"network": {}})
+        mocker.patch.object(hooks, "_get_exclude_services", return_value=[])
+        mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        # microovn socket does not exist yet
+        mocker.patch.object(hooks, "_external_ovs_ready", return_value=False)
+        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
+        mocker.patch.object(hooks, "_render_templates")
+        mocker.patch.object(hooks, "_configure_webdav_apache")
+        mocker.patch.object(hooks, "_configure_kvm")
+        mocker.patch.object(hooks, "_configure_monitoring_services")
+        mocker.patch.object(hooks, "_configure_ceph")
+        mocker.patch.object(hooks, "_configure_masakari_services")
+        mocker.patch.object(hooks, "_configure_sriov_agent_service")
+        mock_configure_tls = mocker.patch.object(hooks, "_configure_tls")
+        mock_configure_networking = mocker.patch.object(hooks, "_configure_networking")
+
+        hooks.configure(snap)
+
+        # TLS must be deferred (configure_ovn_tls=False)
+        mock_configure_tls.assert_called_once()
+        _, kwargs = mock_configure_tls.call_args
+        assert kwargs.get("configure_ovn_tls") is False
+        # Networking must NOT be called
+        mock_configure_networking.assert_not_called()
+
+    def test_external_ovs_ready_check_uses_socket_path(self, mocker, snap, tmp_path):
+        """_external_ovs_ready returns True only when the OVS socket exists."""
+        mocker.patch.object(hooks, "is_ovs_external", return_value=True)
+        socket_file = tmp_path / "db.sock"
+        mocker.patch.object(hooks, "_ovs_socket_path", return_value=socket_file)
+
+        assert hooks._external_ovs_ready(snap) is False
+
+        socket_file.touch()
+        assert hooks._external_ovs_ready(snap) is True
 
 
 class TestDPDKConfigReady:
