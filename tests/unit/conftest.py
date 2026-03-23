@@ -13,8 +13,9 @@ from openstack_hypervisor import hooks
 
 @pytest.fixture(autouse=True)
 def clear_ovs_external_cache():
-    """Clear the lru_cache on is_ovs_external before each test."""
+    """Clear the lru_cache on is_ovs_external and reset the managed-by config before each test."""
     hooks.is_ovs_external.cache_clear()
+    hooks._OVS_MANAGED_BY = hooks.OVS_MANAGED_BY_AUTO
 
 
 libvirt_mock = MagicMock()
