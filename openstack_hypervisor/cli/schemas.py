@@ -5,7 +5,7 @@
 from enum import Enum
 from typing import Annotated, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 API_VERSION: Literal["1.0"] = "1.0"
 
@@ -26,8 +26,10 @@ class AllocateCoresRequest(BaseModel):
     version: Literal["1.0"] = Field(default=API_VERSION)
     action: Literal[ActionType.ALLOCATE_CORES]
     service_name: str = Field(description="Name of the requesting service")
-    num_of_cores: int = Field(
+    cores_requested: int = Field(
         default=0,
+        validation_alias=AliasChoices("cores_requested", "num_of_cores"),
+        serialization_alias="cores_requested",
         description=("Number of dedicated cores requested. 0 keeps default policy."),
     )
     numa_node: Optional[int] = Field(
@@ -111,7 +113,10 @@ class AllocateCoresResponse(BaseModel):
 
     version: Literal["1.0"] = Field(default=API_VERSION)
     service_name: str = Field(description="Name of the service that was allocated cores")
-    num_of_cores: int = Field(description="Number of cores that were requested")
+    cores_requested: int = Field(
+        validation_alias=AliasChoices("cores_requested", "num_of_cores"),
+        description="Number of cores that were requested",
+    )
     cores_allocated: int = Field(description="Number of cores that were actually allocated")
     allocated_cores: str = Field(description="Comma-separated list of allocated CPU ranges")
     shared_cpus: str = Field(description="Comma-separated list of shared CPU ranges")

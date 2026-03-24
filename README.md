@@ -66,6 +66,17 @@ Only used with `compute.cpu-mode` is set to `custom`.
 For more details please refer to the Nova [configuration reference](https://docs.openstack.org/nova/latest/admin/cpu-models.html)
 for cpu models.
 
+* `compute.cpu-pinning-profile` Dedicated/shared split percentage
+
+When set to an integer `0-100`, the snap treats EPA orchestrator's
+`allocated_cores` as the source set and splits it into Nova CPU sets:
+
+- first `N%` of cores become `cpu_dedicated_set`
+- remaining cores become `cpu_shared_set`
+
+When unset (default), the snap uses EPA-returned `allocated_cores` and
+`shared_cpus` directly.
+
 * `compute.spice-proxy-address` (`localhost`) IP address for SPICE consoles
 
 IP address to use for configuration of SPICE consoles in instances.

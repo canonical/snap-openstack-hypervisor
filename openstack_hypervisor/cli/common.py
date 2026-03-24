@@ -83,7 +83,7 @@ def _communicate_with_socket(
     try:
         with pysocket.socket(pysocket.AF_UNIX, pysocket.SOCK_STREAM) as s:
             s.connect(socket_path)
-            s.sendall(request.json().encode())
+            s.sendall(request.model_dump_json(by_alias=True).encode())
             data = s.recv(4096)
             response_dict = json.loads(data.decode())
             if "error" in response_dict:
@@ -121,7 +121,7 @@ def get_cpu_pinning_from_socket(
     request = AllocateCoresRequest(
         service_name=service_name,
         action=ActionType.ALLOCATE_CORES,
-        num_of_cores=cores_requested,
+        cores_requested=cores_requested,
     )
     try:
         response = _communicate_with_socket(request, AllocateCoresResponse, socket_path)

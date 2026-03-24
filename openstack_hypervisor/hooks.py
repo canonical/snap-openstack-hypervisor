@@ -354,6 +354,7 @@ DEFAULT_CONFIG = {
     "compute.key": UNSET,
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
+    "compute.cpu-pinning-profile": UNSET,
     "compute.flavors": UNSET,
     "compute.pci-device-specs": [],
     "compute.pci-excluded-devices": [],
@@ -491,6 +492,52 @@ def _context_compat(context: Dict[str, Any]) -> Dict[str, Any]:
         else:
             clean_context[key] = _context_compat(value)
     return clean_context
+
+
+def _expand_cpu_ranges(cpu_ranges: str) -> List[int]:
+    """Expand comma-separated CPU ranges into an ordered list of CPU ids."""
+    cpus: List[int] = []
+    for token in cpu_ranges.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start, end = token.split("-", 1)
+            cpus.extend(list(range(int(start), int(end) + 1)))
+        else:
+            cpus.append(int(token))
+    return cpus
+
+
+def _compress_cpu_ranges(cpu_list: List[int]) -> str:
+    """Compress an ordered CPU list into Nova-compatible range notation."""
+    if not cpu_list:
+        return ""
+
+    ranges: List[str] = []
+    start = prev = cpu_list[0]
+    for cpu in cpu_list[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = cpu
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(ranges)
+
+
+def _split_dedicated_cores_by_profile(
+    dedicated_cores: str, dedicated_percentage: int
+) -> tuple[str, str]:
+    """Split dedicated cores into (shared_set, dedicated_set) by percentage."""
+    cores = _expand_cpu_ranges(dedicated_cores)
+    if not cores:
+        return "", ""
+
+    dedicated_count = int(len(cores) * dedicated_percentage / 100)
+    profile_dedicated = cores[:dedicated_count]
+    profile_shared = cores[dedicated_count:]
+    return _compress_cpu_ranges(profile_shared), _compress_cpu_ranges(profile_dedicated)
 
 
 TEMPLATES = {
@@ -3062,6 +3109,20 @@ def _get_configure_context(snap: Snap) -> dict:
         }
     )
     context = _context_compat(context)
+
+    cpu_pinning_profile = context["compute"].get("cpu_pinning_profile")
+    if cpu_pinning_profile not in ("", None):
+        try:
+            dedicated_percentage = int(cpu_pinning_profile)
+        except (TypeError, ValueError):
+            dedicated_percentage = -1
+        if 0 <= dedicated_percentage <= 100:
+            cpu_shared_set, allocated_cores = _split_dedicated_cores_by_profile(
+                allocated_cores, dedicated_percentage
+            )
+            context["compute"]["allocated_cores"] = allocated_cores
+            context["compute"]["cpu_shared_set"] = cpu_shared_set
+
     logging.info(context)
 
     if not context.get("identity"):
