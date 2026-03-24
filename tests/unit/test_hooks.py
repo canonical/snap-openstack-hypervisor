@@ -1543,6 +1543,9 @@ class TestConfigureOVSDeferred:
             "_ensure_internal_ovs_services",
             side_effect=lambda *_: order.append("ensure"),
         )
+        # Simulate charm already configured (real identity URL) so the OVS
+        # startup guard does not interfere with what this test is checking.
+        snap.config.get_options.return_value.get.return_value = "http://10.0.0.1:5000/v3"
 
         hooks.configure(snap)
 
@@ -1581,6 +1584,9 @@ class TestConfigureOVSDeferred:
             "_ensure_internal_ovs_services",
             side_effect=lambda *_: order.append("ensure"),
         )
+        # Simulate charm already configured (real identity URL) so the OVS
+        # startup guard does not interfere with what this test is checking.
+        snap.config.get_options.return_value.get.return_value = "http://10.0.0.1:5000/v3"
 
         hooks.configure(snap)
 
@@ -1659,6 +1665,141 @@ class TestConfigureOVSDeferred:
 
         socket_file.touch()
         assert hooks._external_ovs_ready(snap) is True
+
+    def test_internal_ovs_not_started_on_unconfigured_first_run(self, mocker, snap):
+        """Internal OVS services must NOT be started while identity is unconfigured.
+
+        Snapd fires a configure hook automatically right after 'snap install', and
+        again when the charm calls ``snap set network.ovs-managed-by=auto`` in its
+        own install hook — both times before any real Keystone URL has been provided.
+        The snap detects this by checking that ``identity.auth-url`` still equals the
+        placeholder default.  In that state ``_ensure_internal_ovs_services`` must be
+        skipped to avoid creating ``system@ovs-system`` before microovn installs.
+        """
+        snap.services.list.return_value = {}
+        mocker.patch.object(hooks, "_mkdirs")
+        mocker.patch.object(hooks, "_update_default_config")
+        mocker.patch.object(hooks, "_setup_secrets")
+        mocker.patch.object(hooks, "_detect_compute_flavors")
+        mocker.patch.object(hooks, "_get_configure_context", return_value={"network": {}})
+        mocker.patch.object(hooks, "_get_exclude_services", return_value=[])
+        mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
+        # OVS mode is 'auto' (default from conftest) and plug is not connected
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        mocker.patch.object(hooks, "_internal_ovs_ready", return_value=True)
+        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
+        mocker.patch.object(hooks, "_render_templates")
+        mocker.patch.object(hooks, "_configure_webdav_apache")
+        mocker.patch.object(hooks, "_configure_tls")
+        mocker.patch.object(hooks, "_configure_networking")
+        mocker.patch.object(hooks, "_configure_kvm")
+        mocker.patch.object(hooks, "_configure_monitoring_services")
+        mocker.patch.object(hooks, "_configure_ceph")
+        mocker.patch.object(hooks, "_configure_masakari_services")
+        mocker.patch.object(hooks, "_configure_sriov_agent_service")
+        mock_ensure = mocker.patch.object(hooks, "_ensure_internal_ovs_services")
+
+        # Simulate snap not yet configured by the charm: identity URL is the placeholder
+        # AND username has not been set yet (None).  Both conditions must hold for the
+        # guard to defer OVS startup.
+        def unconfigured_identity_get(key, default=None):
+            if key == "identity.auth-url":
+                return hooks.DEFAULT_CONFIG["identity.auth-url"]
+            if key == "identity.username":
+                return None
+            return default
+
+        snap.config.get_options.return_value.get.side_effect = unconfigured_identity_get
+
+        hooks.configure(snap)
+
+        # _ensure_internal_ovs_services must NOT have been called — starting
+        # ovs-vswitchd here would create system@ovs-system and block microovn.
+        mock_ensure.assert_not_called()
+
+    def test_internal_ovs_started_when_managed_by_hypervisor_with_default_identity(
+        self, mocker, snap
+    ):
+        """Internal OVS must start when explicitly managed by 'hypervisor'.
+
+        Even if ``identity.auth-url`` is still at the placeholder default and
+        ``identity.username`` has not been set (i.e. the charm hasn't configured
+        identity yet), setting ``network.ovs-managed-by`` to ``'hypervisor'`` must
+        bypass the guard and ensure internal OVS services are started.
+        """
+        snap.services.list.return_value = {}
+        mocker.patch.object(hooks, "_mkdirs")
+        mocker.patch.object(hooks, "_update_default_config")
+        mocker.patch.object(hooks, "_setup_secrets")
+        # Force OVS mode to 'hypervisor' (simulates charm explicitly setting it).
+        mocker.patch.object(
+            hooks,
+            "_set_ovs_managed_by",
+            side_effect=lambda _: setattr(
+                hooks, "_OVS_MANAGED_BY", hooks.OVS_MANAGED_BY_HYPERVISOR
+            ),
+        )
+        mocker.patch.object(hooks, "_detect_compute_flavors")
+        mocker.patch.object(hooks, "_get_configure_context", return_value={"network": {}})
+        mocker.patch.object(hooks, "_get_exclude_services", return_value=[])
+        mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        mocker.patch.object(hooks, "_internal_ovs_ready", return_value=True)
+        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
+        mocker.patch.object(hooks, "_render_templates")
+        mocker.patch.object(hooks, "_configure_webdav_apache")
+        mocker.patch.object(hooks, "_configure_tls")
+        mocker.patch.object(hooks, "_configure_networking")
+        mocker.patch.object(hooks, "_configure_kvm")
+        mocker.patch.object(hooks, "_configure_monitoring_services")
+        mocker.patch.object(hooks, "_configure_ceph")
+        mocker.patch.object(hooks, "_configure_masakari_services")
+        mocker.patch.object(hooks, "_configure_sriov_agent_service")
+        mock_ensure = mocker.patch.object(hooks, "_ensure_internal_ovs_services")
+        # Identity is still unconfigured (placeholder URL, no username) — the guard
+        # must be bypassed because mode is explicitly 'hypervisor'.
+        snap.config.get_options.return_value.get.return_value = hooks.DEFAULT_CONFIG[
+            "identity.auth-url"
+        ]
+
+        hooks.configure(snap)
+
+        mock_ensure.assert_called_once()
+
+    def test_internal_ovs_started_when_identity_configured(self, mocker, snap):
+        """Internal OVS must start once the charm has provided a real identity URL.
+
+        When ``identity.auth-url`` has been set to a real Keystone endpoint (anything
+        other than the placeholder default) and ``network.ovs-managed-by`` is 'auto'
+        with no plug connected, ``_ensure_internal_ovs_services`` must be called.
+        """
+        snap.services.list.return_value = {}
+        mocker.patch.object(hooks, "_mkdirs")
+        mocker.patch.object(hooks, "_update_default_config")
+        mocker.patch.object(hooks, "_setup_secrets")
+        mocker.patch.object(hooks, "_detect_compute_flavors")
+        mocker.patch.object(hooks, "_get_configure_context", return_value={"network": {}})
+        mocker.patch.object(hooks, "_get_exclude_services", return_value=[])
+        mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
+        mocker.patch.object(hooks, "is_ovs_external", return_value=False)
+        mocker.patch.object(hooks, "_internal_ovs_ready", return_value=True)
+        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
+        mocker.patch.object(hooks, "_render_templates")
+        mocker.patch.object(hooks, "_configure_webdav_apache")
+        mocker.patch.object(hooks, "_configure_tls")
+        mocker.patch.object(hooks, "_configure_networking")
+        mocker.patch.object(hooks, "_configure_kvm")
+        mocker.patch.object(hooks, "_configure_monitoring_services")
+        mocker.patch.object(hooks, "_configure_ceph")
+        mocker.patch.object(hooks, "_configure_masakari_services")
+        mocker.patch.object(hooks, "_configure_sriov_agent_service")
+        mock_ensure = mocker.patch.object(hooks, "_ensure_internal_ovs_services")
+        # Charm has provided the real Keystone URL.
+        snap.config.get_options.return_value.get.return_value = "http://10.0.0.1:5000/v3"
+
+        hooks.configure(snap)
+
+        mock_ensure.assert_called_once()
 
 
 class TestDPDKConfigReady:
