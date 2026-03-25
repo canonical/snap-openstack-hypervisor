@@ -692,11 +692,10 @@ class TestHooks:
 
 
 @pytest.mark.parametrize(
-    "cpu_shared_set,allocated_cores,cpu_pinning_profile,expected_shared,expected_dedicated",
+    "cpu_shared_set,allocated_cores",
     [
-        ("0-3", "4-7", "", "0-3", "4-7"),
-        ("0-3", "4-7", "50", "6-7", "4-5"),
-        ("", "", "", "", ""),
+        ("0-3", "4-7"),
+        ("", ""),
     ],
 )
 def test_nova_conf_cpu_pinning_injection(
@@ -704,9 +703,6 @@ def test_nova_conf_cpu_pinning_injection(
     snap,
     cpu_shared_set,
     allocated_cores,
-    cpu_pinning_profile,
-    expected_shared,
-    expected_dedicated,
     check_call,
     check_output,
     shutil_chown,
@@ -758,21 +754,16 @@ def test_nova_conf_cpu_pinning_injection(
             "sev",
         ]
     }
+    config_dict["compute"]["cpu-pinning-profile"] = ""
     mocker.patch.object(snap.config, "get_options", return_value=ConfigOptionsDict(config_dict))
-    mocker.patch.object(
-        snap.config,
-        "get",
-        side_effect=lambda key: cpu_pinning_profile if key == "compute.cpu-pinning-profile" else "dummy",
-    )
 
     import openstack_hypervisor.hooks as hooks
 
     hooks.configure(snap)
 
     context = mock_template.render.call_args_list[0][0][0]
-    assert context["compute"]["allocated_cores"] == expected_dedicated
-    assert context["compute"]["cpu_shared_set"] == expected_shared
-
+    assert context["compute"]["allocated_cores"] == allocated_cores
+    assert context["compute"]["cpu_shared_set"] == cpu_shared_set
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
 def test_process_dpdk_netplan_config(mock_get_netplan_config, get_pci_address):

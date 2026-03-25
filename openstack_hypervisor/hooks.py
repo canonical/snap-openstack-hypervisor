@@ -10,6 +10,7 @@ import glob
 import hashlib
 import ipaddress
 import json
+import math
 import logging
 import os
 import platform
@@ -54,6 +55,7 @@ from openstack_hypervisor.cli.common import (
     EPAOrchestratorError,
     SocketCommunicationError,
     get_cpu_pinning_from_socket,
+    get_cpu_pinning_percent_from_socket,
     socket_path,
 )
 from openstack_hypervisor.log import setup_logging
@@ -534,7 +536,7 @@ def _split_dedicated_cores_by_profile(
     if not cores:
         return "", ""
 
-    dedicated_count = int(len(cores) * dedicated_percentage / 100)
+    dedicated_count = math.ceil(len(cores) * dedicated_percentage / 100)
     profile_dedicated = cores[:dedicated_count]
     profile_shared = cores[dedicated_count:]
     return _compress_cpu_ranges(profile_shared), _compress_cpu_ranges(profile_dedicated)
@@ -3068,17 +3070,6 @@ def configure(snap: Snap) -> None:
 
 
 def _get_configure_context(snap: Snap) -> dict:
-    try:
-        cpu_shared_set, allocated_cores = get_cpu_pinning_from_socket(
-            service_name=snap.name, socket_path=socket_path(snap), cores_requested=0
-        )
-    except (SocketCommunicationError, EPAOrchestratorError) as e:
-        if "No Isolated CPUs configured" in str(e):
-            logging.info("No Isolated CPUs configured, continuing without CPU pinning.")
-            cpu_shared_set, allocated_cores = "", ""
-        else:
-            logging.warning(f"Failed to get CPU pinning info from EPA orchestrator: {e}")
-            cpu_shared_set, allocated_cores = "", ""
     context = snap.config.get_options(
         "compute",
         "network",
@@ -3094,9 +3085,6 @@ def _get_configure_context(snap: Snap) -> dict:
         "sev",
         "internal",
     ).as_dict()
-    context["compute"]["allocated_cores"] = allocated_cores
-    context["compute"]["cpu_shared_set"] = cpu_shared_set
-
     context["compute"]["multipath_enabled"] = (
         context["compute"].get("multipath_forced", False) or _is_multipathd_available()
     )
@@ -3111,17 +3099,37 @@ def _get_configure_context(snap: Snap) -> dict:
     context = _context_compat(context)
 
     cpu_pinning_profile = context["compute"].get("cpu_pinning_profile")
-    if cpu_pinning_profile not in ("", None):
-        try:
-            dedicated_percentage = int(cpu_pinning_profile)
-        except (TypeError, ValueError):
-            dedicated_percentage = -1
-        if 0 <= dedicated_percentage <= 100:
+    try:
+        if cpu_pinning_profile:
+            # Expected JSON:
+            # {"dedicated_percentage": <1-99>, "requested_cores_percentage": <0-100>}
+            dedicated_percentage = int(cpu_pinning_profile["dedicated_percentage"])
+            requested_cores_percentage = int(cpu_pinning_profile["requested_cores_percentage"])
+            allocated_cores = get_cpu_pinning_percent_from_socket(
+                service_name=snap.name,
+                socket_path=socket_path(snap),
+                requested_cores_percentage=requested_cores_percentage,
+            )
             cpu_shared_set, allocated_cores = _split_dedicated_cores_by_profile(
                 allocated_cores, dedicated_percentage
             )
-            context["compute"]["allocated_cores"] = allocated_cores
-            context["compute"]["cpu_shared_set"] = cpu_shared_set
+        else:
+            cpu_shared_set, allocated_cores = get_cpu_pinning_from_socket(
+                service_name=snap.name,
+                socket_path=socket_path(snap),
+                cores_requested=0,
+            )
+    except (SocketCommunicationError, EPAOrchestratorError) as e:
+        if "No Isolated CPUs configured" in str(e):
+            logging.info("No Isolated CPUs configured, continuing without CPU pinning.")
+        else:
+            logging.warning(
+                f"Failed to get CPU pinning info from EPA orchestrator: {e}"
+            )
+        cpu_shared_set, allocated_cores = "", ""
+
+    context["compute"]["allocated_cores"] = allocated_cores
+    context["compute"]["cpu_shared_set"] = cpu_shared_set
 
     logging.info(context)
 

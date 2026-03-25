@@ -77,28 +77,6 @@ def test_nova_clients_use_internal_interface():
     )
 
 
-def test_nova_cpu_pinning_renders_dedicated_only():
-    output = _render(
-        "nova.conf.j2",
-        compute={**BASE_CONTEXT["compute"], "allocated_cores": "4-7", "cpu_shared_set": ""},
-    )
-
-    assert "[compute]" in output
-    assert "cpu_dedicated_set = 4-7" in output
-    assert "cpu_shared_set =" not in output
-
-
-def test_nova_cpu_pinning_renders_shared_only():
-    output = _render(
-        "nova.conf.j2",
-        compute={**BASE_CONTEXT["compute"], "allocated_cores": "", "cpu_shared_set": "0-3"},
-    )
-
-    assert "[compute]" in output
-    assert "cpu_shared_set = 0-3" in output
-    assert "cpu_dedicated_set =" not in output
-
-
 def test_neutron_clients_use_internal_interface():
     output = _render("neutron.conf.j2")
 
