@@ -3017,7 +3017,36 @@ def configure(snap: Snap) -> None:
         snap, bool(context.get("network", {}).get("sriov_nic_physical_device_mappings"))
     )
     if not ovs_external:
-        _ensure_internal_ovs_services(snap, exclude_services)
+        # When OVS mode is 'auto', the snap doesn't yet know whether microovn will be
+        # used.  The reliable signal that the charm has finished its initial configuration
+        # is that identity credentials have been set: identity.auth-url is a real Keystone
+        # endpoint (not the placeholder default) AND identity.username has been provided.
+        # Until then, skip starting ovs-vswitchd: creating system@ovs-system here would
+        # block a concurrently-installing microovn snap.
+        #
+        # Checking both fields guards against the edge case where an operator legitimately
+        # runs Keystone at http://localhost:5000/v3 — in that scenario the charm will
+        # always have set identity.username so the guard still clears correctly.
+        #
+        # When OVS mode is explicitly 'hypervisor' (operator/charm intent is clear),
+        # bypass this check and start internal OVS immediately.
+        identity_opts = snap.config.get_options("identity")
+        identity_url = identity_opts.get("identity.auth-url")
+        identity_username = identity_opts.get("identity.username")
+        charm_not_configured = (
+            _OVS_MANAGED_BY == OVS_MANAGED_BY_AUTO
+            and identity_url == DEFAULT_CONFIG["identity.auth-url"]
+            and identity_username is None
+        )
+        if charm_not_configured:
+            logging.info(
+                "identity.auth-url is still the default placeholder and "
+                "identity.username is unset: the charm has not yet applied "
+                "configuration. Deferring internal OVS service startup to avoid "
+                "creating system@ovs-system before microovn can install."
+            )
+        else:
+            _ensure_internal_ovs_services(snap, exclude_services)
 
 
 def _get_configure_context(snap: Snap) -> dict:
