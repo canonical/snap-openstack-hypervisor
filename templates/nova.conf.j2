@@ -74,11 +74,15 @@ swtpm_group = snap_daemon
 # are placed on the shared set, but this can be customized in Nova. For more details on
 # emulator thread pinning policies and their impact, see:
 # https://docs.openstack.org/nova/latest/admin/cpu-topologies.html#customizing-instance-emulator-thread-pinning-policy
-{% if compute.allocated_cores and compute.cpu_shared_set -%}
+{% if compute.allocated_cores or compute.cpu_shared_set -%}
 [compute]
+{% if compute.allocated_cores -%}
 cpu_dedicated_set = {{ compute.allocated_cores }}
+{% endif -%}
+{% if compute.cpu_shared_set -%}
 cpu_shared_set = {{ compute.cpu_shared_set }}
 {% endif %}
+{% endif -%}
 
 {% if compute.rbd_secret_uuid -%}
 rbd_user = {{ compute.rbd_user }}

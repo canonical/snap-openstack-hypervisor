@@ -10,8 +10,8 @@ import glob
 import hashlib
 import ipaddress
 import json
-import math
 import logging
+import math
 import os
 import platform
 import re
@@ -3085,10 +3085,6 @@ def _get_configure_context(snap: Snap) -> dict:
         "sev",
         "internal",
     ).as_dict()
-    context["compute"]["multipath_enabled"] = (
-        context["compute"].get("multipath_forced", False) or _is_multipathd_available()
-    )
-
     context.update(
         {
             "snap_common": str(snap.paths.common),
@@ -3097,12 +3093,16 @@ def _get_configure_context(snap: Snap) -> dict:
         }
     )
     context = _context_compat(context)
+    context.setdefault("compute", {})
+    context.setdefault("network", {})
+    context.setdefault("identity", {})
+    context["compute"]["multipath_enabled"] = (
+        context["compute"].get("multipath_forced", False) or _is_multipathd_available()
+    )
 
     cpu_pinning_profile = context["compute"].get("cpu_pinning_profile")
     try:
         if cpu_pinning_profile:
-            # Expected JSON:
-            # {"dedicated_percentage": <1-99>, "requested_cores_percentage": <0-100>}
             dedicated_percentage = int(cpu_pinning_profile["dedicated_percentage"])
             requested_cores_percentage = int(cpu_pinning_profile["requested_cores_percentage"])
             allocated_cores = get_cpu_pinning_percent_from_socket(
@@ -3123,9 +3123,7 @@ def _get_configure_context(snap: Snap) -> dict:
         if "No Isolated CPUs configured" in str(e):
             logging.info("No Isolated CPUs configured, continuing without CPU pinning.")
         else:
-            logging.warning(
-                f"Failed to get CPU pinning info from EPA orchestrator: {e}"
-            )
+            logging.warning(f"Failed to get CPU pinning info from EPA orchestrator: {e}")
         cpu_shared_set, allocated_cores = "", ""
 
     context["compute"]["allocated_cores"] = allocated_cores

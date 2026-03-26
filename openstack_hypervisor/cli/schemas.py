@@ -29,10 +29,7 @@ class AllocateCoresRequest(BaseModel):
     service_name: str = Field(description="Name of the requesting service")
     num_of_cores: int = Field(
         default=0,
-        description="Number of dedicated cores requested. 0 keeps default policy.",
-    )
-    numa_node: Optional[int] = Field(
-        default=None, ge=0, description="NUMA node (must be omitted for allocate_cores)"
+        description=("Number of dedicated cores requested. 0 keeps default policy."),
     )
 
 
@@ -150,7 +147,9 @@ class AllocateCoresPercentResponse(BaseModel):
     cores_allocated_count: int = Field(description="Number of cores that were actually allocated")
     allocated_cores: str = Field(description="Comma-separated list of allocated CPU ranges")
     total_available_cpus: int = Field(description="Total number of CPUs available in the system")
-    remaining_available_cpus: int = Field(description="Number of CPUs still available for allocation")
+    remaining_available_cpus: int = Field(
+        description="Number of CPUs still available for allocation"
+    )
 
 
 class AllocateNumaCoresResponse(BaseModel):

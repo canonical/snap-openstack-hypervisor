@@ -12,10 +12,10 @@ from snaphelpers import Snap
 
 from .schemas import (
     ActionType,
-    AllocateCoresRequest,
-    AllocateCoresResponse,
     AllocateCoresPercentRequest,
     AllocateCoresPercentResponse,
+    AllocateCoresRequest,
+    AllocateCoresResponse,
     AllocateHugepagesRequest,
     AllocateNumaCoresRequest,
     GetMemoryInfoRequest,
@@ -149,7 +149,5 @@ def get_cpu_pinning_percent_from_socket(
         action=ActionType.ALLOCATE_CORES_PERCENT,
         percent=requested_cores_percentage,
     )
-    response = _communicate_with_socket(
-        request, AllocateCoresPercentResponse, socket_path
-    )
+    response = _communicate_with_socket(request, AllocateCoresPercentResponse, socket_path)
     return response.allocated_cores
