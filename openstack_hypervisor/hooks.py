@@ -11,6 +11,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -54,6 +55,7 @@ from openstack_hypervisor.cli.common import (
     EPAOrchestratorError,
     SocketCommunicationError,
     get_cpu_pinning_from_socket,
+    get_cpu_pinning_percent_from_socket,
     socket_path,
 )
 from openstack_hypervisor.log import setup_logging
@@ -354,6 +356,7 @@ DEFAULT_CONFIG = {
     "compute.key": UNSET,
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
+    "compute.cpu-pinning-profile": UNSET,
     "compute.flavors": UNSET,
     "compute.pci-device-specs": [],
     "compute.pci-excluded-devices": [],
@@ -491,6 +494,52 @@ def _context_compat(context: Dict[str, Any]) -> Dict[str, Any]:
         else:
             clean_context[key] = _context_compat(value)
     return clean_context
+
+
+def _expand_cpu_ranges(cpu_ranges: str) -> List[int]:
+    """Expand comma-separated CPU ranges into an ordered list of CPU ids."""
+    cpus: List[int] = []
+    for token in cpu_ranges.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start, end = token.split("-", 1)
+            cpus.extend(list(range(int(start), int(end) + 1)))
+        else:
+            cpus.append(int(token))
+    return cpus
+
+
+def _compress_cpu_ranges(cpu_list: List[int]) -> str:
+    """Compress an ordered CPU list into Nova-compatible range notation."""
+    if not cpu_list:
+        return ""
+
+    ranges: List[str] = []
+    start = prev = cpu_list[0]
+    for cpu in cpu_list[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = cpu
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(ranges)
+
+
+def _split_dedicated_cores_by_profile(
+    dedicated_cores: str, dedicated_percentage: int
+) -> tuple[str, str]:
+    """Split dedicated cores into (shared_set, dedicated_set) by percentage."""
+    cores = _expand_cpu_ranges(dedicated_cores)
+    if not cores:
+        return "", ""
+
+    dedicated_count = math.ceil(len(cores) * dedicated_percentage / 100)
+    profile_dedicated = cores[:dedicated_count]
+    profile_shared = cores[dedicated_count:]
+    return _compress_cpu_ranges(profile_shared), _compress_cpu_ranges(profile_dedicated)
 
 
 TEMPLATES = {
@@ -3050,17 +3099,6 @@ def configure(snap: Snap) -> None:
 
 
 def _get_configure_context(snap: Snap) -> dict:
-    try:
-        cpu_shared_set, allocated_cores = get_cpu_pinning_from_socket(
-            service_name=snap.name, socket_path=socket_path(snap), cores_requested=0
-        )
-    except (SocketCommunicationError, EPAOrchestratorError) as e:
-        if "No Isolated CPUs configured" in str(e):
-            logging.info("No Isolated CPUs configured, continuing without CPU pinning.")
-            cpu_shared_set, allocated_cores = "", ""
-        else:
-            logging.warning(f"Failed to get CPU pinning info from EPA orchestrator: {e}")
-            cpu_shared_set, allocated_cores = "", ""
     context = snap.config.get_options(
         "compute",
         "network",
@@ -3076,13 +3114,6 @@ def _get_configure_context(snap: Snap) -> dict:
         "sev",
         "internal",
     ).as_dict()
-    context["compute"]["allocated_cores"] = allocated_cores
-    context["compute"]["cpu_shared_set"] = cpu_shared_set
-
-    context["compute"]["multipath_enabled"] = (
-        context["compute"].get("multipath_forced", False) or _is_multipathd_available()
-    )
-
     context.update(
         {
             "snap_common": str(snap.paths.common),
@@ -3091,6 +3122,42 @@ def _get_configure_context(snap: Snap) -> dict:
         }
     )
     context = _context_compat(context)
+    context.setdefault("compute", {})
+    context.setdefault("network", {})
+    context.setdefault("identity", {})
+    context["compute"]["multipath_enabled"] = (
+        context["compute"].get("multipath_forced", False) or _is_multipathd_available()
+    )
+
+    cpu_pinning_profile = context["compute"].get("cpu_pinning_profile")
+    try:
+        if cpu_pinning_profile:
+            dedicated_percentage = int(cpu_pinning_profile["dedicated_percentage"])
+            requested_cores_percentage = int(cpu_pinning_profile["requested_cores_percentage"])
+            allocated_cores = get_cpu_pinning_percent_from_socket(
+                service_name=snap.name,
+                socket_path=socket_path(snap),
+                requested_cores_percentage=requested_cores_percentage,
+            )
+            cpu_shared_set, allocated_cores = _split_dedicated_cores_by_profile(
+                allocated_cores, dedicated_percentage
+            )
+        else:
+            cpu_shared_set, allocated_cores = get_cpu_pinning_from_socket(
+                service_name=snap.name,
+                socket_path=socket_path(snap),
+                cores_requested=0,
+            )
+    except (SocketCommunicationError, EPAOrchestratorError) as e:
+        if "No Isolated CPUs configured" in str(e):
+            logging.info("No Isolated CPUs configured, continuing without CPU pinning.")
+        else:
+            logging.warning(f"Failed to get CPU pinning info from EPA orchestrator: {e}")
+        cpu_shared_set, allocated_cores = "", ""
+
+    context["compute"]["allocated_cores"] = allocated_cores
+    context["compute"]["cpu_shared_set"] = cpu_shared_set
+
     logging.info(context)
 
     if not context.get("identity"):

@@ -184,6 +184,7 @@ class TestHooks:
         mocker.patch.object(hooks, "_secure_copy")
         mocker.patch.object(hooks, "_configure_webdav_apache")
         mocker.patch.object(hooks, "_process_dpdk_ports")
+        mocker.patch.object(hooks, "_is_multipathd_available", return_value=False)
         mocker.patch.object(hooks, "_get_template", return_value=mock_template)
         mocker.patch.object(hooks, "OVSCli", spec=hooks.OVSCli)
         mock_write_text = mocker.patch.object(hooks.Path, "write_text")
@@ -692,10 +693,10 @@ class TestHooks:
 
 
 @pytest.mark.parametrize(
-    "cpu_shared_set,allocated_cores,should_include",
+    "cpu_shared_set,allocated_cores",
     [
-        ("0-3", "4-7", True),
-        ("", "", False),
+        ("0-3", "4-7"),
+        ("", ""),
     ],
 )
 def test_nova_conf_cpu_pinning_injection(
@@ -703,7 +704,6 @@ def test_nova_conf_cpu_pinning_injection(
     snap,
     cpu_shared_set,
     allocated_cores,
-    should_include,
     check_call,
     check_output,
     shutil_chown,
@@ -723,6 +723,7 @@ def test_nova_conf_cpu_pinning_injection(
         "_configure_ovn_base",
         "_configure_ovn_external_networking",
         "_configure_ovn_base_external_ovs",
+        "_configure_webdav_apache",
         "_configure_kvm",
         "_configure_monitoring_services",
         "_configure_ceph",
@@ -755,20 +756,77 @@ def test_nova_conf_cpu_pinning_injection(
             "sev",
         ]
     }
+    config_dict["compute"]["cpu-pinning-profile"] = ""
     mocker.patch.object(snap.config, "get_options", return_value=ConfigOptionsDict(config_dict))
-    mocker.patch.object(snap.config, "get", return_value="dummy")
 
     import openstack_hypervisor.hooks as hooks
 
     hooks.configure(snap)
 
     context = mock_template.render.call_args_list[0][0][0]
-    if should_include:
-        assert context["compute"]["allocated_cores"] == allocated_cores
-        assert context["compute"]["cpu_shared_set"] == cpu_shared_set
-    else:
-        assert context["compute"]["allocated_cores"] == ""
-        assert context["compute"]["cpu_shared_set"] == ""
+    assert context["compute"]["allocated_cores"] == allocated_cores
+    assert context["compute"]["cpu_shared_set"] == cpu_shared_set
+
+
+def test_get_configure_context_cpu_pinning_profile_percent_path(mocker, snap):
+    profile = {"dedicated_percentage": 40, "requested_cores_percentage": 50}
+    epa_allocated_cores = "2-9"
+    split_shared_set = "2-4"
+    split_allocated_cores = "5-9"
+
+    mock_get_percent = mocker.patch(
+        "openstack_hypervisor.hooks.get_cpu_pinning_percent_from_socket",
+        return_value=epa_allocated_cores,
+    )
+    mock_split = mocker.patch(
+        "openstack_hypervisor.hooks._split_dedicated_cores_by_profile",
+        return_value=(split_shared_set, split_allocated_cores),
+    )
+    mock_legacy_get = mocker.patch("openstack_hypervisor.hooks.get_cpu_pinning_from_socket")
+
+    class ConfigOptionsDict(dict):
+        def as_dict(self):
+            return dict(self)
+
+    config_dict = {
+        k: {}
+        for k in [
+            "compute",
+            "network",
+            "identity",
+            "logging",
+            "node",
+            "rabbitmq",
+            "credentials",
+            "telemetry",
+            "monitoring",
+            "ca",
+            "masakari",
+            "sev",
+            "internal",
+        ]
+    }
+    config_dict["compute"]["cpu-pinning-profile"] = profile
+    mocker.patch.object(snap.config, "get_options", return_value=ConfigOptionsDict(config_dict))
+    mocker.patch("openstack_hypervisor.hooks._is_multipathd_available", return_value=False)
+    mocker.patch(
+        "openstack_hypervisor.hooks.ovs_switch_socket",
+        return_value="unix:/var/snap/openstack-hypervisor/common/run/openvswitch/db.sock",
+    )
+
+    import openstack_hypervisor.hooks as hooks
+
+    context = hooks._get_configure_context(snap)
+
+    mock_get_percent.assert_called_once_with(
+        service_name=snap.name,
+        socket_path=hooks.socket_path(snap),
+        requested_cores_percentage=profile["requested_cores_percentage"],
+    )
+    mock_split.assert_called_once_with(epa_allocated_cores, profile["dedicated_percentage"])
+    mock_legacy_get.assert_not_called()
+    assert context["compute"]["allocated_cores"] == split_allocated_cores
+    assert context["compute"]["cpu_shared_set"] == split_shared_set
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")

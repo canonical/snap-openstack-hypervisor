@@ -12,6 +12,8 @@ from snaphelpers import Snap
 
 from .schemas import (
     ActionType,
+    AllocateCoresPercentRequest,
+    AllocateCoresPercentResponse,
     AllocateCoresRequest,
     AllocateCoresResponse,
     AllocateHugepagesRequest,
@@ -57,6 +59,7 @@ def socket_path(snap: Snap) -> str:
 def _communicate_with_socket(
     request: Union[
         AllocateCoresRequest,
+        AllocateCoresPercentRequest,
         AllocateNumaCoresRequest,
         AllocateHugepagesRequest,
         GetMemoryInfoRequest,
@@ -83,7 +86,7 @@ def _communicate_with_socket(
     try:
         with pysocket.socket(pysocket.AF_UNIX, pysocket.SOCK_STREAM) as s:
             s.connect(socket_path)
-            s.sendall(request.json().encode())
+            s.sendall(request.model_dump_json(by_alias=True, exclude_none=True).encode())
             data = s.recv(4096)
             response_dict = json.loads(data.decode())
             if "error" in response_dict:
@@ -129,3 +132,22 @@ def get_cpu_pinning_from_socket(
     except (SocketCommunicationError, EPAOrchestratorError) as e:
         logging.error("Failed to get CPU pinning info from socket: {}".format(e))
         raise
+
+
+def get_cpu_pinning_percent_from_socket(
+    service_name: str,
+    socket_path: str,
+    requested_cores_percentage: int,
+) -> str:
+    """Get allocated cores from EPA based on requested percentage.
+
+    Returns EPA `allocated_cores` only; callers can derive any shared/dedicated
+    Nova sets they need.
+    """
+    request = AllocateCoresPercentRequest(
+        service_name=service_name,
+        action=ActionType.ALLOCATE_CORES_PERCENT,
+        percent=requested_cores_percentage,
+    )
+    response = _communicate_with_socket(request, AllocateCoresPercentResponse, socket_path)
+    return response.allocated_cores

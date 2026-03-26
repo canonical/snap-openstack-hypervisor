@@ -14,6 +14,7 @@ class ActionType(str, Enum):
     """Enum for different action types."""
 
     ALLOCATE_CORES = "allocate_cores"
+    ALLOCATE_CORES_PERCENT = "allocate_cores_percent"
     LIST_ALLOCATIONS = "list_allocations"
     ALLOCATE_NUMA_CORES = "allocate_numa_cores"
     GET_MEMORY_INFO = "get_memory_info"
@@ -30,8 +31,18 @@ class AllocateCoresRequest(BaseModel):
         default=0,
         description=("Number of dedicated cores requested. 0 keeps default policy."),
     )
-    numa_node: Optional[int] = Field(
-        default=None, ge=0, description="NUMA node (must be omitted for allocate_cores)"
+
+
+class AllocateCoresPercentRequest(BaseModel):
+    """Request model for allocating a percentage of isolated cores."""
+
+    version: Literal["1.0"] = Field(default=API_VERSION)
+    action: Literal[ActionType.ALLOCATE_CORES_PERCENT]
+    service_name: str = Field(description="Name of the requesting service")
+    percent: int = Field(
+        ge=-1,
+        le=100,
+        description="Percentage of isolated cores to allocate (0-100). -1 or 0 to deallocate.",
     )
 
 
@@ -40,7 +51,10 @@ class ListAllocationsRequest(BaseModel):
 
     version: Literal["1.0"] = Field(default=API_VERSION)
     action: Literal[ActionType.LIST_ALLOCATIONS]
-    service_name: str = Field(description="Name of the requesting service")
+    service_name: Optional[str] = Field(
+        default=None,
+        description="Name of the requesting service (optional)",
+    )
 
 
 class AllocateNumaCoresRequest(BaseModel):
@@ -64,7 +78,10 @@ class GetMemoryInfoRequest(BaseModel):
 
     version: Literal["1.0"] = Field(default=API_VERSION)
     action: Literal[ActionType.GET_MEMORY_INFO]
-    service_name: str = Field(description="Name of the requesting service")
+    service_name: Optional[str] = Field(
+        default=None,
+        description="Name of the requesting service (optional)",
+    )
 
 
 class AllocateHugepagesRequest(BaseModel):
@@ -97,6 +114,7 @@ class AllocateHugepagesRequest(BaseModel):
 EpaRequest = Annotated[
     Union[
         AllocateCoresRequest,
+        AllocateCoresPercentRequest,
         AllocateNumaCoresRequest,
         ListAllocationsRequest,
         GetMemoryInfoRequest,
@@ -115,6 +133,19 @@ class AllocateCoresResponse(BaseModel):
     cores_allocated: int = Field(description="Number of cores that were actually allocated")
     allocated_cores: str = Field(description="Comma-separated list of allocated CPU ranges")
     shared_cpus: str = Field(description="Comma-separated list of shared CPU ranges")
+    total_available_cpus: int = Field(description="Total number of CPUs available in the system")
+    remaining_available_cpus: int = Field(
+        description="Number of CPUs still available for allocation"
+    )
+
+
+class AllocateCoresPercentResponse(BaseModel):
+    """Pydantic model for allocate cores percent response."""
+
+    version: Literal["1.0"] = Field(default=API_VERSION)
+    service_name: str = Field(description="Name of the service that was allocated cores")
+    cores_allocated_count: int = Field(description="Number of cores that were actually allocated")
+    allocated_cores: str = Field(description="Comma-separated list of allocated CPU ranges")
     total_available_cpus: int = Field(description="Total number of CPUs available in the system")
     remaining_available_cpus: int = Field(
         description="Number of CPUs still available for allocation"
