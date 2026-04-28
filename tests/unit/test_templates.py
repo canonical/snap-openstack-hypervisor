@@ -65,7 +65,7 @@ def test_nova_clients_use_internal_interface():
 
     assert "[cinder]" in output
     assert "valid_interfaces = internal" in output
-    assert output.count("valid_interfaces = internal") == 2
+    assert output.count("valid_interfaces = internal") == 1
     assert "[neutron]" in output
     assert "[placement]" in output
     assert "[barbican]" in output

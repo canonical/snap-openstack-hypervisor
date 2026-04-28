@@ -116,9 +116,7 @@ lock_path = {{ snap_common }}/lock
 ovsdb_connection = {{ network.ovs_socket_path }}
 
 [cinder]
-service_type = volume
-service_name = cinder
-valid_interfaces = internal
+catalog_info = volumev3::internalURL
 region_name = {{ identity.region_name }}
 {% if ca and ca.bundle -%}
 cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
