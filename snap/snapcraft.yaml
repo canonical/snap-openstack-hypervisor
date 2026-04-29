@@ -671,6 +671,15 @@ parts:
       rsync --remove-source-files -arhvP $CRAFT_PART_INSTALL/snap/$CRAFT_PROJECT_NAME/current/usr/* $CRAFT_PART_INSTALL/usr/
       rm -rf $CRAFT_PART_INSTALL/snap/$CRAFT_PROJECT_NAME/current/usr
 
+    # enable-patchelf sets RPATH on libvirt-built ELF files so that shared
+    # libraries staged under usr/lib/<triplet> are found at runtime without
+    # LD_LIBRARY_PATH. This is required because libvirt_iohelper is spawned
+    # by virFileWrapperFdNew() with a minimal environment (no LD_LIBRARY_PATH),
+    # causing the resolution chain libvirt.so.0 -> libxml2.so.2 -> libicuuc.so.74
+    # to fail with "cannot open shared object file" on server suspend/resume.
+    build-attributes:
+      - enable-patchelf
+
   templates:
     source: templates/
     plugin: dump
