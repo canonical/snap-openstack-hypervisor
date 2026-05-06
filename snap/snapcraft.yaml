@@ -395,6 +395,15 @@ parts:
     source-branch: ubuntu/resolute-devel
     source-depth: 1
     plugin: autotools
+    stage:
+      # python3.14 / meson are pulled in only to satisfy qemu's mkvenv during
+      # configure; the openstack-hypervisor part ships python at runtime, so
+      # exclude these here to avoid stage conflicts.
+      - -usr/lib/python3.14
+      - -usr/lib/python3
+      - -usr/bin/python3*
+      - -usr/bin/meson
+      - -usr/share/meson*
     stage-packages:
       - seabios
       - qemu-system-data
@@ -465,6 +474,8 @@ parts:
       - libepoxy0
       - libcacard0
       - libnettle8t64
+      - python3-venv
+      - meson
     build-packages:
       - bison
       - flex
@@ -635,6 +646,7 @@ parts:
     - -Dlibdir=/snap/$CRAFT_PROJECT_NAME/current/usr/lib
     - -Dincludedir=/snap/$CRAFT_PROJECT_NAME/current/usr/include
     - -Dlocalstatedir=/var/snap/$CRAFT_PROJECT_NAME/common
+    - -Drunstatedir=/var/snap/$CRAFT_PROJECT_NAME/common/run
     - -Dsysconfdir=/var/snap/$CRAFT_PROJECT_NAME/common/etc
     override-build: |
       dpkg-source --before-build $CRAFT_PART_SRC
