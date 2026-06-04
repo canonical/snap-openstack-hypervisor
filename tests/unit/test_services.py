@@ -7,7 +7,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openstack_hypervisor.services import FileTransferService
+from openstack_hypervisor.services import (
+    FileTransferService,
+    NovaComputeService,
+)
 
 _CERT = base64.b64encode(b"CERT").decode()
 _KEY = base64.b64encode(b"KEY").decode()
@@ -34,6 +37,33 @@ def config_file(snap):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("ServerRoot /tmp\n")
     return path
+
+
+class TestNovaComputeService:
+    """Tests for NovaComputeService."""
+
+    def test_preflight_validates_instances_path(self, snap):
+        """Preflight validates Nova's instances path before startup."""
+        with patch(
+            "openstack_hypervisor.services.validate_instances_mount",
+            return_value=True,
+        ) as mock_validate:
+            service = NovaComputeService()
+            assert service.preflight(snap) is True
+
+        mock_validate.assert_called_once_with(snap.paths.common / "lib" / "nova" / "instances")
+
+    def test_run_aborts_when_preflight_fails(self, snap, mocker):
+        """run() aborts startup when instances mount validation fails."""
+        mocker.patch(
+            "openstack_hypervisor.services.validate_instances_mount",
+            return_value=False,
+        )
+        mock_run = mocker.patch("openstack_hypervisor.services.subprocess.run")
+
+        assert NovaComputeService().run(snap) == 1
+
+        mock_run.assert_not_called()
 
 
 class TestFileTransferService:
