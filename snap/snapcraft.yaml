@@ -268,6 +268,8 @@ apps:
   neutron-ovn-metadata-agent:
     command: 'bin/neutron-ovn-metadata-agent-service'
     daemon: simple
+    restart-condition: on-failure
+    restart-delay: 7s
     plugs:
       - network
       - network-bind
