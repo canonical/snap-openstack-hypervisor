@@ -3096,6 +3096,7 @@ def configure(snap: Snap) -> None:
             )
         else:
             _ensure_internal_ovs_services(snap, exclude_services)
+            _ensure_internal_ovs_dependent_services(snap, exclude_services)
 
 
 def _get_configure_context(snap: Snap) -> dict:
@@ -3184,6 +3185,10 @@ EXTERNAL_OVS_SERVICES = [
     "ovs-exporter",
 ]
 
+INTERNAL_OVS_DEPENDENT_SERVICES = [
+    "neutron-ovn-metadata-agent",
+]
+
 
 def _ensure_internal_ovs_services(snap: Snap, exclude_services: list[str]) -> None:
     """Ensure internal OVS services are enabled when not excluded.
@@ -3202,6 +3207,17 @@ def _ensure_internal_ovs_services(snap: Snap, exclude_services: list[str]) -> No
         if service in MONITORING_SERVICES and not enable_monitoring:
             continue
         logging.info("Ensuring internal OVS service is enabled: %s", service)
+        services[service].start(enable=True)
+
+
+def _ensure_internal_ovs_dependent_services(snap: Snap, exclude_services: list[str]) -> None:
+    """Ensure services that need internal OVS are enabled when not excluded."""
+    services = snap.services.list()
+
+    for service in INTERNAL_OVS_DEPENDENT_SERVICES:
+        if service in exclude_services:
+            continue
+        logging.info("Ensuring internal OVS-dependent service is enabled: %s", service)
         services[service].start(enable=True)
 
 

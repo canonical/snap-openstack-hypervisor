@@ -1431,6 +1431,30 @@ class TestEnsureInternalOVSServices:
         services["ovs-exporter"].start.assert_not_called()
 
 
+class TestEnsureInternalOVSDependentServices:
+    """Tests for _ensure_internal_ovs_dependent_services function."""
+
+    def test_starts_non_excluded_services(self, snap):
+        services = {"neutron-ovn-metadata-agent": mock.Mock()}
+        snap.services.list.return_value = services
+        helper = getattr(hooks, "_ensure_internal_ovs_dependent_services", None)
+
+        assert helper is not None
+        helper(snap, exclude_services=[])
+
+        services["neutron-ovn-metadata-agent"].start.assert_called_once_with(enable=True)
+
+    def test_skips_excluded_services(self, snap):
+        services = {"neutron-ovn-metadata-agent": mock.Mock()}
+        snap.services.list.return_value = services
+        helper = getattr(hooks, "_ensure_internal_ovs_dependent_services", None)
+
+        assert helper is not None
+        helper(snap, exclude_services=["neutron-ovn-metadata-agent"])
+
+        services["neutron-ovn-metadata-agent"].start.assert_not_called()
+
+
 class TestInternalOVSReady:
     """Tests for internal OVS readiness detection."""
 
@@ -1601,6 +1625,12 @@ class TestConfigureOVSDeferred:
             "_ensure_internal_ovs_services",
             side_effect=lambda *_: order.append("ensure"),
         )
+        mocker.patch.object(
+            hooks,
+            "_ensure_internal_ovs_dependent_services",
+            side_effect=lambda *_: order.append("metadata"),
+            create=True,
+        )
         # Simulate charm already configured (real identity URL) so the OVS
         # startup guard does not interfere with what this test is checking.
         snap.config.get_options.return_value.get.return_value = "http://10.0.0.1:5000/v3"
@@ -1608,7 +1638,7 @@ class TestConfigureOVSDeferred:
         hooks.configure(snap)
 
         services["svc1"].stop.assert_called_once_with(disable=True)
-        assert order == ["tls", "ensure"]
+        assert order == ["tls", "ensure", "metadata"]
 
     def test_internal_ovs_ready_runs_configuration(self, mocker, snap):
         """Internal OVS configuration runs when the services are already ready."""
@@ -1642,13 +1672,19 @@ class TestConfigureOVSDeferred:
             "_ensure_internal_ovs_services",
             side_effect=lambda *_: order.append("ensure"),
         )
+        mocker.patch.object(
+            hooks,
+            "_ensure_internal_ovs_dependent_services",
+            side_effect=lambda *_: order.append("metadata"),
+            create=True,
+        )
         # Simulate charm already configured (real identity URL) so the OVS
         # startup guard does not interfere with what this test is checking.
         snap.config.get_options.return_value.get.return_value = "http://10.0.0.1:5000/v3"
 
         hooks.configure(snap)
 
-        assert order == ["tls", "network", "ensure"]
+        assert order == ["tls", "network", "ensure", "metadata"]
 
     def test_external_ovs_skips_internal_deferral_and_enable(self, mocker, snap):
         """External OVS never triggers internal OVS bootstrap or enablement."""
@@ -1674,11 +1710,15 @@ class TestConfigureOVSDeferred:
         mocker.patch.object(hooks, "_configure_sriov_agent_service")
         mock_ready = mocker.patch.object(hooks, "_internal_ovs_ready")
         mock_ensure = mocker.patch.object(hooks, "_ensure_internal_ovs_services")
+        mock_metadata = mocker.patch.object(
+            hooks, "_ensure_internal_ovs_dependent_services", create=True
+        )
 
         hooks.configure(snap)
 
         mock_ready.assert_not_called()
         mock_ensure.assert_not_called()
+        mock_metadata.assert_not_called()
 
     def test_external_ovs_deferred_when_microovn_not_installed(self, mocker, snap):
         """When microovn is not yet installed, OVS/OVN configuration is deferred."""
@@ -1756,6 +1796,9 @@ class TestConfigureOVSDeferred:
         mocker.patch.object(hooks, "_configure_masakari_services")
         mocker.patch.object(hooks, "_configure_sriov_agent_service")
         mock_ensure = mocker.patch.object(hooks, "_ensure_internal_ovs_services")
+        mock_metadata = mocker.patch.object(
+            hooks, "_ensure_internal_ovs_dependent_services", create=True
+        )
 
         # Simulate snap not yet configured by the charm: identity URL is the placeholder
         # AND username has not been set yet (None).  Both conditions must hold for the
@@ -1774,6 +1817,7 @@ class TestConfigureOVSDeferred:
         # _ensure_internal_ovs_services must NOT have been called — starting
         # ovs-vswitchd here would create system@ovs-system and block microovn.
         mock_ensure.assert_not_called()
+        mock_metadata.assert_not_called()
 
     def test_internal_ovs_started_when_managed_by_hypervisor_with_default_identity(
         self, mocker, snap
@@ -1814,6 +1858,9 @@ class TestConfigureOVSDeferred:
         mocker.patch.object(hooks, "_configure_masakari_services")
         mocker.patch.object(hooks, "_configure_sriov_agent_service")
         mock_ensure = mocker.patch.object(hooks, "_ensure_internal_ovs_services")
+        mock_metadata = mocker.patch.object(
+            hooks, "_ensure_internal_ovs_dependent_services", create=True
+        )
         # Identity is still unconfigured (placeholder URL, no username) — the guard
         # must be bypassed because mode is explicitly 'hypervisor'.
         snap.config.get_options.return_value.get.return_value = hooks.DEFAULT_CONFIG[
@@ -1823,6 +1870,7 @@ class TestConfigureOVSDeferred:
         hooks.configure(snap)
 
         mock_ensure.assert_called_once()
+        mock_metadata.assert_called_once()
 
     def test_internal_ovs_started_when_identity_configured(self, mocker, snap):
         """Internal OVS must start once the charm has provided a real identity URL.
@@ -1852,12 +1900,16 @@ class TestConfigureOVSDeferred:
         mocker.patch.object(hooks, "_configure_masakari_services")
         mocker.patch.object(hooks, "_configure_sriov_agent_service")
         mock_ensure = mocker.patch.object(hooks, "_ensure_internal_ovs_services")
+        mock_metadata = mocker.patch.object(
+            hooks, "_ensure_internal_ovs_dependent_services", create=True
+        )
         # Charm has provided the real Keystone URL.
         snap.config.get_options.return_value.get.return_value = "http://10.0.0.1:5000/v3"
 
         hooks.configure(snap)
 
         mock_ensure.assert_called_once()
+        mock_metadata.assert_called_once()
 
 
 class TestDPDKConfigReady:
