@@ -216,7 +216,7 @@ backend = barbican
 [barbican]
 auth_url = {{ identity.auth_url }}
 auth_type = password
-interface = internal
+barbican_endpoint_type = internal
 project_domain_name = {{ identity.project_domain_name }}
 user_domain_name = {{ identity.user_domain_name }}
 region_name = {{ identity.region_name }}
@@ -224,7 +224,7 @@ project_name = {{ identity.project_name }}
 username = {{ identity.username }}
 password = {{ identity.password }}
 {% if ca and ca.bundle -%}
-cafile = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
+verify_ssl_path = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
 {% endif -%}
 {% endif -%}
 
