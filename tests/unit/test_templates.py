@@ -69,12 +69,17 @@ def test_nova_clients_use_internal_interface():
     assert "[neutron]" in output
     assert "[placement]" in output
     assert "[barbican]" in output
-    assert output.count("interface = internal") >= 4
+    assert output.count("interface = internal") >= 3
+    assert output.count("barbican_endpoint_type = internal") == 1
     assert "region_name = RegionOne" in output
     assert (
         "cafile = /var/snap/openstack-hypervisor/common/etc/ssl/certs/receive-ca-bundle.pem"
         in output
     )
+    assert (
+        "verify_ssl_path = /var/snap/openstack-hypervisor/common/etc/ssl/certs/receive-ca-bundle.pem"
+        in output
+    ) == 1
 
 
 def test_neutron_clients_use_internal_interface():
