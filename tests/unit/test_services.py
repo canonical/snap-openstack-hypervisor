@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 import base64
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import openstack_hypervisor.services as services_module
 from openstack_hypervisor.services import (
     FileTransferService,
+    NeutronOVNMetadataAgentService,
     NovaComputeService,
 )
 
@@ -85,7 +88,7 @@ class TestFileTransferService:
     @patch("openstack_hypervisor.services.os.set_inheritable")
     @patch("openstack_hypervisor.services.os.lseek")
     @patch("openstack_hypervisor.services.os.write")
-    @patch("openstack_hypervisor.services.os.memfd_create", return_value=[10, 11, 12])
+    @patch("openstack_hypervisor.services.os.memfd_create", create=True, return_value=[10, 11, 12])
     @patch("openstack_hypervisor.services.os.dup2")
     @patch("openstack_hypervisor.services.os.close")
     def test_returns_1_when_config_missing(
@@ -102,7 +105,7 @@ class TestFileTransferService:
     @patch("openstack_hypervisor.services.os.set_inheritable")
     @patch("openstack_hypervisor.services.os.lseek")
     @patch("openstack_hypervisor.services.os.write")
-    @patch("openstack_hypervisor.services.os.memfd_create", return_value=[10, 11, 12])
+    @patch("openstack_hypervisor.services.os.memfd_create", create=True, return_value=[10, 11, 12])
     def test_success_path(
         self,
         mock_memfd,
@@ -162,3 +165,119 @@ class TestFileTransferService:
         assert cmd[sep + 1] == str(tls_config.paths.snap / "usr" / "sbin" / "apache2")
         assert cmd[-1] == "-DFOREGROUND"
         assert "/proc/self/fd/6" in cmd
+
+
+class TestNeutronOVNMetadataAgentService:
+    """Tests for NeutronOVNMetadataAgentService."""
+
+    def _write_metadata_config(self, snap, ovsdb_connection):
+        config = snap.paths.common / "etc" / "neutron" / "neutron_ovn_metadata_agent.ini"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(f"[ovs]\novsdb_connection = {ovsdb_connection}\n")
+        return config
+
+    @patch("openstack_hypervisor.services.subprocess.run")
+    def test_waits_for_ovsdb_schema_before_starting_agent(
+        self,
+        mock_run,
+        snap,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Service should verify the local OVSDB schema before starting."""
+        monkeypatch.setattr(services_module, "OVSDB_SCHEMA_TIMEOUT", 0, raising=False)
+        monkeypatch.setattr(services_module, "OVSDB_SCHEMA_CHECK_INTERVAL", 0, raising=False)
+        ovs_socket = tmp_path / "db.sock"
+        ovs_socket.touch()
+        self._write_metadata_config(snap, f"unix:{ovs_socket}")
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0),
+        ]
+
+        result = NeutronOVNMetadataAgentService().run(snap)
+
+        assert result == 0
+        assert mock_run.call_count == 2
+        mock_run.assert_any_call(
+            [
+                str(snap.paths.snap / "usr" / "bin" / "ovsdb-client"),
+                "get-schema",
+                f"unix:{ovs_socket}",
+                "Open_vSwitch",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        mock_run.assert_any_call(
+            [
+                str(snap.paths.snap / "usr" / "bin" / "neutron-ovn-metadata-agent"),
+                "--config-file",
+                str(snap.paths.common / "etc" / "neutron" / "neutron.conf"),
+                "--config-file",
+                str(snap.paths.common / "etc" / "neutron" / "neutron_ovn_metadata_agent.ini"),
+                "--config-dir",
+                str(snap.paths.common / "etc" / "neutron" / "neutron.conf.d"),
+            ]
+        )
+
+    @patch("openstack_hypervisor.services.subprocess.run")
+    def test_returns_1_when_ovsdb_connection_missing(self, mock_run, snap):
+        """Service should fail fast when ovsdb_connection is not configured."""
+        config = snap.paths.common / "etc" / "neutron" / "neutron_ovn_metadata_agent.ini"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("[ovs]\n")
+
+        result = NeutronOVNMetadataAgentService().run(snap)
+
+        assert result == 1
+        mock_run.assert_not_called()
+
+    @patch("openstack_hypervisor.services.subprocess.run")
+    def test_returns_1_when_unix_socket_missing(
+        self,
+        mock_run,
+        snap,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Service should not start before the configured unix socket exists."""
+        monkeypatch.setattr(services_module, "OVSDB_SCHEMA_TIMEOUT", 0, raising=False)
+        monkeypatch.setattr(services_module, "OVSDB_SCHEMA_CHECK_INTERVAL", 0, raising=False)
+        ovs_socket = tmp_path / "db.sock"
+        self._write_metadata_config(snap, f"unix:{ovs_socket}")
+
+        result = NeutronOVNMetadataAgentService().run(snap)
+
+        assert result == 1
+        mock_run.assert_not_called()
+
+    @patch("openstack_hypervisor.services.subprocess.run")
+    def test_returns_1_when_schema_probe_times_out(
+        self,
+        mock_run,
+        snap,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Service should fail when OVSDB never serves the Open_vSwitch schema."""
+        monkeypatch.setattr(services_module, "OVSDB_SCHEMA_TIMEOUT", 0, raising=False)
+        monkeypatch.setattr(services_module, "OVSDB_SCHEMA_CHECK_INTERVAL", 0, raising=False)
+        ovs_socket = tmp_path / "db.sock"
+        ovs_socket.touch()
+        self._write_metadata_config(snap, f"unix:{ovs_socket}")
+        mock_run.return_value = MagicMock(returncode=1)
+
+        result = NeutronOVNMetadataAgentService().run(snap)
+
+        assert result == 1
+        mock_run.assert_called_once_with(
+            [
+                str(snap.paths.snap / "usr" / "bin" / "ovsdb-client"),
+                "get-schema",
+                f"unix:{ovs_socket}",
+                "Open_vSwitch",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )

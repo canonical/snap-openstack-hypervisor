@@ -3,10 +3,12 @@
 
 import base64
 import binascii
+import configparser
 import logging
 import os
 import subprocess
 import sys
+import time
 from functools import partial
 from pathlib import Path
 
@@ -14,6 +16,9 @@ from snaphelpers import Snap, UnknownConfigKey
 
 from openstack_hypervisor.log import setup_logging
 from openstack_hypervisor.mount_validation import validate_instances_mount
+
+OVSDB_SCHEMA_TIMEOUT = 60
+OVSDB_SCHEMA_CHECK_INTERVAL = 2
 
 
 def entry_point(service_class):
@@ -130,6 +135,79 @@ class NeutronOVNMetadataAgentService(OpenStackService):
     ]
 
     executable = Path("usr/bin/neutron-ovn-metadata-agent")
+
+    def run(self, snap: Snap) -> int:
+        """Run neutron-ovn-metadata-agent once local OVSDB is ready."""
+        setup_logging(snap.paths.common / f"{self.executable.name}-{snap.name}.log")
+        ovsdb_connection = self._ovsdb_connection(snap)
+        if not ovsdb_connection:
+            return 1
+
+        if not self._wait_for_ovsdb_schema(snap, ovsdb_connection):
+            return 1
+
+        return super().run(snap)
+
+    def _ovsdb_connection(self, snap: Snap) -> str | None:
+        """Read the configured local OVSDB connection string."""
+        config_path = snap.paths.common / "etc/neutron/neutron_ovn_metadata_agent.ini"
+        parser = configparser.ConfigParser()
+        try:
+            if not parser.read(config_path):
+                logging.error("Unable to read OVN metadata agent config: %s", config_path)
+                return None
+            ovsdb_connection = parser.get("ovs", "ovsdb_connection", fallback="").strip()
+        except configparser.Error as exc:
+            logging.error("Unable to parse OVN metadata agent config %s: %s", config_path, exc)
+            return None
+
+        if not ovsdb_connection:
+            logging.error("ovsdb_connection is not configured in %s", config_path)
+            return None
+        return ovsdb_connection
+
+    def _wait_for_ovsdb_schema(self, snap: Snap, ovsdb_connection: str) -> bool:
+        """Wait until ovsdb-client can retrieve the Open_vSwitch schema."""
+        deadline = time.monotonic() + OVSDB_SCHEMA_TIMEOUT
+        socket_path = self._unix_socket_path(ovsdb_connection)
+        command = [
+            str(snap.paths.snap / "usr" / "bin" / "ovsdb-client"),
+            "get-schema",
+            ovsdb_connection,
+            "Open_vSwitch",
+        ]
+
+        while True:
+            if socket_path and not socket_path.exists():
+                logging.info("Waiting for local OVSDB socket: %s", socket_path)
+            elif self._ovsdb_schema_available(command):
+                return True
+
+            if time.monotonic() >= deadline:
+                logging.error(
+                    "Timed out waiting for Open_vSwitch schema from %s", ovsdb_connection
+                )
+                return False
+            time.sleep(OVSDB_SCHEMA_CHECK_INTERVAL)
+
+    def _ovsdb_schema_available(self, command: list[str]) -> bool:
+        """Return whether the OVSDB Open_vSwitch schema is reachable."""
+        try:
+            completed_process = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            logging.info("Unable to query local OVSDB schema yet: %s", exc)
+            return False
+        return completed_process.returncode == 0
+
+    def _unix_socket_path(self, ovsdb_connection: str) -> Path | None:
+        """Return the socket path for unix OVSDB connections."""
+        if not ovsdb_connection.startswith("unix:"):
+            return None
+        return Path(ovsdb_connection.removeprefix("unix:"))
 
 
 neutron_ovn_metadata_agent = partial(entry_point, NeutronOVNMetadataAgentService)
