@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import json
 import re
 from unittest.mock import patch
 
@@ -9,11 +10,16 @@ import pytest
 
 from openstack_hypervisor.bridge_datapath import (
     DEFAULT_LAA_MAC_PREFIX,
+    SB_RENAME_SAFE_QUERY_TIMEOUT_S,
     BridgeMapping,
+    OVNCommandError,
+    OVNSBCli,
+    OVNTimeoutError,
     OVSCli,
     OVSCommandError,
     detect_current_mappings,
     generate_stable_laa_mac,
+    is_bridge_rename_safe,
     resolve_bridge_mappings,
     resolve_ovs_changes,
     update_mappings_from_rename,
@@ -474,7 +480,324 @@ class TestUpdateMappingsFromRename:
         assert update_mappings_from_rename(mappings, renames) == mappings
 
 
+class TestBridgeRenameSafety:
+    def test_is_bridge_rename_safe_uses_fallback_sb_timeout(self):
+        ovs = OVSCli()
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch("openstack_hypervisor.bridge_datapath.OVNSBCli") as mock_ovn_sb_cls,
+            patch(
+                "openstack_hypervisor.bridge_datapath._find_local_chassis_uuid",
+                return_value=None,
+            ),
+        ):
+            assert is_bridge_rename_safe(ovs) is True
+
+        mock_ovn_sb_cls.assert_called_once_with(
+            "tcp:127.0.0.1:6642",
+            timeout=SB_RENAME_SAFE_QUERY_TIMEOUT_S,
+        )
+
+    def test_is_bridge_rename_safe_preserves_explicit_sb_timeout(self):
+        ovs = OVSCli(timeout=7)
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch("openstack_hypervisor.bridge_datapath.OVNSBCli") as mock_ovn_sb_cls,
+            patch(
+                "openstack_hypervisor.bridge_datapath._find_local_chassis_uuid",
+                return_value=None,
+            ),
+        ):
+            assert is_bridge_rename_safe(ovs) is True
+
+        mock_ovn_sb_cls.assert_called_once_with("tcp:127.0.0.1:6642", timeout=7)
+
+    def test_is_bridge_rename_safe_when_ovn_remote_missing(self):
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl", return_value="[]\n") as mock_vsctl:
+            assert is_bridge_rename_safe(ovs) is True
+        mock_vsctl.assert_called_once_with(
+            "get",
+            "open",
+            ".",
+            "external_ids:ovn-remote",
+            skip_transaction=True,
+        )
+
+    def test_is_bridge_rename_safe_fails_closed_when_ovn_remote_query_fails(self):
+        ovs = OVSCli()
+        with patch.object(ovs, "vsctl", side_effect=OVSCommandError("ovs failed")):
+            assert is_bridge_rename_safe(ovs) is False
+
+    def test_is_bridge_rename_safe_when_system_id_missing(self):
+        ovs = OVSCli()
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return "[]\n"
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with patch.object(ovs, "vsctl", side_effect=fake_vsctl):
+            assert is_bridge_rename_safe(ovs) is True
+
+    def test_is_bridge_rename_safe_fails_closed_when_system_id_query_fails(self):
+        ovs = OVSCli()
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                raise OVSCommandError("ovs failed")
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with patch.object(ovs, "vsctl", side_effect=fake_vsctl):
+            assert is_bridge_rename_safe(ovs) is False
+
+    def test_is_bridge_rename_safe_when_chassis_missing(self):
+        ovs = OVSCli()
+        chassis_output = json.dumps({"headings": ["_uuid"], "data": []})
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch.object(OVNSBCli, "sbctl", return_value=chassis_output) as mock_sbctl,
+        ):
+            assert is_bridge_rename_safe(ovs) is True
+
+        mock_sbctl.assert_called_once_with(
+            "--format=json",
+            "--columns=_uuid",
+            "find",
+            "Chassis",
+            "name=node.example.com",
+        )
+
+    def test_is_bridge_rename_safe_when_local_chassis_has_no_bindings(self):
+        ovs = OVSCli()
+        chassis_uuid = "fd8d4990-a66f-45cb-9881-cae642ef2796"
+        chassis_output = json.dumps({"headings": ["_uuid"], "data": [[["uuid", chassis_uuid]]]})
+        bindings_output = json.dumps({"headings": ["_uuid"], "data": []})
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch.object(
+                OVNSBCli,
+                "sbctl",
+                side_effect=[chassis_output, bindings_output],
+            ) as mock_sbctl,
+        ):
+            assert is_bridge_rename_safe(ovs) is True
+
+        assert mock_sbctl.call_count == 2
+        assert mock_sbctl.call_args_list[1].args == (
+            "--format=json",
+            "--columns=_uuid",
+            "find",
+            "Port_Binding",
+            f"chassis={chassis_uuid}",
+        )
+
+    def test_is_bridge_rename_safe_when_local_chassis_has_bindings(self):
+        ovs = OVSCli()
+        chassis_uuid = "fd8d4990-a66f-45cb-9881-cae642ef2796"
+        chassis_output = json.dumps({"headings": ["_uuid"], "data": [[["uuid", chassis_uuid]]]})
+        bindings_output = json.dumps({"headings": ["_uuid"], "data": [[["uuid", "binding-uuid"]]]})
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch.object(
+                OVNSBCli,
+                "sbctl",
+                side_effect=[chassis_output, bindings_output],
+            ),
+        ):
+            assert is_bridge_rename_safe(ovs) is False
+
+    def test_is_bridge_rename_safe_fails_closed_when_sb_query_fails(self):
+        ovs = OVSCli()
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch.object(
+                OVNSBCli,
+                "sbctl",
+                side_effect=OVNCommandError("sb failed"),
+            ),
+            patch("openstack_hypervisor.bridge_datapath.time.sleep"),
+        ):
+            assert is_bridge_rename_safe(ovs) is False
+
+    def test_is_bridge_rename_safe_retries_strict_sb_queries(self):
+        ovs = OVSCli()
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch.object(
+                OVNSBCli,
+                "sbctl",
+                side_effect=OVNCommandError("sb failed"),
+            ) as mock_sbctl,
+            patch("openstack_hypervisor.bridge_datapath.time.sleep") as mock_sleep,
+        ):
+            assert is_bridge_rename_safe(ovs) is False
+
+        assert mock_sbctl.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_is_bridge_rename_safe_retries_on_sb_timeout(self):
+        ovs = OVSCli()
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch.object(
+                OVNSBCli,
+                "sbctl",
+                side_effect=OVNTimeoutError("sb timeout"),
+            ) as mock_sbctl,
+            patch("openstack_hypervisor.bridge_datapath.time.sleep") as mock_sleep,
+        ):
+            assert is_bridge_rename_safe(ovs) is False
+
+        assert mock_sbctl.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_is_bridge_rename_safe_fails_closed_when_sb_times_out(self):
+        ovs = OVSCli()
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch.object(
+                OVNSBCli,
+                "sbctl",
+                side_effect=OVNTimeoutError("sb timeout"),
+            ),
+            patch("openstack_hypervisor.bridge_datapath.time.sleep"),
+        ):
+            assert is_bridge_rename_safe(ovs) is False
+
+    def test_is_bridge_rename_safe_allows_stale_sb_reads(self):
+        ovs = OVSCli()
+        chassis_output = json.dumps({"headings": ["_uuid"], "data": []})
+
+        def fake_vsctl(*args, **kwargs):
+            if args == ("get", "open", ".", "external_ids:ovn-remote"):
+                return '"tcp:127.0.0.1:6642"\n'
+            if args == ("get", "open", ".", "external_ids:system-id"):
+                return '"node.example.com"\n'
+            raise AssertionError(f"Unexpected ovs-vsctl call: {args}")
+
+        with (
+            patch.object(ovs, "vsctl", side_effect=fake_vsctl),
+            patch.object(OVNSBCli, "sbctl", return_value=chassis_output) as mock_sbctl,
+        ):
+            assert is_bridge_rename_safe(ovs, allow_stale_sb_read=True) is True
+
+        mock_sbctl.assert_called_once_with(
+            "--format=json",
+            "--columns=_uuid",
+            "find",
+            "Chassis",
+            "name=node.example.com",
+            allow_stale_reads=True,
+        )
+
+
+class TestOVNSBCli:
+    def test_rename_safety_query_raises_for_invalid_retry_count(self, monkeypatch):
+        ovn_sb = OVNSBCli("tcp:127.0.0.1:6642")
+        monkeypatch.setattr(
+            "openstack_hypervisor.bridge_datapath.SB_RENAME_SAFE_QUERY_RETRIES",
+            0,
+        )
+
+        with pytest.raises(ValueError, match="SB_RENAME_SAFE_QUERY_RETRIES must be >= 1"):
+            ovn_sb.rename_safety_query("show")
+
+    def test_rename_safety_query_returns_when_last_retry_succeeds(self):
+        ovn_sb = OVNSBCli("tcp:127.0.0.1:6642")
+
+        with (
+            patch.object(
+                ovn_sb,
+                "sbctl",
+                side_effect=[OVNCommandError("first"), OVNCommandError("second"), "ok"],
+            ) as mock_sbctl,
+            patch("openstack_hypervisor.bridge_datapath.time.sleep") as mock_sleep,
+        ):
+            assert ovn_sb.rename_safety_query("show") == "ok"
+
+        assert mock_sbctl.call_count == 3
+        assert mock_sleep.call_count == 2
+
+
 class TestOVSCli:
+
     def test_list_bridge_interfaces_filters_types(self):
         ovs = OVSCli()
         with patch.object(ovs, "vsctl") as mock_vsctl:

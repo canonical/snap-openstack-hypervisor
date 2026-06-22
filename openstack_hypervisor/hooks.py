@@ -47,6 +47,7 @@ from openstack_hypervisor.bridge_datapath import (
     OVSCommandError,
     OVSTimeoutError,
     detect_current_mappings,
+    is_bridge_rename_safe,
     resolve_bridge_mappings,
     resolve_ovs_changes,
     update_mappings_from_rename,
@@ -1007,6 +1008,39 @@ def _add_interface_to_bridge(ovs_cli: OVSCli, external_bridge: str, external_nic
         )
 
 
+def _bridge_can_be_adopted(
+    ovs_cli: OVSCli,
+    bridge: str,
+    external_nic: str | None,
+    existing_bridges: set[str] | None = None,
+) -> bool:
+    """Return whether an existing bridge can be adopted for a mapping."""
+    if existing_bridges is not None and bridge not in existing_bridges:
+        return True
+
+    try:
+        bridge_ifaces = ovs_cli.list_bridge_interfaces(bridge)
+    except OVSCommandError as exc:
+        logging.warning("Unable to inspect bridge %s for adoption: %s", bridge, exc)
+        return False
+
+    if external_nic:
+        return set(bridge_ifaces).issubset({external_nic})
+
+    return not bridge_ifaces
+
+
+def _adopt_bridge_interface(ovs_cli: OVSCli, bridge: str, external_nic: str | None) -> None:
+    """Mark an existing bridge interface as charm-managed for explicit adoption."""
+    if not external_nic:
+        return
+
+    if external_nic not in ovs_cli.list_bridge_interfaces(bridge):
+        return
+
+    ovs_cli.set("Port", external_nic, "external_ids", {"microstack-function": "ext-port"})
+
+
 def _del_interface_from_bridge(ovs_cli: OVSCli, external_bridge: str, external_nic: str) -> None:
     """Remove an interface from  a given bridge.
 
@@ -1708,7 +1742,7 @@ def get_machine_id() -> str:
 
 
 def _configure_ovn_external_networking(  # noqa: C901
-    snap: Snap, ovs_cli: OVSCli, context: dict
+    snap: Snap, ovs_cli: OVSCli, context: dict, allow_stale_sb_read: bool = False
 ) -> None:
     """Configure OVS/OVN external networking.
 
@@ -1748,6 +1782,37 @@ def _configure_ovn_external_networking(  # noqa: C901
 
     changes = resolve_ovs_changes(current_mappings, mappings)
     logging.debug("OVS external networking changes: %s", changes)
+
+    if changes["renamed_bridges"] and is_bridge_rename_safe(
+        ovs_cli, allow_stale_sb_read=allow_stale_sb_read
+    ):
+        existing_bridges = set(ovs_cli.list_bridges())
+        remaining_renames: list[tuple[str, str]] = []
+
+        for old_bridge, new_bridge in changes["renamed_bridges"]:
+            target_mapping = next((m for m in mappings if m.bridge == new_bridge), None)
+            if target_mapping and _bridge_can_be_adopted(
+                ovs_cli,
+                new_bridge,
+                target_mapping.interface,
+                existing_bridges,
+            ):
+                if new_bridge in existing_bridges:
+                    _adopt_bridge_interface(ovs_cli, new_bridge, target_mapping.interface)
+                if old_bridge not in changes["removed_bridges"]:
+                    changes["removed_bridges"].append(old_bridge)
+                if new_bridge not in changes["added_bridges"]:
+                    changes["added_bridges"].append(new_bridge)
+                continue
+
+            logging.info(
+                "Bridge %s cannot be adopted as %s, keeping current bridge name",
+                old_bridge,
+                new_bridge,
+            )
+            remaining_renames.append((old_bridge, new_bridge))
+
+        changes["renamed_bridges"] = remaining_renames
 
     mappings = update_mappings_from_rename(mappings, changes["renamed_bridges"])
 

@@ -15,6 +15,7 @@ import yaml
 from snaphelpers._conf import UnknownConfigKey
 
 from openstack_hypervisor import hooks
+from openstack_hypervisor.bridge_datapath import BridgeMapping
 from openstack_hypervisor.cli import pci_devices
 from openstack_hypervisor.hooks import OwnedPath
 
@@ -348,6 +349,7 @@ class TestHooks:
         ovs_cli.list_bridge_interfaces.return_value = ["int1", "int2"]
         hooks._add_interface_to_bridge(ovs_cli, "br1", "int2")
         assert not ovs_cli.add_port.called
+        ovs_cli.set.assert_not_called()
 
     def test_del_interface_from_bridge(self, ovs_cli):
         ovs_cli.list_bridge_interfaces.return_value = ["int1", "int2"]
@@ -1972,6 +1974,160 @@ class TestDPDKConfigReady:
         result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
 
         assert result is True
+
+
+class TestConfigureOvnExternalNetworking:
+    def test_safe_rename_recreates_bridge(self, mocker, snap, ovs_cli):
+        snap.config.get.side_effect = lambda key: {
+            "network.ovn-sb-connection": "tcp:127.0.0.1:6642",
+            "network.external-bridge-address": hooks.IPVANYNETWORK_UNSET,
+            "network.external-bridge": "",
+            "network.physnet-name": "",
+            "network.external-nic": "",
+            "network.bridge-mapping": "br-new:physnet1:eth0",
+        }.get(key)
+        mock_rename_safe = mocker.patch.object(hooks, "is_bridge_rename_safe", return_value=True)
+        ovs_cli.list_bridges.return_value = []
+        mocker.patch.object(
+            hooks,
+            "detect_current_mappings",
+            return_value=[BridgeMapping("br-old", "physnet1", "eth0")],
+        )
+        mocker.patch.object(hooks, "_wait_for_interface")
+        mocker.patch.object(hooks, "_delete_iptable_postrouting_rule")
+        mocker.patch.object(hooks, "_delete_ips_from_interface")
+        mocker.patch.object(hooks, "_ensure_single_nic_on_bridge")
+        mocker.patch.object(hooks, "_ensure_link_up")
+        mocker.patch.object(hooks, "_enable_chassis_as_gateway")
+        mocker.patch.object(hooks, "_disable_chassis_as_gateway")
+        mocker.patch.object(hooks, "get_machine_id", return_value="machine-id")
+
+        hooks._configure_ovn_external_networking(snap, ovs_cli, {"network": {}})
+
+        mock_rename_safe.assert_called_once_with(ovs_cli, allow_stale_sb_read=False)
+        ovs_cli.del_bridge.assert_called_once_with("br-old")
+        ovs_cli.add_bridge.assert_called_once_with(
+            "br-new", "system", "protocols=OpenFlow13,OpenFlow15"
+        )
+        ovs_cli.set.assert_any_call(
+            "open",
+            ".",
+            "external_ids",
+            {"ovn-bridge-mappings": "physnet1:br-new"},
+        )
+
+    def test_unsafe_rename_keeps_existing_bridge(self, mocker, snap, ovs_cli):
+        snap.config.get.side_effect = lambda key: {
+            "network.ovn-sb-connection": "tcp:127.0.0.1:6642",
+            "network.external-bridge-address": hooks.IPVANYNETWORK_UNSET,
+            "network.external-bridge": "",
+            "network.physnet-name": "",
+            "network.external-nic": "",
+            "network.bridge-mapping": "br-new:physnet1:eth0",
+        }.get(key)
+        mock_rename_safe = mocker.patch.object(hooks, "is_bridge_rename_safe", return_value=False)
+        mocker.patch.object(
+            hooks,
+            "detect_current_mappings",
+            return_value=[BridgeMapping("br-old", "physnet1", "eth0")],
+        )
+        mocker.patch.object(hooks, "_wait_for_interface")
+        mocker.patch.object(hooks, "_delete_iptable_postrouting_rule")
+        mocker.patch.object(hooks, "_delete_ips_from_interface")
+        mocker.patch.object(hooks, "_ensure_single_nic_on_bridge")
+        mocker.patch.object(hooks, "_ensure_link_up")
+        mocker.patch.object(hooks, "_enable_chassis_as_gateway")
+        mocker.patch.object(hooks, "_disable_chassis_as_gateway")
+        mocker.patch.object(hooks, "get_machine_id", return_value="machine-id")
+
+        hooks._configure_ovn_external_networking(snap, ovs_cli, {"network": {}})
+
+        mock_rename_safe.assert_called_once_with(ovs_cli, allow_stale_sb_read=False)
+        ovs_cli.del_bridge.assert_not_called()
+        ovs_cli.add_bridge.assert_not_called()
+        ovs_cli.set.assert_any_call(
+            "open",
+            ".",
+            "external_ids",
+            {"ovn-bridge-mappings": "physnet1:br-old"},
+        )
+
+    def test_safe_rename_adopts_existing_bridge_with_matching_interface(
+        self, mocker, snap, ovs_cli
+    ):
+        snap.config.get.side_effect = lambda key: {
+            "network.ovn-sb-connection": "tcp:127.0.0.1:6642",
+            "network.external-bridge-address": hooks.IPVANYNETWORK_UNSET,
+            "network.external-bridge": "",
+            "network.physnet-name": "",
+            "network.external-nic": "",
+            "network.bridge-mapping": "br-maas:physnet1:eth0",
+        }.get(key)
+        mocker.patch.object(hooks, "is_bridge_rename_safe", return_value=True)
+        ovs_cli.list_bridges.return_value = ["br-maas"]
+        ovs_cli.list_bridge_interfaces.return_value = ["eth0"]
+        mocker.patch.object(
+            hooks,
+            "detect_current_mappings",
+            return_value=[BridgeMapping("br-old", "physnet1", "eth0")],
+        )
+        mocker.patch.object(hooks, "_wait_for_interface")
+        mocker.patch.object(hooks, "_delete_iptable_postrouting_rule")
+        mocker.patch.object(hooks, "_delete_ips_from_interface")
+        mocker.patch.object(hooks, "_ensure_link_up")
+        mocker.patch.object(hooks, "_enable_chassis_as_gateway")
+        mocker.patch.object(hooks, "_disable_chassis_as_gateway")
+        mocker.patch.object(hooks, "get_machine_id", return_value="machine-id")
+
+        hooks._configure_ovn_external_networking(snap, ovs_cli, {"network": {}})
+
+        ovs_cli.del_bridge.assert_called_once_with("br-old")
+        ovs_cli.add_bridge.assert_called_once_with(
+            "br-maas", "system", "protocols=OpenFlow13,OpenFlow15"
+        )
+        ovs_cli.set.assert_any_call(
+            "Port",
+            "eth0",
+            "external_ids",
+            {"microstack-function": "ext-port"},
+        )
+
+    def test_safe_rename_does_not_adopt_incompatible_existing_bridge(self, mocker, snap, ovs_cli):
+        snap.config.get.side_effect = lambda key: {
+            "network.ovn-sb-connection": "tcp:127.0.0.1:6642",
+            "network.external-bridge-address": hooks.IPVANYNETWORK_UNSET,
+            "network.external-bridge": "",
+            "network.physnet-name": "",
+            "network.external-nic": "",
+            "network.bridge-mapping": "br-maas:physnet1:eth0",
+        }.get(key)
+        mocker.patch.object(hooks, "is_bridge_rename_safe", return_value=True)
+        ovs_cli.list_bridges.return_value = ["br-maas"]
+        ovs_cli.list_bridge_interfaces.return_value = ["eth9"]
+        mocker.patch.object(
+            hooks,
+            "detect_current_mappings",
+            return_value=[BridgeMapping("br-old", "physnet1", "eth0")],
+        )
+        mocker.patch.object(hooks, "_wait_for_interface")
+        mocker.patch.object(hooks, "_delete_iptable_postrouting_rule")
+        mocker.patch.object(hooks, "_delete_ips_from_interface")
+        mocker.patch.object(hooks, "_ensure_single_nic_on_bridge")
+        mocker.patch.object(hooks, "_ensure_link_up")
+        mocker.patch.object(hooks, "_enable_chassis_as_gateway")
+        mocker.patch.object(hooks, "_disable_chassis_as_gateway")
+        mocker.patch.object(hooks, "get_machine_id", return_value="machine-id")
+
+        hooks._configure_ovn_external_networking(snap, ovs_cli, {"network": {}})
+
+        ovs_cli.del_bridge.assert_not_called()
+        ovs_cli.add_bridge.assert_not_called()
+        ovs_cli.set.assert_any_call(
+            "open",
+            ".",
+            "external_ids",
+            {"ovn-bridge-mappings": "physnet1:br-old"},
+        )
 
     def test_not_ready_when_dpdk_not_initialized(self, mocker, snap, ovs_cli):
         """Test returns False when DPDK is enabled but not initialized."""

@@ -111,3 +111,80 @@ class TestDPDKReadyCommand:
         mock_ovs_cli_class.assert_called_once_with(
             "unix:/custom/socket/path", "unix:/custom/ctl/socket/path"
         )
+
+
+class TestSetupBridgeCommand:
+    @patch("openstack_hypervisor.hooks.is_connected")
+    @patch("openstack_hypervisor.cli.hypervisor._set_ovs_managed_by")
+    @patch("openstack_hypervisor.cli.hypervisor.Snap")
+    @patch("openstack_hypervisor.cli.hypervisor.OVSCli")
+    @patch("openstack_hypervisor.cli.hypervisor.ovs_switch_socket")
+    @patch("openstack_hypervisor.cli.hypervisor.ovs_switchd_ctl_socket")
+    @patch("openstack_hypervisor.cli.hypervisor._get_configure_context")
+    @patch("openstack_hypervisor.cli.hypervisor._configure_ovn_external_networking")
+    def test_setup_bridge_defaults_to_fresh_sb_reads(
+        self,
+        mock_setup_bridge,
+        mock_get_context,
+        mock_switchd_ctl_socket,
+        mock_socket,
+        mock_ovs_cli_class,
+        mock_snap_class,
+        mock_set_ovs_managed_by,
+        mock_connected,
+    ):
+        mock_get_context.return_value = {"network": {}}
+        mock_socket.return_value = "unix:/custom/socket/path"
+        mock_switchd_ctl_socket.return_value = "unix:/custom/ctl/socket/path"
+
+        runner = CliRunner()
+        result = runner.invoke(hypervisor, ["setup-bridge"])
+
+        assert result.exit_code == 0
+        mock_set_ovs_managed_by.assert_called_once_with(mock_snap_class.return_value)
+        mock_setup_bridge.assert_called_once_with(
+            mock_snap_class.return_value,
+            mock_ovs_cli_class.return_value,
+            {"network": {}},
+            allow_stale_sb_read=False,
+        )
+
+    @patch("openstack_hypervisor.hooks.is_connected")
+    @patch("openstack_hypervisor.cli.hypervisor.click.echo")
+    @patch("openstack_hypervisor.cli.hypervisor._set_ovs_managed_by")
+    @patch("openstack_hypervisor.cli.hypervisor.Snap")
+    @patch("openstack_hypervisor.cli.hypervisor.OVSCli")
+    @patch("openstack_hypervisor.cli.hypervisor.ovs_switch_socket")
+    @patch("openstack_hypervisor.cli.hypervisor.ovs_switchd_ctl_socket")
+    @patch("openstack_hypervisor.cli.hypervisor._get_configure_context")
+    @patch("openstack_hypervisor.cli.hypervisor._configure_ovn_external_networking")
+    def test_setup_bridge_allows_stale_sb_reads_with_flag(
+        self,
+        mock_setup_bridge,
+        mock_get_context,
+        mock_switchd_ctl_socket,
+        mock_socket,
+        mock_ovs_cli_class,
+        mock_snap_class,
+        mock_set_ovs_managed_by,
+        mock_echo,
+        mock_connected,
+    ):
+        mock_get_context.return_value = {"network": {}}
+        mock_socket.return_value = "unix:/custom/socket/path"
+        mock_switchd_ctl_socket.return_value = "unix:/custom/ctl/socket/path"
+
+        runner = CliRunner()
+        result = runner.invoke(hypervisor, ["setup-bridge", "--allow-stale-sb-read"])
+
+        assert result.exit_code == 0
+        mock_set_ovs_managed_by.assert_called_once_with(mock_snap_class.return_value)
+        mock_setup_bridge.assert_called_once_with(
+            mock_snap_class.return_value,
+            mock_ovs_cli_class.return_value,
+            {"network": {}},
+            allow_stale_sb_read=True,
+        )
+        mock_echo.assert_any_call(
+            "Warning: allowing stale OVN Southbound reads may misjudge bridge rename safety."
+        )

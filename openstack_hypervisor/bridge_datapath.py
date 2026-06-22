@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import time
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -13,6 +14,9 @@ from typing import TypedDict
 
 DEFAULT_LAA_MAC_PREFIX = "0a:c5"
 INTEGRATION_BRIDGE = "br-int"
+SB_RENAME_SAFE_QUERY_TIMEOUT_S = 15
+SB_RENAME_SAFE_QUERY_RETRIES = 3
+SB_RENAME_SAFE_RETRY_DELAY_S = 1
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,18 @@ class OVSCommandError(OVSError):
 
 class OVSTimeoutError(OVSError, TimeoutError):
     """Raised when an OVS command times out."""
+
+
+class OVNError(RuntimeError):
+    """Common base class for OVN-related errors."""
+
+
+class OVNCommandError(OVNError):
+    """Raised when querying OVN state fails."""
+
+
+class OVNTimeoutError(OVNError, TimeoutError):
+    """Raised when an OVN command times out."""
 
 
 def _normalize_ovs_vsctl_value(raw_value: str) -> str | None:
@@ -164,6 +180,11 @@ class OVSCli:
             yield self
         finally:
             self._timeout = original_timeout
+
+    @property
+    def timeout(self) -> int | None:
+        """Return the configured default command timeout."""
+        return self._timeout
 
     def commit(self, retry) -> str:
         """Execute all batched commands in a single ovs-vsctl transaction.
@@ -708,6 +729,152 @@ class OVSCli:
             return result.strip().strip('"').lower() == "true"
         except OVSCommandError:
             return False
+
+
+class OVNSBCli:
+    """Client for interacting with OVN Southbound via ovn-sbctl."""
+
+    def __init__(self, db: str, timeout: int | None = None):
+        self.db = db
+        self._timeout = timeout
+
+    def sbctl(
+        self,
+        *args: str,
+        timeout: int | None = None,
+        allow_stale_reads: bool = False,
+    ) -> str:
+        """Run ovn-sbctl with the provided arguments and return stdout."""
+        cmd = ["ovn-sbctl", f"--db={self.db}"]
+        timeout = timeout or self._timeout
+        if timeout is not None:
+            cmd.append(f"--timeout={timeout}")
+        if allow_stale_reads:
+            cmd.append("--no-leader-only")
+        cmd.extend(args)
+        logging.debug("Executing command: %s", " ".join(cmd))
+
+        try:
+            completed = subprocess.run(  # nosec B603
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise OVNCommandError("ovn-sbctl binary not found") from exc
+        except subprocess.CalledProcessError as exc:  # pragma: no cover - defensive
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = stderr or stdout or f"Command failed with exit code {exc.returncode}"
+            if "Alarm clock" in details:
+                raise OVNTimeoutError(details) from exc
+            raise OVNCommandError(details) from exc
+
+        return completed.stdout
+
+    def rename_safety_query(self, *args: str, allow_stale_reads: bool = False) -> str:
+        """Run an OVN SB query with the rename-safety freshness policy."""
+        if allow_stale_reads:
+            return self.sbctl(*args, allow_stale_reads=True)
+
+        attempts = SB_RENAME_SAFE_QUERY_RETRIES
+        if attempts < 1:
+            raise ValueError("SB_RENAME_SAFE_QUERY_RETRIES must be >= 1")
+
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.sbctl(*args)
+            except OVNError:
+                if attempt == attempts:
+                    raise
+                time.sleep(SB_RENAME_SAFE_RETRY_DELAY_S)
+
+
+def _get_ovs_external_id(ovs_cli: OVSCli, key: str) -> str | None:
+    """Read and normalize an OVS external_ids value."""
+    raw_value = ovs_cli.vsctl(
+        "get",
+        "open",
+        ".",
+        f"external_ids:{key}",
+        skip_transaction=True,
+    )
+    return _normalize_ovs_vsctl_value(raw_value)
+
+
+def _find_local_chassis_uuid(
+    ovn_sb_cli: OVNSBCli, system_id: str, allow_stale_sb_read: bool
+) -> uuid.UUID | None:
+    """Return the local chassis UUID when the node is registered in SB."""
+    chassis_output = ovn_sb_cli.rename_safety_query(
+        "--format=json",
+        "--columns=_uuid",
+        "find",
+        "Chassis",
+        f"name={system_id}",
+        allow_stale_reads=allow_stale_sb_read,
+    )
+    chassis_data = json.loads(chassis_output)
+    chassis_idx = chassis_data["headings"].index("_uuid")
+    if not chassis_data["data"]:
+        return None
+    return _parse_ovsdb_data(chassis_data["data"][0][chassis_idx])
+
+
+def _chassis_has_port_bindings(
+    ovn_sb_cli: OVNSBCli, local_chassis: uuid.UUID, allow_stale_sb_read: bool
+) -> bool:
+    """Return whether any Port_Binding row is bound to the local chassis."""
+    bindings_output = ovn_sb_cli.rename_safety_query(
+        "--format=json",
+        "--columns=_uuid",
+        "find",
+        "Port_Binding",
+        f"chassis={local_chassis}",
+        allow_stale_reads=allow_stale_sb_read,
+    )
+    bindings_data = json.loads(bindings_output)
+    return bool(bindings_data["data"])
+
+
+def is_bridge_rename_safe(ovs_cli: OVSCli, allow_stale_sb_read: bool = False) -> bool:
+    """Return whether bridges can be destroyed and recreated safely."""
+    try:
+        ovn_remote = _get_ovs_external_id(ovs_cli, "ovn-remote")
+        if not ovn_remote:
+            return True
+
+        system_id = _get_ovs_external_id(ovs_cli, "system-id")
+    except OVSCommandError:
+        return False
+
+    if not system_id:
+        return True
+
+    ovn_sb_cli = OVNSBCli(
+        ovn_remote,
+        timeout=(
+            ovs_cli.timeout if ovs_cli.timeout is not None else SB_RENAME_SAFE_QUERY_TIMEOUT_S
+        ),
+    )
+    try:
+        local_chassis = _find_local_chassis_uuid(
+            ovn_sb_cli, system_id, allow_stale_sb_read=allow_stale_sb_read
+        )
+        if local_chassis is None:
+            return True
+        if _chassis_has_port_bindings(
+            ovn_sb_cli,
+            local_chassis,
+            allow_stale_sb_read=allow_stale_sb_read,
+        ):
+            return False
+    except (OVNError, KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
+        logging.warning("Unable to determine OVN bridge rename safety: %s", exc)
+        return False
+
+    return True
 
 
 def resolve_bridge_mappings(  # noqa: C901

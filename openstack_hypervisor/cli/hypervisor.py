@@ -20,8 +20,10 @@ from openstack_hypervisor.cli.common import (
     click_option_format,
 )
 from openstack_hypervisor.hooks import (
+    _configure_ovn_external_networking,
     _dpdk_config_is_ready,
     _get_configure_context,
+    _set_ovs_managed_by,
     ovs_switch_socket,
     ovs_switchd_ctl_socket,
 )
@@ -178,3 +180,31 @@ def dpdk_ready() -> None:
     else:
         click.echo("DPDK configuration is NOT ready - external OVS restart may be required")
         sys.exit(1)
+
+
+@hypervisor.command("setup-bridge")
+@click.option(
+    "--allow-stale-sb-read",
+    is_flag=True,
+    help="Allow OVN Southbound relay/follower reads when checking rename safety.",
+)
+def setup_bridge(allow_stale_sb_read: bool) -> None:
+    """Apply OVN external bridge configuration."""
+    snap = Snap()
+    _set_ovs_managed_by(snap)
+    ovs_socket = ovs_switch_socket(snap)
+    switchd_ctl_socket = ovs_switchd_ctl_socket(snap)
+    ovs_cli = OVSCli(ovs_socket, switchd_ctl_socket)
+    context = _get_configure_context(snap)
+
+    if allow_stale_sb_read:
+        click.echo(
+            "Warning: allowing stale OVN Southbound reads may misjudge bridge rename safety."
+        )
+
+    _configure_ovn_external_networking(
+        snap,
+        ovs_cli,
+        context,
+        allow_stale_sb_read=allow_stale_sb_read,
+    )
