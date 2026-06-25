@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from openstack_hypervisor.cli.hypervisor import hypervisor
+from openstack_hypervisor.cli.hypervisor import get_client_from_env, hypervisor
 
 
 @pytest.fixture
@@ -111,3 +111,43 @@ class TestDPDKReadyCommand:
         mock_ovs_cli_class.assert_called_once_with(
             "unix:/custom/socket/path", "unix:/custom/ctl/socket/path"
         )
+
+
+class TestGetClientFromEnv:
+    """Tests for get_client_from_env cacert handling."""
+
+    @patch("openstack_hypervisor.cli.hypervisor.client")
+    @patch("openstack_hypervisor.cli.hypervisor.Snap")
+    def test_cacert_is_file_path_not_pem_bytes(self, mock_snap_class, mock_client, tmp_path):
+        """Cacert passed to novaclient must be a file path string, not PEM bytes."""
+        import base64
+
+        pem = b"-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"
+        certs_dir = tmp_path / "etc/ssl/certs"
+        certs_dir.mkdir(parents=True)
+        cacert_file = certs_dir / "receive-ca-bundle.pem"
+        cacert_file.write_bytes(pem)
+
+        snap = MagicMock()
+        snap.paths.common = tmp_path
+        snap.config.get_options.return_value = {
+            "identity.auth-url": "https://keystone/v3",
+            "identity.username": "user",
+            "identity.password": "pass",
+            "identity.project-id": "proj",
+            "identity.user-domain-id": "udid",
+            "identity.project-domain-id": "pdid",
+        }
+        snap.config.get.side_effect = lambda key: {
+            "ca.bundle": base64.b64encode(pem).decode(),
+        }.get(key, "")
+        mock_snap_class.return_value = snap
+
+        get_client_from_env(snap)
+
+        _, kwargs = mock_client.Client.call_args
+        assert kwargs["cacert"] is not None
+        # must be a str path, not bytes/PEM content
+        assert isinstance(kwargs["cacert"], str)
+        assert "BEGIN CERTIFICATE" not in kwargs["cacert"]
+        assert kwargs["cacert"] == str(cacert_file)
