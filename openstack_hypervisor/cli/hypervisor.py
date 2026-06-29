@@ -63,6 +63,12 @@ def get_client_from_env(snap: Snap) -> "Client":
     if not all([auth_url, username, password, project_id, user_domain_id, project_domain_id]):
         raise HypervisorError("Missing identity configuration")
 
+    # keystoneauth1/requests expects a file path for cacert, not the PEM
+    # content. _configure_cabundle_tls already writes the decoded bundle to
+    # receive-ca-bundle.pem; reuse it so we don't duplicate the material.
+    cacert_path = snap.paths.common / "etc/ssl/certs/receive-ca-bundle.pem"
+    cacert = str(cacert_path) if ca_bundle and cacert_path.exists() else None
+
     return client.Client(
         "2.95",
         username,
@@ -71,7 +77,7 @@ def get_client_from_env(snap: Snap) -> "Client":
         auth_url,
         user_domain_id=user_domain_id,
         project_domain_id=project_domain_id,
-        cacert=ca_bundle,
+        cacert=cacert,
         endpoint_type="internal",
     )
 
