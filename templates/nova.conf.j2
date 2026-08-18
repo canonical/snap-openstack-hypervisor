@@ -233,7 +233,8 @@ verify_ssl_path = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
 driver = messagingv2
 
 [notifications]
-notification_format = versioned
+notify_on_state_change = vm_and_task_state
+notification_format = both
 {%- endif %}
 
 [oslo_messaging_rabbit]
