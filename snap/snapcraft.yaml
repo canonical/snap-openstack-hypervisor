@@ -113,6 +113,7 @@ apps:
       - dm-multipath
       - nvme-control
       - iscsi-initiator
+      - mdevctl-config
     # Make sure KillMode=process is set in the resulting systemd unit instead of
     # the default KillMode=control-group to avoid the situation where stopping
     # libvirtd causes the forced power off scenario for all VMs; it also affects
@@ -516,7 +517,7 @@ parts:
       - ninja-build
     autotools-configure-parameters:
       - --enable-system
-      - --target-list=x86_64-softmmu,aarch64-softmmu
+      - --target-list=x86_64-softmmu,aarch64-softmmu,s390x-softmmu
       - --disable-install-blobs
       - --disable-user
       - --disable-linux-user
@@ -749,6 +750,10 @@ parts:
       if [ -f $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk ]; then
           mv $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk $CRAFT_PART_INSTALL/usr/sbin/ovs-vswitchd
       fi
+      if [ ! -e $CRAFT_PART_INSTALL/usr/sbin/ovs-vswitchd ] && \
+          [ -x $CRAFT_PART_INSTALL/usr/lib/openvswitch-switch/ovs-vswitchd ]; then
+          ln -s ../lib/openvswitch-switch/ovs-vswitchd $CRAFT_PART_INSTALL/usr/sbin/ovs-vswitchd
+      fi
 
   apache2-webdav:
     plugin: nil
@@ -969,6 +974,10 @@ hooks:
       - microstack-support
 
 plugs:
+  mdevctl-config:
+    interface: system-files
+    read:
+      - /etc/mdevctl.d
   epa-info:
     interface: content
     content: epa-info
