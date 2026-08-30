@@ -34,6 +34,7 @@ environment:
 platforms:
   amd64:
   arm64:
+  riscv64:
   s390x:
 
 system-usernames:
