@@ -36,6 +36,11 @@ ram_allocation_ratio = 1.0
 {% if sev and sev.reserved_host_memory_mb -%}
 reserved_host_memory_mb  = {{ sev.reserved_host_memory_mb }}
 {% endif %}
+{% endif -%}
+
+{%- if telemetry.enable %}
+instance_usage_audit = True
+instance_usage_audit_period = hour
 {% endif %}
 
 [workarounds]
@@ -226,7 +231,7 @@ password = {{ identity.password }}
 {% if ca and ca.bundle -%}
 verify_ssl_path = {{ snap_common }}/etc/ssl/certs/receive-ca-bundle.pem
 {% endif -%}
-{% endif -%}
+{% endif %}
 
 {% if telemetry.enable -%}
 [oslo_messaging_notifications]
