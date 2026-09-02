@@ -41,6 +41,10 @@ reserved_host_memory_mb  = {{ sev.reserved_host_memory_mb }}
 [workarounds]
 disable_rootwrap = True
 
+# Needed for live live migration, skip CPU comparison on destination host.
+# Until https://bugs.launchpad.net/nova/+bug/2039803 is fixed.
+skip_cpu_compare_on_dest = True
+
 [libvirt]
 {% if compute.multipath_enabled -%}
 volume_use_multipath = True
@@ -238,8 +242,3 @@ notification_format = versioned
 
 [oslo_messaging_rabbit]
 rabbit_quorum_queue = True
-
-[workarounds]
-# Needed for live live migration, skip CPU comparison on destination host.
-# Until https://bugs.launchpad.net/nova/+bug/2039803 is fixed.
-skip_cpu_compare_on_dest = True
