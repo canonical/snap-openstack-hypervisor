@@ -15,20 +15,7 @@ environment:
   PATH: $SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$SNAP/usr/local/bin:$SNAP/usr/local/sbin:$PATH
   # Standard library components must have priority in module name resolution: https://storyboard.openstack.org/#!/story/2007806
   PYTHONPATH: $PYTHONPATH:$SNAP/usr/lib/python3.14:$SNAP/usr/lib/python3.14/site-packages:$SNAP/usr/lib/python3/dist-packages:$SNAP/lib/python3.14:$SNAP/lib/python3.14/site-packages
-  # OVN runtime configuration
-  OVN_LOGDIR: $SNAP_COMMON/log/ovn
-  OVN_RUNDIR: $SNAP_COMMON/run/ovn
-  OVN_SYSCONFDIR: $SNAP_COMMON/etc
-  OVN_PKGDATADIR: $SNAP/usr/share/ovn
-  OVN_BINDIR: $SNAP/usr/bin
-  OVN_SBINDIR: $SNAP/usr/sbin
-  # OVS runtime configuration
-  OVS_LOGDIR: $SNAP_COMMON/log/openvswitch
-  OVS_RUNDIR: $SNAP_COMMON/run/openvswitch
-  OVS_SYSCONFDIR: $SNAP_COMMON/etc
-  OVS_PKGDATADIR: $SNAP/usr/share/openvswitch
-  OVS_BINDIR: $SNAP/usr/bin
-  OVS_SBINDIR: $SNAP/usr/sbin
+  OVS_RUNDIR: $SNAP_DATA/microovn/chassis/switch
   RUNTIME_DIRECTORY: $SNAP_COMMON/run
 
 platforms:
@@ -135,59 +122,6 @@ apps:
     plugs:
       - network
       - microstack-support
-
-  # OVS/OVN cli tools
-  ovn-appctl:
-    command: usr/bin/ovn-appctl
-    plugs:
-      - network
-      - network-bind
-      - microstack-support
-      - ovn-chassis
-  ovn-trace:
-    command: usr/bin/ovn-trace
-    plugs:
-      - network
-      - network-bind
-      - microstack-support
-      - ovn-chassis
-  ovn-detrace:
-    command: usr/bin/ovn-detrace
-    plugs:
-      - network
-      - network-bind
-      - microstack-support
-      - ovn-chassis
-  ovs-vsctl:
-    command: usr/bin/ovs-vsctl
-    plugs:
-      - network
-      - network-control
-      - process-control
-      - microstack-support
-      - ovn-chassis
-  ovs-appctl:
-    command: usr/bin/ovs-appctl
-    plugs:
-      - network
-      - process-control
-      - microstack-support
-      - ovn-chassis
-  ovs-ofctl:
-    command: usr/bin/ovs-ofctl
-    plugs:
-      - network
-      - process-control
-      - microstack-support
-      - ovn-chassis
-  ovs-dpctl:
-    command: usr/bin/ovs-dpctl
-    plugs:
-      - network
-      - network-control
-      - process-control
-      - microstack-support
-      - ovn-chassis
 
   nova-compute:
     command: 'bin/nova-compute-service'
