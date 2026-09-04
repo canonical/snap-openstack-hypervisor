@@ -71,7 +71,7 @@ tics= [
 [project.scripts]
 nova-compute-service = "openstack_hypervisor.services:nova_compute"
 nova-api-metadata-service = "openstack_hypervisor.services:nova_api_metadata"
-neutron-ovn-metadata-agent-service = "openstack_hypervisor.services:neutron_ovn_metadata_agent"
+neutron-ovn-agent-service = "openstack_hypervisor.services:neutron_ovn_agent"
 neutron-sriov-nic-agent-service = "openstack_hypervisor.services:neutron_sriov_nic_agent"
 ceilometer-compute-agent-service = "openstack_hypervisor.services:ceilometer_compute_agent"
 masakari-instancemonitor-service = "openstack_hypervisor.services:masakari_instancemonitor"

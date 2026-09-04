@@ -16,6 +16,8 @@ BASE_CONTEXT = {
     "node": {"fqdn": "compute-0.internal", "ip_address": "10.0.0.10"},
     "network": {
         "ovs_socket_path": "unix:/var/run/openvswitch/db.sock",
+        "ovn_nb_connection": "ssl:10.0.0.10:6641",
+        "ovn_sb_connection": "ssl:10.0.0.10:6642",
         "dns_servers": "",
         "nova_metadata_proxy_url": "http://internal/nova-metadata",
         "nova_metadata_proxy_scheme": "http",
@@ -107,12 +109,27 @@ def test_neutron_clients_use_internal_interface():
     )
 
 
-def test_neutron_ovn_metadata_agent_uses_nova_metadata_endpoint():
-    output = _render("neutron_ovn_metadata_agent.ini.j2")
+def test_neutron_ovn_agent_enables_metadata_with_all_ovsdb_connections():
+    output = _render("neutron_ovn_agent.ini.j2")
 
     assert "nova_metadata_host = 127.0.0.1" in output
     assert "nova_metadata_port = 8775" in output
     assert "metadata_proxy_shared_secret = secret" in output
+    assert "extensions = metadata" in output
+    assert "ovsdb_connection = unix:/var/run/openvswitch/db.sock" in output
+    assert "ovn_nb_connection = ssl:10.0.0.10:6641" in output
+    assert "ovn_sb_connection = ssl:10.0.0.10:6642" in output
+    for option, relative_path in {
+        "ovn_nb_private_key": "private/ovn-key.pem",
+        "ovn_nb_certificate": "certs/ovn-cert.pem",
+        "ovn_nb_ca_cert": "certs/ovn-cacert.pem",
+        "ovn_sb_private_key": "private/ovn-key.pem",
+        "ovn_sb_certificate": "certs/ovn-cert.pem",
+        "ovn_sb_ca_cert": "certs/ovn-cacert.pem",
+    }.items():
+        assert (
+            f"{option} = /var/snap/openstack-hypervisor/common/etc/ssl/{relative_path}" in output
+        )
 
 
 def test_metadata_templates_render_before_credentials_are_configured():
@@ -122,7 +139,7 @@ def test_metadata_templates_render_before_credentials_are_configured():
     assert "service_metadata_proxy = True" not in output
     assert "metadata_proxy_shared_secret" not in output
 
-    output = _render("neutron_ovn_metadata_agent.ini.j2", credentials={})
+    output = _render("neutron_ovn_agent.ini.j2", credentials={})
 
     assert "nova_metadata_host = 127.0.0.1" in output
     assert "nova_metadata_port = 8775" in output

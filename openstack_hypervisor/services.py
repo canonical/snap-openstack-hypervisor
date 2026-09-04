@@ -134,48 +134,53 @@ class NovaAPIMetadataService(OpenStackService):
 nova_api_metadata = partial(entry_point, NovaAPIMetadataService)
 
 
-class NeutronOVNMetadataAgentService(OpenStackService):
-    """A python service object used to run the neutron-ovn-metadata-agent daemon."""
+class NeutronOVNAgentService(OpenStackService):
+    """A service object used to run the neutron-ovn-agent daemon."""
 
     conf_files = [
         Path("etc/neutron/neutron.conf"),
-        Path("etc/neutron/neutron_ovn_metadata_agent.ini"),
+        Path("etc/neutron/neutron_ovn_agent.ini"),
     ]
     conf_dirs = [
         Path("etc/neutron/neutron.conf.d"),
     ]
 
-    executable = Path("usr/bin/neutron-ovn-metadata-agent")
+    executable = Path("usr/bin/neutron-ovn-agent")
 
     def run(self, snap: Snap) -> int:
-        """Run neutron-ovn-metadata-agent once MicroOVN's OVSDB is ready."""
+        """Run neutron-ovn-agent once required connections and local OVS are ready."""
         setup_logging(snap.paths.common / f"{self.executable.name}-{snap.name}.log")
-        ovsdb_connection = self._ovsdb_connection(snap)
-        if not ovsdb_connection:
+        ovsdb_connections = self._ovsdb_connections(snap)
+        if ovsdb_connections is None:
             return 1
 
+        ovsdb_connection = ovsdb_connections["ovsdb_connection"]
         if not self._wait_for_ovsdb_schema(snap, ovsdb_connection):
             return 1
 
         return super().run(snap)
 
-    def _ovsdb_connection(self, snap: Snap) -> str | None:
-        """Read the configured MicroOVN OVSDB connection string."""
-        config_path = snap.paths.common / "etc/neutron/neutron_ovn_metadata_agent.ini"
+    def _ovsdb_connections(self, snap: Snap) -> dict[str, str] | None:
+        """Read all connections required by the OVN agent."""
+        config_path = snap.paths.common / "etc/neutron/neutron_ovn_agent.ini"
         parser = configparser.ConfigParser()
         try:
             if not parser.read(config_path):
-                logging.error("Unable to read OVN metadata agent config: %s", config_path)
+                logging.error("Unable to read OVN agent config: %s", config_path)
                 return None
-            ovsdb_connection = parser.get("ovs", "ovsdb_connection", fallback="").strip()
-        except configparser.Error as exc:
-            logging.error("Unable to parse OVN metadata agent config %s: %s", config_path, exc)
+            connections = {
+                "ovsdb_connection": parser.get("ovs", "ovsdb_connection", fallback="").strip(),
+                "ovn_nb_connection": parser.get("ovn", "ovn_nb_connection", fallback="").strip(),
+                "ovn_sb_connection": parser.get("ovn", "ovn_sb_connection", fallback="").strip(),
+            }
+        except (configparser.Error, OSError, UnicodeError):
+            logging.error("Unable to parse OVN agent config: %s", config_path)
             return None
 
-        if not ovsdb_connection:
-            logging.error("ovsdb_connection is not configured in %s", config_path)
+        if not all(connections.values()):
+            logging.error("Required OVSDB connections are not configured in %s", config_path)
             return None
-        return ovsdb_connection
+        return connections
 
     def _wait_for_ovsdb_schema(self, snap: Snap, ovsdb_connection: str) -> bool:
         """Wait until ovsdb-client can retrieve the Open_vSwitch schema."""
@@ -190,14 +195,12 @@ class NeutronOVNMetadataAgentService(OpenStackService):
 
         while True:
             if socket_path and not socket_path.exists():
-                logging.info("Waiting for MicroOVN OVSDB socket: %s", socket_path)
+                logging.info("Waiting for the local MicroOVN OVSDB socket")
             elif self._ovsdb_schema_available(command):
                 return True
 
             if time.monotonic() >= deadline:
-                logging.error(
-                    "Timed out waiting for Open_vSwitch schema from %s", ovsdb_connection
-                )
+                logging.error("Timed out waiting for the local Open_vSwitch schema")
                 return False
             time.sleep(OVSDB_SCHEMA_CHECK_INTERVAL)
 
@@ -221,7 +224,7 @@ class NeutronOVNMetadataAgentService(OpenStackService):
         return Path(ovsdb_connection.removeprefix("unix:"))
 
 
-neutron_ovn_metadata_agent = partial(entry_point, NeutronOVNMetadataAgentService)
+neutron_ovn_agent = partial(entry_point, NeutronOVNAgentService)
 
 
 class NeutronSRIOVNicAgentService(OpenStackService):

@@ -11,7 +11,7 @@ import pytest
 import openstack_hypervisor.services as services_module
 from openstack_hypervisor.services import (
     FileTransferService,
-    NeutronOVNMetadataAgentService,
+    NeutronOVNAgentService,
     NovaAPIMetadataService,
     NovaComputeService,
 )
@@ -209,13 +209,25 @@ class TestNovaAPIMetadataService:
         mock_run.assert_not_called()
 
 
-class TestNeutronOVNMetadataAgentService:
-    """Tests for NeutronOVNMetadataAgentService."""
+class TestNeutronOVNAgentService:
+    """Tests for NeutronOVNAgentService."""
 
-    def _write_metadata_config(self, snap, ovsdb_connection):
-        config = snap.paths.common / "etc" / "neutron" / "neutron_ovn_metadata_agent.ini"
+    def _write_agent_config(
+        self,
+        snap,
+        ovsdb_connection,
+        ovn_nb_connection="ssl:10.0.0.10:6641",
+        ovn_sb_connection="ssl:10.0.0.10:6642",
+    ):
+        config = snap.paths.common / "etc" / "neutron" / "neutron_ovn_agent.ini"
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(f"[ovs]\novsdb_connection = {ovsdb_connection}\n")
+        config.write_text(
+            "[ovs]\n"
+            f"ovsdb_connection = {ovsdb_connection}\n"
+            "[ovn]\n"
+            f"ovn_nb_connection = {ovn_nb_connection}\n"
+            f"ovn_sb_connection = {ovn_sb_connection}\n"
+        )
         return config
 
     @patch("openstack_hypervisor.services.subprocess.run")
@@ -231,13 +243,13 @@ class TestNeutronOVNMetadataAgentService:
         monkeypatch.setattr(services_module, "OVSDB_SCHEMA_CHECK_INTERVAL", 0, raising=False)
         ovs_socket = tmp_path / "db.sock"
         ovs_socket.touch()
-        self._write_metadata_config(snap, f"unix:{ovs_socket}")
+        self._write_agent_config(snap, f"unix:{ovs_socket}")
         mock_run.side_effect = [
             MagicMock(returncode=0),
             MagicMock(returncode=0),
         ]
 
-        result = NeutronOVNMetadataAgentService().run(snap)
+        result = NeutronOVNAgentService().run(snap)
 
         assert result == 0
         assert mock_run.call_count == 2
@@ -253,24 +265,40 @@ class TestNeutronOVNMetadataAgentService:
         )
         mock_run.assert_any_call(
             [
-                str(snap.paths.snap / "usr" / "bin" / "neutron-ovn-metadata-agent"),
+                str(snap.paths.snap / "usr" / "bin" / "neutron-ovn-agent"),
                 "--config-file",
                 str(snap.paths.common / "etc" / "neutron" / "neutron.conf"),
                 "--config-file",
-                str(snap.paths.common / "etc" / "neutron" / "neutron_ovn_metadata_agent.ini"),
+                str(snap.paths.common / "etc" / "neutron" / "neutron_ovn_agent.ini"),
                 "--config-dir",
                 str(snap.paths.common / "etc" / "neutron" / "neutron.conf.d"),
             ]
         )
 
     @patch("openstack_hypervisor.services.subprocess.run")
-    def test_returns_1_when_ovsdb_connection_missing(self, mock_run, snap):
-        """Service should fail fast when ovsdb_connection is not configured."""
-        config = snap.paths.common / "etc" / "neutron" / "neutron_ovn_metadata_agent.ini"
+    @pytest.mark.parametrize(
+        "missing_option",
+        ["ovsdb_connection", "ovn_nb_connection", "ovn_sb_connection"],
+    )
+    def test_returns_1_when_required_connection_missing(self, mock_run, snap, missing_option):
+        """Service should fail fast when any required connection is absent."""
+        config = snap.paths.common / "etc" / "neutron" / "neutron_ovn_agent.ini"
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text("[ovs]\n")
+        options = {
+            "ovsdb_connection": "unix:/run/openvswitch/db.sock",
+            "ovn_nb_connection": "ssl:10.0.0.10:6641",
+            "ovn_sb_connection": "ssl:10.0.0.10:6642",
+        }
+        del options[missing_option]
+        config.write_text(
+            "[ovs]\n"
+            f"ovsdb_connection = {options.get('ovsdb_connection', '')}\n"
+            "[ovn]\n"
+            f"ovn_nb_connection = {options.get('ovn_nb_connection', '')}\n"
+            f"ovn_sb_connection = {options.get('ovn_sb_connection', '')}\n"
+        )
 
-        result = NeutronOVNMetadataAgentService().run(snap)
+        result = NeutronOVNAgentService().run(snap)
 
         assert result == 1
         mock_run.assert_not_called()
@@ -287,9 +315,9 @@ class TestNeutronOVNMetadataAgentService:
         monkeypatch.setattr(services_module, "OVSDB_SCHEMA_TIMEOUT", 0, raising=False)
         monkeypatch.setattr(services_module, "OVSDB_SCHEMA_CHECK_INTERVAL", 0, raising=False)
         ovs_socket = tmp_path / "db.sock"
-        self._write_metadata_config(snap, f"unix:{ovs_socket}")
+        self._write_agent_config(snap, f"unix:{ovs_socket}")
 
-        result = NeutronOVNMetadataAgentService().run(snap)
+        result = NeutronOVNAgentService().run(snap)
 
         assert result == 1
         mock_run.assert_not_called()
@@ -307,10 +335,10 @@ class TestNeutronOVNMetadataAgentService:
         monkeypatch.setattr(services_module, "OVSDB_SCHEMA_CHECK_INTERVAL", 0, raising=False)
         ovs_socket = tmp_path / "db.sock"
         ovs_socket.touch()
-        self._write_metadata_config(snap, f"unix:{ovs_socket}")
+        self._write_agent_config(snap, f"unix:{ovs_socket}")
         mock_run.return_value = MagicMock(returncode=1)
 
-        result = NeutronOVNMetadataAgentService().run(snap)
+        result = NeutronOVNAgentService().run(snap)
 
         assert result == 1
         mock_run.assert_called_once_with(

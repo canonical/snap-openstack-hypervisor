@@ -210,8 +210,8 @@ apps:
       - mount-observe
       - nvme-control
 
-  neutron-ovn-metadata-agent:
-    command: 'bin/neutron-ovn-metadata-agent-service'
+  neutron-ovn-agent:
+    command: 'bin/neutron-ovn-agent-service'
     daemon: simple
     restart-condition: on-failure
     restart-delay: 7s
@@ -223,6 +223,7 @@ apps:
       - ovn-chassis
       - microstack-support
       - firewall-control
+      - shared-memory
 
   neutron-sriov-nic-agent:
     command: 'bin/neutron-sriov-nic-agent-service'
@@ -253,6 +254,7 @@ apps:
       - network-bind
       - firewall-control
       - microstack-support
+      - shared-memory
 
   masakari-instancemonitor:
     command: 'bin/masakari-instancemonitor-service'
@@ -859,6 +861,7 @@ hooks:
       - epa-info
       - etc-driverctl
       - ovn-chassis
+      - ovn-env
       - dm-multipath
   connect-slot-hypervisor-config:
     plugs:
@@ -879,3 +882,8 @@ plugs:
   ovn-chassis:
     interface: content
     target: $SNAP_DATA/microovn/chassis
+  ovn-env:
+    interface: content
+    target: $SNAP_DATA/microovn/ovn-env
+  shared-memory:
+    private: true

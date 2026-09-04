@@ -44,6 +44,7 @@ from openstack_hypervisor.cli.common import (
     socket_path,
 )
 from openstack_hypervisor.log import setup_logging
+from openstack_hypervisor.ovn_env import OVNEnvError, parse_ovn_env
 from openstack_hypervisor.ovs import (
     OVSCli,
     OVSCommandError,
@@ -342,7 +343,6 @@ DEFAULT_CONFIG = {
     "network.ovs-lcore-mask": UNSET,
     "network.ovs-dpdk-ports": UNSET,
     "network.dpdk-driver": "vfio-pci",
-    "network.ovn-sb-connection": UNSET,
     "network.ovn-cert": UNSET,
     "network.ovn-key": UNSET,
     "network.ovn-cacert": UNSET,
@@ -386,7 +386,14 @@ REQUIRED_CONFIG = {
         "credentials.ovn_metadata_proxy_shared_secret",
         "network.nova_metadata_proxy_url",
     ],
-    "neutron-ovn-metadata-agent": ["credentials", "network", "node", "network.ovn_key"],
+    "neutron-ovn-agent": [
+        "credentials",
+        "network",
+        "node",
+        "network.ovn_key",
+        "network.ovn_nb_connection",
+        "network.ovn_sb_connection",
+    ],
     "ceilometer-compute-agent": [
         "identity.password",
         "identity.username",
@@ -518,11 +525,11 @@ TEMPLATES = {
     },
     Path("etc/neutron/neutron.conf"): {
         "template": "neutron.conf.j2",
-        "services": ["neutron-ovn-metadata-agent"],
+        "services": ["neutron-ovn-agent"],
     },
-    Path("etc/neutron/neutron_ovn_metadata_agent.ini"): {
-        "template": "neutron_ovn_metadata_agent.ini.j2",
-        "services": ["neutron-ovn-metadata-agent"],
+    Path("etc/neutron/neutron_ovn_agent.ini"): {
+        "template": "neutron_ovn_agent.ini.j2",
+        "services": ["neutron-ovn-agent"],
     },
     Path("etc/neutron/neutron_sriov_nic_agent.ini"): {
         "template": "neutron_sriov_nic_agent.ini.j2",
@@ -583,6 +590,7 @@ class RestartOnChange(object):
         self.files = files
         self.file_hash = {}
         self.exclude_services = exclude_services or []
+        self.restarted_services = set()
 
     def __enter__(self):
         """Record all file hashes on entry."""
@@ -607,11 +615,13 @@ class RestartOnChange(object):
                     if new_hash != self.file_hash[file]:
                         restart_services.extend(self.files[file].get("services", []))
 
-        restart_services = set([s for s in restart_services if s not in self.exclude_services])
-        if not restart_services:
+        self.restarted_services = set(
+            [service for service in restart_services if service not in self.exclude_services]
+        )
+        if not self.restarted_services:
             return
 
-        _restart_services(self.snap, restart_services)
+        _restart_services(self.snap, self.restarted_services)
 
 
 def _service_subset(snap: Snap, names: typing.Iterable[str]) -> tuple[list[str], Dict[str, Any]]:
@@ -2198,7 +2208,6 @@ def _check_config_present(key: str, context: dict) -> bool:
 
 def _services_not_ready(context: dict) -> List[str]:
     """Check if any services are missing keys they need to function."""
-    logging.warning(f"Context {context}")
     not_ready = []
     for svc in services():
         for required in REQUIRED_CONFIG.get(svc, []):
@@ -2483,10 +2492,16 @@ def configure(snap: Snap) -> None:
     ovs_deferred = not _microovn_ovs_ready(snap)
     _ensure_services_stopped(snap, exclude_services)
 
-    with RestartOnChange(snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services):
+    with RestartOnChange(
+        snap, {**TEMPLATES, **TLS_TEMPLATES}, exclude_services
+    ) as restart_on_change:
         _render_templates(snap, context)
         _configure_tls(snap, configure_ovn_tls=not ovs_deferred)
         _configure_webdav_apache(snap, context)
+
+    ovn_agent = "neutron-ovn-agent"
+    if ovn_agent not in exclude_services and ovn_agent not in restart_on_change.restarted_services:
+        _ensure_services_started(snap, [ovn_agent])
 
     if ovs_deferred:
         logging.info(
@@ -2568,8 +2583,6 @@ def _get_configure_context(snap: Snap) -> dict:
     context["compute"]["allocated_cores"] = allocated_cores
     context["compute"]["cpu_shared_set"] = cpu_shared_set
 
-    logging.info(context)
-
     if not context.get("identity"):
         context["identity"] = {}
     if not context["identity"].get("keystone-region-name"):
@@ -2582,6 +2595,19 @@ def _get_configure_context(snap: Snap) -> dict:
 
     # Add OVS socket path to network context for template rendering
     context["network"]["ovs_socket_path"] = ovs_switch_socket(snap)
+    context["network"].pop("ovn_nb_connection", None)
+    context["network"].pop("ovn_sb_connection", None)
+    ovn_env_path = snap.paths.data / "microovn" / "ovn-env" / "env" / "ovn.env"
+    try:
+        ovn_connections = parse_ovn_env(ovn_env_path)
+    except OVNEnvError:
+        logging.warning(
+            "MicroOVN connection data is unavailable or invalid; "
+            "neutron-ovn-agent will remain stopped"
+        )
+    else:
+        context["network"]["ovn_nb_connection"] = ovn_connections["OVN_NB_CONNECT"]
+        context["network"]["ovn_sb_connection"] = ovn_connections["OVN_SB_CONNECT"]
     _set_nova_metadata_proxy_context(context)
 
     return context

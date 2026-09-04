@@ -9,13 +9,18 @@ metadata_proxy_shared_secret = {{ credentials.ovn_metadata_proxy_shared_secret }
 {% endif -%}
 debug = {{ logging.debug }}
 
+[agent]
+extensions = metadata
+
 [ovs]
 ovsdb_connection = {{ network.ovs_socket_path }}
 
 [ovn]
-{% if network.ovn_sb_connection %}
+ovn_nb_connection = {{ network.ovn_nb_connection }}
+ovn_nb_private_key = {{ snap_common }}/etc/ssl/private/ovn-key.pem
+ovn_nb_certificate = {{ snap_common }}/etc/ssl/certs/ovn-cert.pem
+ovn_nb_ca_cert = {{ snap_common }}/etc/ssl/certs/ovn-cacert.pem
 ovn_sb_connection = {{ network.ovn_sb_connection }}
 ovn_sb_private_key = {{ snap_common }}/etc/ssl/private/ovn-key.pem
 ovn_sb_certificate = {{ snap_common }}/etc/ssl/certs/ovn-cert.pem
 ovn_sb_ca_cert = {{ snap_common }}/etc/ssl/certs/ovn-cacert.pem
-{% endif %}

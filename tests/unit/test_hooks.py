@@ -285,7 +285,7 @@ class TestHooks:
             "file-transfer",
             "libvirtd",
             "masakari-instancemonitor",
-            "neutron-ovn-metadata-agent",
+            "neutron-ovn-agent",
             "neutron-sriov-nic-agent",
             "nova-api-metadata",
             "nova-compute",
@@ -316,7 +316,7 @@ class TestHooks:
             "ceilometer-compute-agent",
             "file-transfer",
             "masakari-instancemonitor",
-            "neutron-ovn-metadata-agent",
+            "neutron-ovn-agent",
             "nova-api-metadata",
             "nova-compute",
         ]
@@ -325,7 +325,7 @@ class TestHooks:
             "ceilometer-compute-agent",
             "file-transfer",
             "masakari-instancemonitor",
-            "neutron-ovn-metadata-agent",
+            "neutron-ovn-agent",
             "nova-api-metadata",
             "nova-compute",
         ]
@@ -333,7 +333,7 @@ class TestHooks:
         config["node"] = {"fqdn": "myhost.maas"}
         assert hooks._services_not_ready(config) == [
             "file-transfer",
-            "neutron-ovn-metadata-agent",
+            "neutron-ovn-agent",
             "nova-api-metadata",
         ]
         config["network"] = {
@@ -344,16 +344,26 @@ class TestHooks:
         }
         assert hooks._services_not_ready(config) == [
             "file-transfer",
-            "neutron-ovn-metadata-agent",
+            "neutron-ovn-agent",
             "nova-api-metadata",
         ]
         config["network"]["nova_metadata_proxy_url"] = "http://internal/nova-metadata"
         assert hooks._services_not_ready(config) == [
             "file-transfer",
-            "neutron-ovn-metadata-agent",
+            "neutron-ovn-agent",
             "nova-api-metadata",
         ]
         config["credentials"] = {"ovn_metadata_proxy_shared_secret": "secret"}
+        assert hooks._services_not_ready(config) == [
+            "file-transfer",
+            "neutron-ovn-agent",
+        ]
+        config["network"].update(
+            {
+                "ovn_nb_connection": "ssl:10.0.0.10:6641",
+                "ovn_sb_connection": "ssl:10.0.0.10:6642",
+            }
+        )
         assert hooks._services_not_ready(config) == ["file-transfer"]
         config["compute"] = {
             "cacert": "cacert",
@@ -797,6 +807,225 @@ def test_get_configure_context_cpu_pinning_profile_percent_path(mocker, snap):
     mock_legacy_get.assert_not_called()
     assert context["compute"]["allocated_cores"] == split_allocated_cores
     assert context["compute"]["cpu_shared_set"] == split_shared_set
+
+
+def _minimal_config_options():
+    class ConfigOptionsDict(dict):
+        def as_dict(self):
+            return dict(self)
+
+    return ConfigOptionsDict(
+        {
+            section: {}
+            for section in [
+                "compute",
+                "network",
+                "identity",
+                "logging",
+                "node",
+                "rabbitmq",
+                "credentials",
+                "telemetry",
+                "monitoring",
+                "ca",
+                "masakari",
+                "sev",
+                "internal",
+            ]
+        }
+    )
+
+
+def _prepare_minimal_configure_context(mocker, snap):
+    mocker.patch.object(snap.config, "get_options", return_value=_minimal_config_options())
+    mocker.patch.object(hooks, "_is_multipathd_available", return_value=False)
+    mocker.patch.object(hooks, "get_cpu_pinning_from_socket", return_value=("", ""))
+    mocker.patch.object(hooks, "_set_sriov_context")
+    mocker.patch.object(hooks, "_set_pci_context")
+
+
+def _prepare_configure_reconciliation(mocker, snap):
+    config_options = _minimal_config_options()
+    config_options["network"] = {
+        "ovn_key": "key",
+        "ovn_cert": "cert",
+        "ovn_cacert": "cacert",
+    }
+    config_options["credentials"] = {"ovn_metadata_proxy_shared_secret": "secret"}
+    config_options["node"] = {"fqdn": "compute-0.internal"}
+    mocker.patch.object(snap.config, "get_options", return_value=config_options)
+
+    mocker.patch.object(hooks, "setup_logging")
+    mocker.patch.object(hooks, "_mkdirs")
+    mocker.patch.object(hooks, "_update_default_config")
+    mocker.patch.object(hooks, "_setup_secrets")
+    mocker.patch.object(hooks, "_detect_compute_flavors")
+    mocker.patch.object(hooks, "_is_multipathd_available", return_value=False)
+    mocker.patch.object(hooks, "get_cpu_pinning_from_socket", return_value=("", ""))
+    mocker.patch.object(hooks, "_set_sriov_context")
+    mocker.patch.object(hooks, "_set_pci_context")
+    mocker.patch.object(hooks, "OVSCli")
+    mocker.patch.object(hooks, "_microovn_ovs_ready", return_value=False)
+    mocker.patch.object(hooks, "ovs_switchd_ctl_socket", return_value=None)
+
+    agent_config = Path("etc/neutron/neutron_ovn_agent.ini")
+    mocker.patch.object(
+        hooks,
+        "TEMPLATES",
+        {
+            agent_config: {
+                "template": "neutron_ovn_agent.ini.j2",
+                "services": ["neutron-ovn-agent"],
+            }
+        },
+    )
+    mocker.patch.object(hooks, "TLS_TEMPLATES", {})
+    mocker.patch.object(
+        hooks,
+        "_get_template",
+        return_value=hooks.Template(
+            "{{ network.ovn_nb_connection | default('') }}|"
+            "{{ network.ovn_sb_connection | default('') }}\n"
+        ),
+    )
+
+    for name in [
+        "_configure_tls",
+        "_configure_webdav_apache",
+        "_configure_kvm",
+        "_configure_monitoring_services",
+        "_configure_ceph",
+        "_configure_masakari_services",
+        "_configure_sriov_agent_service",
+    ]:
+        mocker.patch.object(hooks, name)
+
+    ensure_stopped = mocker.patch.object(hooks, "_ensure_services_stopped")
+    restart_services = mocker.patch.object(hooks, "_restart_services")
+
+    rendered_config = snap.paths.common / agent_config
+    rendered_config.parent.mkdir(parents=True, exist_ok=True)
+    rendered_config.write_text("previous configuration\n", encoding="utf-8")
+    return ensure_stopped, restart_services
+
+
+def test_configure_restarts_eligible_ovn_agent_with_valid_environment(mocker, snap):
+    ovn_env = snap.paths.data / "microovn" / "ovn-env" / "env" / "ovn.env"
+    ovn_env.parent.mkdir(parents=True)
+    ovn_env.write_text(
+        'OVN_NB_CONNECT="ssl:192.0.2.10:6641"\n' 'OVN_SB_CONNECT="ssl:192.0.2.10:6642"\n',
+        encoding="utf-8",
+    )
+    ensure_stopped, restart_services = _prepare_configure_reconciliation(mocker, snap)
+    snap.services.list.return_value = {
+        "neutron-ovn-agent": service_mock(enabled=False, active=False)
+    }
+    snapctl = mocker.patch.object(hooks, "SnapCtl").return_value
+
+    hooks.configure(snap)
+
+    excluded_services = ensure_stopped.call_args.args[1]
+    assert "neutron-ovn-agent" not in excluded_services
+    restarted_services = restart_services.call_args.args[1]
+    assert set(restarted_services) == {"neutron-ovn-agent"}
+    snapctl.start.assert_not_called()
+
+
+def test_configure_starts_eligible_inactive_ovn_agent_when_config_is_unchanged(mocker, snap):
+    nb_connection = "ssl:192.0.2.10:6641"
+    sb_connection = "ssl:192.0.2.10:6642"
+    ovn_env = snap.paths.data / "microovn" / "ovn-env" / "env" / "ovn.env"
+    ovn_env.parent.mkdir(parents=True)
+    ovn_env.write_text(
+        f'OVN_NB_CONNECT="{nb_connection}"\n' f'OVN_SB_CONNECT="{sb_connection}"\n',
+        encoding="utf-8",
+    )
+    ensure_stopped, restart_services = _prepare_configure_reconciliation(mocker, snap)
+    rendered_config = snap.paths.common / "etc/neutron/neutron_ovn_agent.ini"
+    rendered_config.write_text(f"{nb_connection}|{sb_connection}", encoding="utf-8")
+    snap.services.list.return_value = {
+        "neutron-ovn-agent": service_mock(enabled=False, active=False)
+    }
+    snapctl = mocker.patch.object(hooks, "SnapCtl").return_value
+
+    hooks.configure(snap)
+
+    excluded_services = ensure_stopped.call_args.args[1]
+    assert "neutron-ovn-agent" not in excluded_services
+    restart_services.assert_not_called()
+    snapctl.start.assert_called_once_with("neutron-ovn-agent", enable=True)
+
+
+@pytest.mark.parametrize(
+    "ovn_env_contents",
+    [
+        None,
+        'OVN_NB_CONNECT="ssl:192.0.2.10:6641"\n' 'OVN_SB_CONNECT="malformed"\n',
+    ],
+    ids=("missing", "invalid"),
+)
+def test_configure_stops_ovn_agent_without_usable_environment(mocker, snap, ovn_env_contents):
+    if ovn_env_contents is not None:
+        ovn_env = snap.paths.data / "microovn" / "ovn-env" / "env" / "ovn.env"
+        ovn_env.parent.mkdir(parents=True)
+        ovn_env.write_text(ovn_env_contents, encoding="utf-8")
+    ensure_stopped, restart_services = _prepare_configure_reconciliation(mocker, snap)
+    snap.services.list.return_value = {
+        "neutron-ovn-agent": service_mock(enabled=False, active=False)
+    }
+    snapctl = mocker.patch.object(hooks, "SnapCtl").return_value
+
+    hooks.configure(snap)
+
+    excluded_services = ensure_stopped.call_args.args[1]
+    assert "neutron-ovn-agent" in excluded_services
+    restart_services.assert_not_called()
+    snapctl.start.assert_not_called()
+
+
+def test_get_configure_context_reads_ovn_connections_without_logging_them(mocker, snap, caplog):
+    nb_connection = "ssl:192.0.2.10:6641"
+    sb_connection = "ssl:192.0.2.10:6642"
+    ovn_env = snap.paths.data / "microovn" / "ovn-env" / "env" / "ovn.env"
+    ovn_env.parent.mkdir(parents=True)
+    ovn_env.write_text(
+        f'OVN_NB_CONNECT="{nb_connection}"\n' f'OVN_SB_CONNECT="{sb_connection}"\n',
+        encoding="utf-8",
+    )
+    _prepare_minimal_configure_context(mocker, snap)
+
+    context = hooks._get_configure_context(snap)
+    hooks._get_exclude_services(context)
+
+    assert context["network"]["ovn_nb_connection"] == nb_connection
+    assert context["network"]["ovn_sb_connection"] == sb_connection
+    assert nb_connection not in caplog.text
+    assert sb_connection not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "ovn_env_contents",
+    [
+        None,
+        'OVN_NB_CONNECT="ssl:192.0.2.10:6641"\nOVN_SB_CONNECT="malformed-secret"\n',
+    ],
+)
+def test_get_configure_context_excludes_ovn_agent_without_valid_environment(
+    mocker, snap, caplog, ovn_env_contents
+):
+    if ovn_env_contents is not None:
+        ovn_env = snap.paths.data / "microovn" / "ovn-env" / "env" / "ovn.env"
+        ovn_env.parent.mkdir(parents=True)
+        ovn_env.write_text(ovn_env_contents, encoding="utf-8")
+    _prepare_minimal_configure_context(mocker, snap)
+
+    context = hooks._get_configure_context(snap)
+
+    assert "ovn_nb_connection" not in context["network"]
+    assert "ovn_sb_connection" not in context["network"]
+    assert "neutron-ovn-agent" in hooks._services_not_ready(context)
+    assert "ssl:192.0.2.10:6641" not in caplog.text
+    assert "malformed-secret" not in caplog.text
 
 
 @mock.patch("openstack_hypervisor.netplan.get_netplan_config")
@@ -1497,8 +1726,10 @@ class TestConfigureOVSDeferred:
         mocker.patch.object(hooks, "_get_configure_context", return_value={"network": {}})
         mocker.patch.object(hooks, "_get_exclude_services", return_value=[])
         mocker.patch.object(hooks, "OVSCli", return_value=mock.Mock())
-        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext())
+        restart_on_change = mock.Mock(restarted_services=set())
+        mocker.patch.object(hooks, "RestartOnChange", return_value=nullcontext(restart_on_change))
         mocker.patch.object(hooks, "_render_templates")
+        mocker.patch.object(hooks, "_ensure_services_started")
         mocker.patch.object(hooks, "_configure_webdav_apache")
         mocker.patch.object(hooks, "_configure_kvm")
         mocker.patch.object(hooks, "_configure_monitoring_services")
