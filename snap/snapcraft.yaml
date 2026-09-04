@@ -813,14 +813,49 @@ parts:
   elf-rpath-fixes:
     plugin: nil
     after:
+      - kvm-support
       - libvirt-exporter
       - netplan
+      - networking
       - openstack-hypervisor
       - qemu-firmware-data
     build-packages:
+      - binutils
       - patchelf
     override-prime: |
       craftctl default
+
+      # enable-patchelf is needed for helpers that discard LD_LIBRARY_PATH,
+      # but its base-snap RPATH is inaccessible under strict confinement.
+      # Keep the staged-library paths and their original RPATH/RUNPATH type.
+      while IFS= read -r -d '' elf; do
+          rpath=$(patchelf --print-rpath "$elf" 2>/dev/null) || continue
+          case "$rpath" in
+              *"/snap/core26/"*) ;;
+              *) continue ;;
+          esac
+
+          filtered_rpath=$(
+              printf '%s' "$rpath" | tr ':' '\n' | awk '
+                  index($0, "/snap/core26/") != 1 {
+                      if (count++) printf ":"
+                      printf "%s", $0
+                  }
+                  END { print "" }
+              '
+          )
+
+          if [ -z "$filtered_rpath" ]; then
+              patchelf --remove-rpath "$elf"
+          elif readelf -d "$elf" 2>/dev/null | grep '(RPATH)' >/dev/null; then
+              patchelf --force-rpath --set-rpath "$filtered_rpath" "$elf"
+          else
+              patchelf --set-rpath "$filtered_rpath" "$elf"
+          fi
+      done < <(
+          grep --recursive --files-with-matches --null --binary-files=text \
+              '/snap/core26/' "$CRAFT_PRIME" || true
+      )
 
       numpy_lapack_lite="$CRAFT_PRIME/usr/lib/python3/dist-packages/numpy/linalg/lapack_lite.cpython-314-x86_64-linux-gnu.so"
       numpy_lapack_lite_rpath='$ORIGIN/../../../../x86_64-linux-gnu/blas:$ORIGIN/../../../../x86_64-linux-gnu:$ORIGIN/../../../../x86_64-linux-gnu/lapack'
