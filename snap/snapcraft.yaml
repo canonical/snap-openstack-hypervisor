@@ -57,8 +57,6 @@ layout:
     symlink: $SNAP/lib/multipath
   /etc/swtpm_setup.conf:
     symlink: $SNAP_COMMON/etc/swtpm_setup.conf
-  /opt/emc/scaleio/openstack:
-    bind: $SNAP_COMMON/powerflex-openstack
 
 apps:
   openstack-hypervisor:
