@@ -57,6 +57,8 @@ layout:
     symlink: $SNAP/lib/multipath
   /etc/swtpm_setup.conf:
     symlink: $SNAP_COMMON/etc/swtpm_setup.conf
+  /opt/emc/scaleio/openstack:
+    bind: $SNAP_COMMON/powerflex-openstack
 
 apps:
   openstack-hypervisor:
@@ -143,6 +145,7 @@ apps:
       - process-control
       - mount-observe
       - nvme-control
+      - powerflex-connector-config
 
   neutron-ovn-agent:
     command: 'bin/neutron-ovn-agent-service'
@@ -848,6 +851,10 @@ plugs:
     interface: system-files
     write:
     - /etc/driverctl.d
+  powerflex-connector-config:
+    interface: system-files
+    read:
+    - /opt/emc/scaleio/openstack/connector.conf
   ovn-chassis:
     interface: content
     target: $SNAP_DATA/microovn/chassis
