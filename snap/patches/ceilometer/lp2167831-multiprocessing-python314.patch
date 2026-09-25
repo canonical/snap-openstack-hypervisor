@@ -1,0 +1,45 @@
+diff --git a/ceilometer/cmd/agent_notification.py b/ceilometer/cmd/agent_notification.py
+index 487d65e..384b0b0 100644
+--- a/ceilometer/cmd/agent_notification.py
++++ b/ceilometer/cmd/agent_notification.py
+@@ -13,6 +13,8 @@
+ # License for the specific language governing permissions and limitations
+ # under the License.
+ 
++import multiprocessing
++
+ import cotyledon
+ from cotyledon import oslo_config_glue
+ from oslo_log import log
+@@ -27,7 +29,12 @@ def main():
+     conf = service.prepare_service()
+     conf.log_opt_values(LOG, log.DEBUG)
+ 
+-    sm = cotyledon.ServiceManager()
++    # Python 3.14 changed the default multiprocessing start method on Linux
++    # from "fork" to "forkserver", which makes cotyledon pickle the parsed
++    # configuration when spawning workers. oslo.config < 10.6.0 cannot be
++    # pickled, so keep the previous "fork" behaviour.
++    sm = cotyledon.ServiceManager(
++        mp_context=multiprocessing.get_context("fork"))
+     sm.add(notification.NotificationService,
+            workers=conf.notification.workers, args=(conf,))
+     oslo_config_glue.setup(sm, conf)
+diff --git a/ceilometer/cmd/polling.py b/ceilometer/cmd/polling.py
+index 42e781c..5276628 100644
+--- a/ceilometer/cmd/polling.py
++++ b/ceilometer/cmd/polling.py
+@@ -96,7 +96,12 @@ def create_heartbeat_service(worker_id, conf, queue=None):
+ 
+ 
+ def main():
+-    sm = cotyledon.ServiceManager()
++    # Python 3.14 changed the default multiprocessing start method on Linux
++    # from "fork" to "forkserver", which makes cotyledon pickle the parsed
++    # configuration when spawning workers. oslo.config < 10.6.0 cannot be
++    # pickled, so keep the previous "fork" behaviour.
++    sm = cotyledon.ServiceManager(
++        mp_context=multiprocessing.get_context("fork"))
+     conf = _prepare_config()
+     priv_context.init(root_helper=shlex.split(utils.get_root_helper(conf)))
+     oslo_config_glue.setup(sm, conf)

@@ -645,11 +645,24 @@ parts:
       # Install webdav4 for Nova's HttpDriver (not available as Debian package)
       pip3 install --target=$CRAFT_PART_INSTALL/usr/lib/python3/dist-packages webdav4
 
+      # Patch the staged OpenStack Python packages.
       pushd "$CRAFT_PART_INSTALL/usr/lib/python3/dist-packages"
       path="$CRAFT_PROJECT_DIR/snap/patches/nova/0001-remotefs-http-driver.patch"
       # Unapply patch, ignore on failure
       patch -p1 --reverse --forward --quiet --batch --reject-file=/dev/null --input "$path" || true
-      patch -p1 --forward --input="$path"
+      if ! patch -p1 --forward --batch --reject-file=/dev/null --input "$path"; then
+          echo "ERROR: failed to apply patch: $path" >&2
+          exit 1
+      fi
+
+      # Unlike the Nova patch, this one is not unapplied first: it becomes
+      # redundant once Ubuntu ships the ceilometer fix (LP: #2167831), and the
+      # build must then fail loudly so the patch gets dropped.
+      path="$CRAFT_PROJECT_DIR/snap/patches/ceilometer/lp2167831-multiprocessing-python314.patch"
+      if ! patch -p1 --forward --batch --reject-file=/dev/null --input "$path"; then
+          echo "ERROR: failed to apply patch: $path" >&2
+          exit 1
+      fi
       popd
 
   openstack-hypervisor:
