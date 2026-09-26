@@ -1,5 +1,5 @@
 name: openstack-hypervisor
-version: '2026.1'
+version: '2026.2'
 adopt-info: snap-version
 base: core26
 summary: OpenStack Hypervisor
@@ -10,6 +10,14 @@ assumes:
 - snapd2.73
 grade: stable
 confinement: strict
+
+package-repositories:
+  - type: apt
+    # Hibiscus 2026.2 is only in the UCA -proposed pocket so far.
+    # Switch pocket to updates once it is promoted.
+    cloud: hibiscus
+    pocket: proposed
+    priority: always
 environment:
   LC_ALL: C
   PATH: $SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$SNAP/usr/local/bin:$SNAP/usr/local/sbin:$PATH
@@ -675,9 +683,23 @@ parts:
     override-build: |
       craftctl default
       snap-helpers write-hooks
-      # purge dangling venv symlinks pointing into the build directory
-      rm -f $CRAFT_PART_INSTALL/bin/python
+      # Fix external symlinks from uv venv
       rm -f $CRAFT_PART_INSTALL/bin/python3.14
+      ln -sf ../usr/bin/python3.14 $CRAFT_PART_INSTALL/bin/python
+    override-prime: |
+      craftctl default
+      # Hooks are written to $CRAFT_PRIME/snap/hooks, but snapcraft stubs
+      # meta/hooks/<name> with "#!/bin/true" for every hook declared in this
+      # file, then calls provision_hooks() with overwrite=False.
+      # Write a wrapper to meta/hooks/<name> that calls the real hooks.
+      for hook in "$CRAFT_PRIME"/snap/hooks/*; do
+        [ -f "$hook" ] || continue
+        name="$(basename "$hook")"
+        mkdir -p "$CRAFT_PRIME/meta/hooks"
+        printf '#!/bin/sh\nexec "$SNAP/snap/hooks/%s" "$@"\n' "$name" \
+          > "$CRAFT_PRIME/meta/hooks/$name"
+        chmod 755 "$CRAFT_PRIME/meta/hooks/$name"
+      done
 
   libvirt-exporter:
     plugin: go

@@ -319,9 +319,9 @@ DEFAULT_CONFIG = {
     "compute.virt-type": "auto",
     "compute.cpu-models": UNSET,
     "compute.spice-proxy-address": _get_local_ip_by_default_route,  # noqa: F821
-    "compute.rbd_user": "nova",
-    "compute.rbd_secret_uuid": UNSET,
-    "compute.rbd_key": UNSET,
+    "compute.rbd-user": "nova",
+    "compute.rbd-secret-uuid": UNSET,
+    "compute.rbd-key": UNSET,
     "compute.cacert": UNSET,
     "compute.cert": UNSET,
     "compute.key": UNSET,
