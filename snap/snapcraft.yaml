@@ -1,5 +1,5 @@
 name: openstack-hypervisor
-version: '2026.1'
+version: '2026.2'
 adopt-info: snap-version
 base: core26
 summary: OpenStack Hypervisor
@@ -10,6 +10,14 @@ assumes:
 - snapd2.73
 grade: stable
 confinement: strict
+
+package-repositories:
+  - type: apt
+    # Hibiscus 2026.2 is only in the UCA -proposed pocket so far.
+    # Switch pocket to updates once it is promoted.
+    cloud: hibiscus
+    pocket: proposed
+    priority: always
 environment:
   LC_ALL: C
   PATH: $SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$SNAP/usr/local/bin:$SNAP/usr/local/sbin:$PATH
