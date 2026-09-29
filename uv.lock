@@ -346,7 +346,7 @@ requires-dist = [
     { name = "pytest-mock", marker = "extra == 'dev'" },
     { name = "python-novaclient", marker = "extra == 'dev'" },
     { name = "python-novaclient", marker = "extra == 'tics'" },
-    { name = "snap-helpers", git = "https://github.com/albertodonato/snap-helpers?rev=46803aa9d52cc0bb24f76df878dd1010fc08e6a0" },
+    { name = "snap-helpers", git = "https://github.com/albertodonato/snap-helpers?rev=76f8166b640163c0f20887829e31b2cafbfdec11" },
 ]
 provides-extras = ["dev", "tics"]
 
@@ -666,7 +666,7 @@ wheels = [
 [[package]]
 name = "snap-helpers"
 version = "0.4.2"
-source = { git = "https://github.com/albertodonato/snap-helpers?rev=46803aa9d52cc0bb24f76df878dd1010fc08e6a0#46803aa9d52cc0bb24f76df878dd1010fc08e6a0" }
+source = { git = "https://github.com/albertodonato/snap-helpers?rev=76f8166b640163c0f20887829e31b2cafbfdec11#76f8166b640163c0f20887829e31b2cafbfdec11" }
 dependencies = [
     { name = "pyyaml" },
 ]
