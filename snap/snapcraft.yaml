@@ -62,8 +62,12 @@ layout:
     symlink: $SNAP/usr/share/OVMF
   /usr/share/AAVMF:
     symlink: $SNAP/usr/share/AAVMF
+  # Per-VM QGA/monitor sockets for running VMs are created under this dir and
+  # must survive snap refreshes, so it has to point at $SNAP_COMMON
+  # (revision-independent). $SNAP_DATA is copied per revision, which orphans
+  # running VMs' sockets on every revision change (LP#2169709).
   /var/lib/libvirt:
-    symlink: $SNAP_DATA/var/lib/libvirt
+    symlink: $SNAP_COMMON/var/lib/libvirt
   /var/lib/openstack-hypervisor:
     bind: $SNAP_COMMON
   /usr/lib/multipath:
@@ -889,6 +893,10 @@ slots:
 
 hooks:
   install:
+    plugs: [ network, microstack-support]
+  pre-refresh:
+    plugs: [ network, microstack-support]
+  post-refresh:
     plugs: [ network, microstack-support]
   configure:
     plugs:
