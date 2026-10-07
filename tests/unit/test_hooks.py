@@ -4,9 +4,13 @@
 import io
 import json
 import random
+import shutil
+import socket
+import tempfile
 import textwrap
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import mock_netplan_configs
@@ -1883,3 +1887,153 @@ class TestDPDKConfigReady:
         result = hooks._dpdk_config_is_ready(snap, ovs_cli, context)
 
         assert result is True
+
+
+class TestMigrateLibvirtState:
+    """Tests for _migrate_libvirt_state (LP#2169709 backward-compat migration)."""
+
+    @pytest.fixture
+    def short_env(self, snap):
+        """Real but short paths: unix socket paths are limited to 108 bytes.
+
+        Uses /tmp with a 1-char prefix because CI home dirs can exceed the
+        limit combined with the long socket filename.
+        """
+        base = Path(tempfile.mkdtemp(prefix="m", dir="/tmp"))
+        snap.paths = SimpleNamespace(
+            data=base / "var/snap/mysnap/2", common=base / "var/snap/mysnap/common"
+        )
+        yield base
+        shutil.rmtree(base, ignore_errors=True)
+
+    def _make_state_dir(self, root, rev, live=False):
+        """Create a fake revision data dir with libvirt state.
+
+        Returns (sock_path, server): the server ref must be kept alive for the
+        socket to stay live, mirroring qemu holding the chardev socket open.
+        """
+        qemu_dir = root / f"var/snap/mysnap/{rev}/var/lib/libvirt/qemu"
+        qemu_dir.mkdir(parents=True)
+        sock_path = qemu_dir / "org.qemu.guest_agent.0.instance-00000001.sock"
+        server = None
+        if live:
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(sock_path))  # bind creates the file
+            server.listen(8)
+        else:
+            sock_path.touch()
+        return sock_path, server
+
+    def test_migrates_live_socket_dir_by_rename(self, snap, short_env):
+        # rev 1 holds the LIVE socket (running qemu); rev 2 is snapd's dead copy
+        _, server = self._make_state_dir(short_env, "1", live=True)
+        self._make_state_dir(short_env, "2", live=False)
+
+        hooks._migrate_libvirt_state(snap)
+
+        dest = snap.paths.common / "var/lib/libvirt"
+        assert dest.is_dir()
+        # same inode preserved -> running qemu's socket is still valid
+        assert (dest / "qemu/org.qemu.guest_agent.0.instance-00000001.sock").is_socket()
+        # symlink left behind at the old revision path (snapd rollback safety)
+        assert (short_env / "var/snap/mysnap/1/var/lib/libvirt").is_symlink()
+        # one-shot marker written
+        assert (dest / ".migrated-from-snap-data").is_file()
+        # second call is a no-op: source is a symlink now, not re-migrated
+        hooks._migrate_libvirt_state(snap)
+        assert (short_env / "var/snap/mysnap/1/var/lib/libvirt").is_symlink()
+
+    def test_marker_gate_falls_back_to_rescue_when_dest_pre_created(self, snap, short_env):
+        # When dest pre-exists (e.g. a restarted libvirtd created its state
+        # dir under $SNAP_COMMON first), os.rename onto the non-empty dir
+        # fails ENOTEMPTY and the rescue fallback rescues the live socket —
+        # the marker gate must still let the migration attempt run
+        # (LP#2169709 review: dest.exists() is NOT a safe one-shot latch).
+        _, server = self._make_state_dir(short_env, "1", live=True)
+        # simulate libvirtd having created dest already
+        (snap.paths.common / "var/lib/libvirt/qemu").mkdir(parents=True)
+
+        hooks._migrate_libvirt_state(snap)
+
+        dest = snap.paths.common / "var/lib/libvirt"
+        # migration still happened: persistent state copied alongside the
+        # pre-created dir, live socket rescued, marker latched
+        assert (dest / ".migrated-from-snap-data").is_file()
+        assert (dest / "qemu/org.qemu.guest_agent.0.instance-00000001.sock").is_socket()
+        assert hooks._socket_is_live(dest / "qemu/org.qemu.guest_agent.0.instance-00000001.sock")
+
+    def test_noop_on_fresh_install(self, snap, short_env):
+        # no old revision dirs at all: nothing to migrate, marker latched
+        hooks._migrate_libvirt_state(snap)  # must not raise
+        dest = snap.paths.common / "var/lib/libvirt"
+        assert (dest / ".migrated-from-snap-data").is_file()
+        # and never rescans:
+        self._make_state_dir(short_env, "5", live=True)
+        hooks._migrate_libvirt_state(snap)
+        assert (short_env / "var/snap/mysnap/5/var/lib/libvirt/qemu").is_dir()
+
+    def test_fallback_hardlinks_live_sockets_when_rename_denied(self, snap, mocker, short_env):
+        # Snap-hook confinement denies rename(2) into old revision dirs in
+        # production (EACCES under strict confinement); simulate directly so
+        # the test is independent of root CAP_DAC_OVERRIDE bypassing chmod.
+        _, server = self._make_state_dir(short_env, "1", live=True)
+        (short_env / "var/snap/mysnap/1/var/lib/libvirt/nvram").mkdir()
+        mocker.patch.object(
+            hooks.os, "rename", side_effect=PermissionError(13, "Permission denied")
+        )
+
+        hooks._migrate_libvirt_state(snap)
+
+        dest_sock = (
+            snap.paths.common
+            / "var/lib/libvirt/qemu/org.qemu.guest_agent.0.instance-00000001.sock"
+        )
+        # hardlink = same inode as the live socket qemu is bound to
+        assert dest_sock.is_socket()
+        assert dest_sock.stat().st_nlink == 2
+        assert hooks._socket_is_live(dest_sock)
+        # persistent state still copied
+        assert (snap.paths.common / "var/lib/libvirt/nvram").is_dir()
+        # source untouched (rename denied)
+        assert (short_env / "var/snap/mysnap/1/var/lib/libvirt").is_dir()
+
+    def test_fallback_skips_monitor_sockets_in_copy(self, snap, mocker, short_env):
+        # libvirt also creates per-domain <domain>.monitor sockets in the
+        # same dir; open(2) on a socket inode fails ENXIO, so copytree must
+        # skip sockets by type, not by *.sock pattern. Simulate production
+        # strict-confinement: both rename(2) and link(2) denied from the old
+        # revision dir, leaving only the copytree fallback (LP#2169709 review).
+        qemu_dir = short_env / "var/snap/mysnap/1/var/lib/libvirt/qemu"
+        qemu_dir.mkdir(parents=True)
+        monitor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        monitor.bind(str(qemu_dir / "instance-00000001.monitor"))
+        monitor.listen(1)
+        agent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        agent.bind(str(qemu_dir / "instance-00000001.sock"))
+        agent.listen(1)
+        (short_env / "var/snap/mysnap/1/var/lib/libvirt/nvram").mkdir()
+        mocker.patch.object(
+            hooks.os, "rename", side_effect=PermissionError(13, "Permission denied")
+        )
+        mocker.patch.object(hooks.os, "link", side_effect=PermissionError(13, "Permission denied"))
+
+        # must not raise despite the live .monitor socket (ENXIO on open)
+        hooks._migrate_libvirt_state(snap)
+
+        dest = snap.paths.common / "var/lib/libvirt"
+        assert (dest / "nvram").is_dir()  # persistent state copied
+        # neither socket rescued (link denied), and copytree skipped them by type
+        assert not (dest / "qemu/instance-00000001.monitor").exists()
+        assert not (dest / "qemu/instance-00000001.sock").exists()
+
+    def test_falls_back_to_data_dir_when_no_old_revisions(self, snap, short_env):
+        # only the current revision's data dir exists (snapd's copy: dead socks, real nvram)
+        qemu_dir = snap.paths.data / "var/lib/libvirt/qemu"
+        qemu_dir.mkdir(parents=True)
+        (qemu_dir / "org.qemu.guest_agent.0.instance-00000001.sock").touch()
+        (snap.paths.data / "var/lib/libvirt/nvram").mkdir()
+
+        hooks._migrate_libvirt_state(snap)
+
+        dest = snap.paths.common / "var/lib/libvirt"
+        assert (dest / "nvram").is_dir()

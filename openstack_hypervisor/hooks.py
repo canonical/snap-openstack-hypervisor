@@ -45,11 +45,7 @@ from openstack_hypervisor.cli.common import (
 )
 from openstack_hypervisor.log import setup_logging
 from openstack_hypervisor.ovn_env import OVNEnvError, parse_ovn_env
-from openstack_hypervisor.ovs import (
-    OVSCli,
-    OVSCommandError,
-    OVSTimeoutError,
-)
+from openstack_hypervisor.ovs import OVSCli, OVSCommandError, OVSTimeoutError
 
 UNSET = ""
 
@@ -91,6 +87,11 @@ COMMON_DIRS = [
     Path("apache-webdav"),
     Path("apache-webdav/tls"),
     Path("etc/pki/qemu"),
+    # libvirt
+    # qemu runtime state (per-VM QGA sockets, nvram, secrets) must be
+    # revision-independent (LP#2169709): the /var/lib/libvirt layout points at
+    # $SNAP_COMMON, so this dir is created under common, not snap data.
+    Path("var/lib/libvirt/qemu"),
     # log
     Path("log/libvirt/qemu"),
     Path("log/ovn"),
@@ -127,7 +128,6 @@ DATA_DIRS = [
     Path("lib/ovn"),
     Path("lib/neutron"),
     Path("run/hypervisor-config"),
-    Path("var/lib/libvirt/qemu"),
     OwnedPath("var/lib/swtpm-localca", owner=SNAP_USER, group=SNAP_GROUP),
 ]
 
@@ -166,6 +166,202 @@ def _generate_secret(length: int = DEFAULT_SECRET_LENGTH) -> str:
     :return: string containing the generated secret
     """
     return "".join(secrets.choice(string.ascii_letters + string.digits) for i in range(length))
+
+
+def _socket_is_live(path: Path) -> bool:
+    """Return True if a unix socket file at path has an active listener."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            sock.connect(str(path))
+        return True
+    except OSError:
+        return False
+
+
+def _ignore_libvirt_runtime_files(directory: str, entries: List[str]) -> List[str]:
+    """Return entries that cannot be copied: sockets (by type) and pid files (by name).
+
+    open(2) on any socket inode fails (ENXIO), whether the socket has a live
+    listener or is a dead per-revision copy, so sockets are skipped by file
+    type (libvirt also creates per-domain ``<domain>.monitor`` sockets in
+    the same directory). pid files are skipped by the conventional
+    ``.pid`` suffix: they are regular files whose copy is harmless, but
+    copying stale pids into the new state dir invites confusion.
+    """
+    ignored = []
+    for name in entries:
+        entry = Path(directory) / name
+        if name.endswith(".pid") or entry.is_socket():
+            ignored.append(name)
+    return ignored
+
+
+def _dir_has_live_socket(qemu_dir: Path) -> bool:
+    """Return True if any socket in qemu_dir has a live listener.
+
+    Any live socket (agent or monitor) marks a dir with running qemu state;
+    checked by file type, not name pattern, per _ignore_libvirt_runtime_files.
+    """
+    try:
+        return any(_socket_is_live(f) for f in qemu_dir.iterdir() if f.is_socket())
+    except OSError:
+        return False
+
+
+def _dir_rank(state_dir: Path) -> tuple:
+    """Sort key: live-socket dirs first (running VMs), else most recent."""
+    try:
+        return (_dir_has_live_socket(state_dir / "qemu"), state_dir.stat().st_mtime)
+    except OSError:
+        return (False, 0)
+
+
+def _libvirt_state_candidates(snap: Snap, dest: Path) -> List[Path]:
+    """Return candidate source dirs for libvirt state migration, best first.
+
+    Old revision data dirs are preferred (a live socket there means running
+    qemu processes); the current revision's data dir is snapd's own copy and
+    is only a last resort so nvram/secrets survive even if old dirs are gone.
+    Enumeration races with snapd's revision garbage collection are tolerated:
+    a dir disappearing mid-scan is simply not a candidate.
+
+    NB: revision dirs are enumerated by presence of var/lib/libvirt content,
+    not by revision-name pattern: locally sideloaded revisions use
+    x-prefixed names that a numeric filter would silently skip.
+    """
+    candidates = []
+    snap_data_root = snap.paths.data.parent
+    if snap_data_root.is_dir():
+        for entry in snap_data_root.iterdir():
+            if entry == snap.paths.data or entry.name == "common":
+                continue
+            state_dir = entry / "var/lib/libvirt"
+            if state_dir.is_dir() and not state_dir.is_symlink():
+                candidates.append(state_dir)
+    fallback = snap.paths.data / "var/lib/libvirt"
+    if fallback.is_dir() and fallback != dest:
+        candidates.append(fallback)
+
+    candidates.sort(key=_dir_rank, reverse=True)
+    return candidates
+
+
+def _rescue_libvirt_sockets(source: Path, dest: Path) -> None:
+    """Best-effort rescue of live agent sockets into dest when rename failed.
+
+    snapd's hook AppArmor profile grants write+link only on the CURRENT
+    revision dir and $SNAP_COMMON; rename(2) and link(2) from old revision
+    dirs are EACCES-denied, and libvirtd's own profile denies connecting to
+    sockets under old revision paths. Live sockets held by running qemu
+    processes in old revision dirs are therefore unrecoverable from within
+    the snap; those instances need one soft reboot. All refreshes after the
+    migration are seamless because new sockets are created in $SNAP_COMMON.
+    """
+    src_qemu = source / "qemu"
+    dst_qemu = dest / "qemu"
+    if src_qemu.is_dir():
+        dst_qemu.mkdir(parents=True, exist_ok=True)
+        for f in src_qemu.iterdir():
+            if not f.is_socket():
+                continue
+            try:
+                os.link(f, dst_qemu / f.name)
+                logging.info("Hardlinked live socket %s into %s", f.name, dst_qemu)
+            except OSError as link_err:
+                logging.warning(
+                    "Could not rescue live socket %s (%s); an instance may "
+                    "need a soft reboot to restore its guest agent.",
+                    f.name,
+                    link_err,
+                )
+    shutil.copytree(
+        source,
+        dest,
+        ignore=_ignore_libvirt_runtime_files,
+        dirs_exist_ok=True,
+    )
+
+
+def _migrate_libvirt_state(snap: Snap) -> None:
+    """One-time migration of /var/lib/libvirt state from $SNAP_DATA to $SNAP_COMMON.
+
+    Backward-compatible upgrade path for existing deployments (LP#2169709):
+    the snap layout for /var/lib/libvirt now points at $SNAP_COMMON so that
+    per-VM QGA sockets, nvram and secrets survive snap refreshes.
+
+    The one-shot gate is a marker file rather than dest existence: libvirtd
+    (re)creates its state directory on startup, so by the time the configure
+    hook runs on a refresh, dest already exists even when no migration has
+    happened. The primary migration path is the pre-refresh hook (see
+    pre_refresh), with post-refresh as the fallback; both are marker-gated.
+
+    Known limit (LP#2169709 live testing): snapd copies old->new $SNAP_DATA
+    and garbage-collects old revision data dirs BEFORE running pre-refresh,
+    so when retention has already evicted the dir holding a running
+    instance's live socket, no hook can rescue it; that instance needs one
+    soft reboot. All refreshes after the migration are seamless.
+
+    When no marker exists, move the previous revision's state directory over
+    instead of copying: os.rename preserves the live socket inodes that
+    running qemu processes are bound to, so running instances keep their
+    guest agent without a reboot where confinement permits the rename.
+    A symlink is left at the old location so a snapd rollback to the
+    previous revision still resolves to the same (live) data. If the rename
+    is denied, persistent state is copied and live sockets are hardlinked
+    where possible (see _rescue_libvirt_sockets for the known limits).
+    """
+    dest = snap.paths.common / "var/lib/libvirt"
+    marker = dest / ".migrated-from-snap-data"
+    if marker.exists():
+        return
+
+    candidates = _libvirt_state_candidates(snap, dest)
+    if not candidates:
+        # Nothing to migrate from: fresh install, or all old revision data
+        # dirs are already gone. Latch anyway so we never rescan.
+        dest.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        return
+
+    source = candidates[0]
+    logging.info("Migrating libvirt state from %s to %s", source, dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(source, dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        # leave a path back for snapd rollback to the old revision
+        try:
+            os.symlink(dest, source)
+            logging.info("Libvirt state migrated; symlink left at %s", source)
+        except OSError as sym_err:
+            logging.info("Libvirt state migrated; could not leave rollback symlink (%s)", sym_err)
+    except OSError as e:
+        # Snap-hook confinement may deny writes into old revision dirs
+        # (EACCES); rescue sockets via hardlink when possible (unconfined
+        # contexts), else copy persistent state only. The rescue is
+        # best-effort: it must never fail the hook itself, or snapd rolls
+        # back the whole refresh. Persistent state may be spread across
+        # several old revision dirs (multiple refreshes under the old
+        # layout), so rescue from every candidate, best first.
+        logging.warning(
+            "Rename of libvirt state failed (%s); falling back to "
+            "hardlink of live sockets plus copy of persistent state.",
+            e,
+        )
+        for candidate in candidates:
+            try:
+                _rescue_libvirt_sockets(candidate, dest)
+            except OSError as rescue_err:
+                logging.warning(
+                    "Best-effort libvirt state rescue from %s failed (%s); "
+                    "persistent state may be incomplete until the next reboot.",
+                    candidate,
+                    rescue_err,
+                )
+        dest.mkdir(parents=True, exist_ok=True)
+        marker.touch()
 
 
 def _mkdirs(snap: Snap) -> None:
@@ -407,6 +603,49 @@ REQUIRED_CONFIG = {
         "node.fqdn",
     ],
 }
+
+
+def pre_refresh(snap: Snap) -> None:
+    """Runs the `pre-refresh` hook for the snap.
+
+    pre-refresh runs from the new revision before the old one is deactivated
+    and before services are stopped/restarted. snapd grants it the OLD
+    (still current) revision's AppArmor identity, so rename/link operations
+    on the old revision's data dir are permitted here — unlike configure and
+    post-refresh, which are denied and can only fall back to copying. This
+    is the only hook where the libvirt state migration can fully rescue
+    live QGA sockets of running instances (LP#2169709): os.rename preserves
+    the socket inodes the running qemu processes are bound to.
+    """
+    setup_logging(snap.paths.common / "hooks.log")
+    logging.info("Running pre-refresh hook")
+    _migrate_libvirt_state(snap)
+
+
+def post_refresh(snap: Snap) -> None:
+    """Runs the `post-refresh` hook for the snap.
+
+    post-refresh is the FALLBACK migration path, not the primary (see
+    pre_refresh): whether and when snapd runs pre-refresh relative to its
+    old->new $SNAP_DATA copy and old-revision garbage collection is
+    snapd-version dependent (both orderings observed live during LP#2169709
+    testing). When pre-refresh ran and migrated, the marker-file gate in
+    _migrate_libvirt_state makes this call a no-op. When pre-refresh could
+    not run (snapd version without the hook, or its "no candidates" path),
+    this hook rescues what it can: persistent state via copytree always;
+    live sockets via rename/hardlink only where confinement permits, since
+    snapd grants this hook the NEW revision's AppArmor identity, which is
+    denied write/link on old revision dirs.
+
+    post-refresh also runs after the new revision is mounted and symlinks
+    are updated but BEFORE services are restarted, so a restarted libvirtd
+    re-creating $SNAP_COMMON/var/lib/libvirt/qemu cannot defeat the marker
+    gate (dest-existence alone would be an unsafe latch).
+    """
+    setup_logging(snap.paths.common / "hooks.log")
+    logging.info("Running post-refresh hook")
+    _migrate_libvirt_state(snap)
+    _mkdirs(snap)
 
 
 def install(snap: Snap) -> None:
