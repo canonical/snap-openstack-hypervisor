@@ -88,6 +88,18 @@ IP address to use for configuration of SPICE consoles in instances.
 
 Whether to resume instances on boot or not.
 
+* `compute.block-device-allocate-retries` Number of attempts when waiting
+for a volume to be created
+
+Unset by default (nova's own default applies, currently 60 attempts).
+Increase for slow volume backends that abort VM builds with
+"Volume ... did not finish being created even after we waited ...".
+
+* `compute.block-device-allocate-retries-interval` Interval in seconds
+between volume creation attempts
+
+Unset by default (nova's own default applies, currently 3 seconds).
+
 * `compute.flavors` Flavor of the compute host
 
 Comma separated string of Flavors like SEV, SRIOV, DPDK.
