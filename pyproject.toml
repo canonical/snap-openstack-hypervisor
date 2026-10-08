@@ -69,6 +69,8 @@ hypervisor = "openstack_hypervisor.cli.main:main"
 [project.entry-points.'snaphelpers.hooks']
 configure = "openstack_hypervisor.hooks:configure"
 install = "openstack_hypervisor.hooks:install"
+post-refresh = "openstack_hypervisor.hooks:post_refresh"
+pre-refresh = "openstack_hypervisor.hooks:pre_refresh"
 
 [tool.setuptools.packages.find]
 include = ["openstack_hypervisor*"]
