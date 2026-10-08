@@ -27,6 +27,15 @@ metadata_workers = 4
 
 resume_guests_state_on_host_boot = {{ compute.resume_on_boot }}
 
+{% if compute.block_device_allocate_retries -%}
+# Number of times to retry waiting for a volume to be created
+block_device_allocate_retries = {{ compute.block_device_allocate_retries }}
+{% endif -%}
+{% if compute.block_device_allocate_retries_interval -%}
+# Interval in seconds between volume creation retries
+block_device_allocate_retries_interval = {{ compute.block_device_allocate_retries_interval }}
+{% endif -%}
+
 # To collect compute node related metrics
 compute_monitors = cpu.virt_driver
 
