@@ -30,6 +30,8 @@ BASE_CONTEXT = {
     },
     "compute": {
         "resume_on_boot": False,
+        "block_device_allocate_retries": "",
+        "block_device_allocate_retries_interval": "",
         "multipath_enabled": False,
         "virt_type": "kvm",
         "cpu_mode": "host-passthrough",
@@ -94,6 +96,23 @@ def test_nova_clients_use_internal_interface():
         "verify_ssl_path = /var/snap/openstack-hypervisor/common/etc/ssl/certs/receive-ca-bundle.pem"
         in output
     ) == 1
+
+
+def test_nova_block_device_allocate_retries_only_render_when_set():
+    output = _render("nova.conf.j2")
+
+    assert "block_device_allocate_retries" not in output
+    assert "block_device_allocate_retries_interval" not in output
+
+    compute = {
+        **BASE_CONTEXT["compute"],
+        "block_device_allocate_retries": "120",
+        "block_device_allocate_retries_interval": "3",
+    }
+    output = _render("nova.conf.j2", compute=compute)
+
+    assert "block_device_allocate_retries = 120" in output
+    assert "block_device_allocate_retries_interval = 3" in output
 
 
 def test_neutron_clients_use_internal_interface():
