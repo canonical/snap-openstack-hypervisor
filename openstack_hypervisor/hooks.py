@@ -556,6 +556,8 @@ DEFAULT_CONFIG = {
     "compute.key": UNSET,
     "compute.migration-address": UNSET,
     "compute.resume-on-boot": True,
+    "compute.block-device-allocate-retries": UNSET,
+    "compute.block-device-allocate-retries-interval": UNSET,
     "compute.cpu-pinning-profile": UNSET,
     "compute.flavors": UNSET,
     "compute.pci-device-specs": [],
