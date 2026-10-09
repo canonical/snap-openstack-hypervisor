@@ -145,10 +145,13 @@ SECRET_XML = string.Template("""
 <secret ephemeral='no' private='no'>
    <uuid>$uuid</uuid>
    <usage type='ceph'>
-     <name>client.cinder-ceph secret</name>
+     <name>$usage</name>
    </usage>
 </secret>
 """)
+
+LEGACY_SECRET_USAGE = "client.cinder-ceph secret"
+CEPH_ACCESS_USAGE_PREFIX = "ceph-access."
 
 # As defined in the snap/snapcraft.yaml
 MONITORING_SERVICES = [
@@ -2255,10 +2258,12 @@ def _is_hw_virt_supported() -> bool:
         return False
 
 
-def _set_secret(conn, secret_uuid: str, secret_value: str) -> None:
+def _set_secret(
+    conn, secret_uuid: str, secret_value: str, usage: str = LEGACY_SECRET_USAGE
+) -> None:
     """Set the ceph access secret in libvirt."""
     logging.info(f"Setting secret {secret_uuid}")
-    new_secret = conn.secretDefineXML(SECRET_XML.substitute(uuid=secret_uuid))
+    new_secret = conn.secretDefineXML(SECRET_XML.substitute(uuid=secret_uuid, usage=usage))
     # nova assumes the secret is raw and always encodes it *1, so decode it
     # before storing it.
     # *1 https://opendev.org/openstack/nova/src/branch/stable/2023.1/nova/
@@ -2273,7 +2278,7 @@ def _get_libvirt():
     return libvirt
 
 
-def _ensure_secret(secret_uuid: str, secret_value: str) -> None:
+def _ensure_secret(secret_uuid: str, secret_value: str, usage: str = LEGACY_SECRET_USAGE) -> None:
     """Ensure libvirt has the ceph access secret with the correct value."""
     libvirt = _get_libvirt()
     conn = libvirt.open("qemu:///system")
@@ -2296,29 +2301,62 @@ def _ensure_secret(secret_uuid: str, secret_value: str) -> None:
         else:
             logging.info(f"Secret {secret_uuid} has wrong value, replacing.")
             secretobj.undefine()
-            _set_secret(conn, secret_uuid, secret_value)
+            _set_secret(conn, secret_uuid, secret_value, usage)
     else:
         logging.info(f"Secret {secret_uuid} not found, creating.")
-        _set_secret(conn, secret_uuid, secret_value)
+        _set_secret(conn, secret_uuid, secret_value, usage)
+
+
+def _desired_ceph_secrets(snap: Snap) -> dict[str, tuple[str, str]]:
+    """Libvirt secrets this host should have: {uuid: (key, usage)}."""
+    secrets: dict[str, tuple[str, str]] = {}
+    compute = snap.config.get_options("compute").as_dict().get("compute") or {}
+    if all(k in compute for k in ("rbd-secret-uuid", "rbd-key")):
+        secrets[compute["rbd-secret-uuid"]] = (
+            compute["rbd-key"],
+            LEGACY_SECRET_USAGE,
+        )
+    try:
+        backends = snap.config.get_options("ceph-access").as_dict().get("ceph-access") or {}
+    except UnknownConfigKey:  # charm without multi-backend support
+        backends = {}
+    for app, creds in backends.items():
+        if creds and creds.get("uuid") and creds.get("key"):
+            secrets[creds["uuid"]] = (creds["key"], f"{CEPH_ACCESS_USAGE_PREFIX}{app}")
+    return secrets
+
+
+def _prune_ceph_secrets(keep: set[str]) -> None:
+    """Undefine per-backend secrets whose backend is gone."""
+    libvirt = _get_libvirt()
+    conn = libvirt.open("qemu:///system")
+    for secret in conn.listAllSecrets():
+        if secret.usageType() != libvirt.VIR_SECRET_USAGE_TYPE_CEPH:
+            continue
+        if not (secret.usageID() or "").startswith(CEPH_ACCESS_USAGE_PREFIX):
+            continue
+        if secret.UUIDString() in keep:
+            continue
+        logging.info(f"Removing secret {secret.UUIDString()} ({secret.usageID()})")
+        secret.undefine()
 
 
 def _configure_ceph(snap) -> None:
-    """Configure ceph client.
+    """Define one libvirt secret per backend and remove stale ones.
 
-    :param snap: the snap reference
-    :type snap: Snap
-    :return: None
+    A failing backend is logged and skipped so it cannot block the rest
+    of the configure hook.
     """
     logging.info("Configuring ceph access")
-    context = (
-        snap.config.get_options(
-            "compute",
-        )
-        .as_dict()
-        .get("compute")
-    )
-    if all(k in context for k in ("rbd-key", "rbd-secret-uuid")):
-        _ensure_secret(context["rbd-secret-uuid"], context["rbd-key"])
+    libvirt = _get_libvirt()
+    desired = _desired_ceph_secrets(snap)
+    # Prune first, then add to handle same app getting new UUID
+    _prune_ceph_secrets(keep=set(desired))
+    for secret_uuid, (key, usage) in desired.items():
+        try:
+            _ensure_secret(secret_uuid, key, usage)
+        except libvirt.libvirtError:
+            logging.exception(f"Failed to configure libvirt secret {secret_uuid} ({usage})")
 
 
 def _configure_networking(snap: Snap, ovs_cli: OVSCli, context: dict) -> None:

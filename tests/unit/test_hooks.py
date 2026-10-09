@@ -403,7 +403,9 @@ class TestHooks:
         mock_set_secret = mocker.patch.object(hooks, "_set_secret")
         conn_mock.listSecrets.return_value = []
         hooks._ensure_secret("uuid1", "secret")
-        mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "secret")
+        mock_set_secret.assert_called_once_with(
+            conn_mock, "uuid1", "secret", hooks.LEGACY_SECRET_USAGE
+        )
 
     def test_ensure_secret_secret_exists(self, mocker):
         conn_mock = mocker.Mock()
@@ -432,7 +434,9 @@ class TestHooks:
         conn_mock.listSecrets.return_value = ["uuid1"]
         conn_mock.secretLookupByUUIDString.return_value = secret_mock
         hooks._ensure_secret("uuid1", "c2VjcmV0")
-        mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "c2VjcmV0")
+        mock_set_secret.assert_called_once_with(
+            conn_mock, "uuid1", "c2VjcmV0", hooks.LEGACY_SECRET_USAGE
+        )
 
     def test_ensure_secret_secret_missing_value(self, mocker):
         class FakeError(Exception):
@@ -452,7 +456,9 @@ class TestHooks:
         conn_mock.listSecrets.return_value = ["uuid1"]
         conn_mock.secretLookupByUUIDString.return_value = secret_mock
         hooks._ensure_secret("uuid1", "c2VjcmV0")
-        mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "c2VjcmV0")
+        mock_set_secret.assert_called_once_with(
+            conn_mock, "uuid1", "c2VjcmV0", hooks.LEGACY_SECRET_USAGE
+        )
 
     def test_detect_compute_flavors_no_rights(self, mocker, snap):
         mocker.patch("pathlib.Path.read_text", mock.Mock(side_effect=PermissionError))
@@ -2038,3 +2044,163 @@ class TestMigrateLibvirtState:
 
         dest = snap.paths.common / "var/lib/libvirt"
         assert (dest / "nvram").is_dir()
+
+
+class _Opts(dict):
+    def as_dict(self):
+        return dict(self)
+
+
+def _config(snap, mocker, compute=None, ceph_access=None):
+    """snap.config.get_options returning compute and (optionally) ceph-access."""
+
+    def get_options(*keys):
+        if keys == ("compute",):
+            return _Opts({"compute": compute or {}})
+        if keys == ("ceph-access",):
+            if ceph_access is None:
+                raise UnknownConfigKey("ceph-access")
+            return _Opts({"ceph-access": ceph_access})
+        raise AssertionError(f"unexpected keys {keys}")
+
+    mocker.patch.object(snap.config, "get_options", side_effect=get_options)
+
+
+def _secret(mocker, uuid, usage, usage_type=5):
+    s = mocker.Mock()
+    s.UUIDString.return_value = uuid
+    s.usageID.return_value = usage
+    s.usageType.return_value = usage_type
+    return s
+
+
+@pytest.fixture
+def libvirt_mock(mocker):
+    lv = mocker.Mock()
+    lv.VIR_SECRET_USAGE_TYPE_CEPH = 5
+    lv.libvirtError = type("libvirtError", (Exception,), {})
+    mocker.patch.object(hooks, "_get_libvirt", return_value=lv)
+    lv.open.return_value.listAllSecrets.return_value = []
+    return lv
+
+
+class TestCephSecrets:
+    def test_set_secret_usage_in_xml(self, mocker):
+        conn = mocker.Mock()
+        hooks._set_secret(conn, "u1", "c2VjcmV0", "ceph-access.ceph-a")
+        xml = conn.secretDefineXML.call_args.args[0]
+        assert "<name>ceph-access.ceph-a</name>" in xml
+
+    def test_desired_legacy_only(self, snap, mocker):
+        """Old charm (no ceph-access key): only the legacy secret."""
+        _config(snap, mocker, compute={"rbd-secret-uuid": "u1", "rbd-key": "k1"})
+        assert hooks._desired_ceph_secrets(snap) == {"u1": ("k1", hooks.LEGACY_SECRET_USAGE)}
+
+    def test_desired_backends(self, snap, mocker):
+        _config(
+            snap,
+            mocker,
+            ceph_access={
+                "ceph-a": {"uuid": "u1", "key": "k1"},
+                "ceph-b": {"uuid": "u2", "key": "k2"},
+            },
+        )
+        assert hooks._desired_ceph_secrets(snap) == {
+            "u1": ("k1", "ceph-access.ceph-a"),
+            "u2": ("k2", "ceph-access.ceph-b"),
+        }
+
+    def test_desired_shared_uuid_defined_once(self, snap, mocker):
+        """compute.rbd-* pointing at a backend's uuid: one entry, backend usage."""
+        _config(
+            snap,
+            mocker,
+            compute={"rbd-secret-uuid": "u1", "rbd-key": "k1"},
+            ceph_access={"ceph-a": {"uuid": "u1", "key": "k1"}},
+        )
+        assert hooks._desired_ceph_secrets(snap) == {"u1": ("k1", "ceph-access.ceph-a")}
+
+    def test_desired_skips_incomplete(self, snap, mocker):
+        _config(snap, mocker, ceph_access={"ceph-a": {"uuid": "u1"}})
+        assert hooks._desired_ceph_secrets(snap) == {}
+
+    def test_configure_defines_each_backend(self, snap, mocker, libvirt_mock):
+        _config(
+            snap,
+            mocker,
+            ceph_access={
+                "ceph-a": {"uuid": "u1", "key": "k1"},
+                "ceph-b": {"uuid": "u2", "key": "k2"},
+            },
+        )
+        ensure = mocker.patch.object(hooks, "_ensure_secret")
+        hooks._configure_ceph(snap)
+        ensure.assert_any_call("u1", "k1", "ceph-access.ceph-a")
+        ensure.assert_any_call("u2", "k2", "ceph-access.ceph-b")
+
+    def test_configure_continues_after_failure(self, snap, mocker, libvirt_mock):
+        """One failing backend does not stop the others (P3)."""
+        _config(
+            snap,
+            mocker,
+            ceph_access={
+                "ceph-a": {"uuid": "u1", "key": "k1"},
+                "ceph-b": {"uuid": "u2", "key": "k2"},
+            },
+        )
+        ensure = mocker.patch.object(
+            hooks,
+            "_ensure_secret",
+            side_effect=[libvirt_mock.libvirtError("boom"), None],
+        )
+        hooks._configure_ceph(snap)
+        assert ensure.call_count == 2
+
+    def test_prune_removes_stale_backend(self, snap, mocker, libvirt_mock):
+        stale = _secret(mocker, "u-old", "ceph-access.ceph-old")
+        libvirt_mock.open.return_value.listAllSecrets.return_value = [stale]
+        _config(snap, mocker, ceph_access={"ceph-a": {"uuid": "u1", "key": "k1"}})
+        mocker.patch.object(hooks, "_ensure_secret")
+        hooks._configure_ceph(snap)
+        stale.undefine.assert_called_once()
+
+    def test_prune_keeps_foreign_and_legacy(self, snap, mocker, libvirt_mock):
+        """Legacy-usage, non-ceph and other-named secrets are never removed."""
+        legacy = _secret(mocker, "u-leg", hooks.LEGACY_SECRET_USAGE)
+        other = _secret(mocker, "u-x", "client.someone secret")
+        volume = _secret(mocker, "u-v", "/var/lib/vol", usage_type=1)
+        libvirt_mock.open.return_value.listAllSecrets.return_value = [
+            legacy,
+            other,
+            volume,
+        ]
+        _config(snap, mocker, ceph_access={})
+        mocker.patch.object(hooks, "_ensure_secret")
+        hooks._configure_ceph(snap)
+        for s in (legacy, other, volume):
+            s.undefine.assert_not_called()
+
+    def test_prune_keeps_uuid_still_used_by_compute(self, snap, mocker, libvirt_mock):
+        """Backend removed but nova's fallback still points at it: kept."""
+        s = _secret(mocker, "u1", "ceph-access.ceph-a")
+        libvirt_mock.open.return_value.listAllSecrets.return_value = [s]
+        _config(
+            snap,
+            mocker,
+            compute={"rbd-secret-uuid": "u1", "rbd-key": "k1"},
+            ceph_access={},
+        )
+        mocker.patch.object(hooks, "_ensure_secret")
+        hooks._configure_ceph(snap)
+        s.undefine.assert_not_called()
+
+    def test_prune_before_define(self, snap, mocker, libvirt_mock):
+        """Re-created backend (same app, new uuid): old secret goes first."""
+        old = _secret(mocker, "u-old", "ceph-access.ceph-a")
+        libvirt_mock.open.return_value.listAllSecrets.return_value = [old]
+        _config(snap, mocker, ceph_access={"ceph-a": {"uuid": "u-new", "key": "k"}})
+        order = []
+        old.undefine.side_effect = lambda: order.append("undefine")
+        mocker.patch.object(hooks, "_ensure_secret", side_effect=lambda *a: order.append("ensure"))
+        hooks._configure_ceph(snap)
+        assert order == ["undefine", "ensure"]
