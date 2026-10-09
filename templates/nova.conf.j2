@@ -64,6 +64,9 @@ skip_cpu_compare_on_dest = True
 volume_use_multipath = True
 {% endif -%}
 virt_type = {{ compute.virt_type }}
+{% if compute.images_type -%}
+images_type = {{ compute.images_type }}
+{% endif -%}
 cpu_mode = {{ compute.cpu_mode }}
 {% if compute.cpu_mode == 'custom' -%}
 cpu_models = {{ compute.cpu_models }}
