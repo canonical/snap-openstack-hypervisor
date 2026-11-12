@@ -5,8 +5,9 @@ import logging
 import os
 import socket
 import subprocess
+import threading
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import psutil
 from pydantic import BaseModel, Field, field_validator
@@ -14,12 +15,37 @@ from snaphelpers import Snap
 
 SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "hypervisor", "shutdown.sock")
 
+STATE_FILENAME = "pre-evacuation-state.json"
+NOVA_COMPUTE = "nova-compute"
+NOVA_COMPUTE_START_TIMEOUT = 60
+# nova-compute must stay active this long to count as started: a service that
+# crashes on startup is briefly "active" between restarts.
+NOVA_COMPUTE_STABLE_SECONDS = 15
+NOVA_COMPUTE_POLL_SECONDS = 2
+# The sender reports nic-up only once, so a failed start must be retried here: nothing
+# else would restart nova-compute until the next network flap.
+NOVA_COMPUTE_START_ATTEMPTS = 5
+NOVA_COMPUTE_START_RETRY_DELAY = 30
+# When Masakari cannot be asked whether the host is in maintenance, retry for a
+# while and then restart nova-compute anyway: a node left down is the worse failure.
+MAINTENANCE_LOOKUP_BUDGET = 120
+MAINTENANCE_LOOKUP_DELAY = 10
+# Right after an outage the control plane may accept connections and never answer,
+# so every API call needs a timeout of its own.
+MASAKARI_API_TIMEOUT = 10
+MASAKARI_ATTEMPT_TIMEOUT = 40
+
 PROTOCOL_VERSION = "1.0"
 VIRSH_TIMEOUT = 3
+
+# Only one recovery may run at a time
+_recovery_lock = threading.Lock()
+
 
 class NetworkStatus(enum.Enum):
     """Enum for network interface status"""
     NIC_DOWN = "nic-down"
+    NIC_UP = "nic-up"
 
 
 class NetworkStatusMessage(BaseModel):
@@ -110,6 +136,261 @@ def force_shutdown_vms(vm_names: List[str]):
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.Error) as exc:
                     logging.error("Failed to kill qemu process for '%s': %s", vm_name, exc)
 
+def _state_path() -> str:
+    """Path of the file recording what the evacuation procedure did."""
+    return os.path.join(os.environ["SNAP_DATA"], STATE_FILENAME)
+
+
+def load_state() -> Optional[Dict]:
+    """Return the recorded evacuation state, or None if no evacuation is recorded."""
+    try:
+        with open(_state_path(), "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        # An unreadable file still means an evacuation happened. Assume nova-compute was
+        # stopped: starting a service that is already running is harmless, while leaving
+        # the node down is not.
+        logging.error(f"Unreadable evacuation state file: {e}")
+        return {"nova_compute_stopped": True, "corrupt": True}
+
+
+def save_state(state: Dict) -> None:
+    """Atomically record the evacuation state."""
+    path = _state_path()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
+def clear_state() -> None:
+    """Forget the recorded evacuation state."""
+    try:
+        os.remove(_state_path())
+    except FileNotFoundError:
+        pass
+
+
+def nova_compute_active() -> bool:
+    """Return True if the nova-compute service is currently running."""
+    services = Snap().services.list()
+    service = services.get(NOVA_COMPUTE)
+    return bool(service and service.active)
+
+
+def start_nova_compute() -> bool:
+    """Start the nova-compute service and wait until it is active.
+
+    Returns:
+        True if nova-compute is active, False if it could not be started in time.
+    """
+    try:
+        services = Snap().services.list()
+        service = services.get(NOVA_COMPUTE)
+        if service is None:
+            logging.error("nova-compute service not found in the list of snap services")
+            return False
+        if service.active:
+            logging.info("nova-compute is already active. No action needed.")
+            return True
+
+        logging.info("Starting nova-compute...")
+        service.start()
+        deadline = time.monotonic() + NOVA_COMPUTE_START_TIMEOUT
+        active_since = None
+        while time.monotonic() < deadline:
+            if nova_compute_active():
+                active_since = active_since or time.monotonic()
+                if time.monotonic() - active_since >= NOVA_COMPUTE_STABLE_SECONDS:
+                    logging.info("nova-compute service started successfully.")
+                    return True
+            else:
+                active_since = None
+            time.sleep(NOVA_COMPUTE_POLL_SECONDS)
+        logging.error("nova-compute did not stay active within the timeout")
+    except Exception as e:
+        logging.error(f"Unexpected error during nova-compute start: {e}")
+    return False
+
+
+def start_nova_compute_with_retries() -> bool:
+    """Start nova-compute, retrying a few times if it does not come up."""
+    for attempt in range(1, NOVA_COMPUTE_START_ATTEMPTS + 1):
+        if start_nova_compute():
+            return True
+        if attempt < NOVA_COMPUTE_START_ATTEMPTS:
+            logging.warning(
+                "nova-compute start attempt %s/%s failed, retrying in %ss",
+                attempt,
+                NOVA_COMPUTE_START_ATTEMPTS,
+                NOVA_COMPUTE_START_RETRY_DELAY,
+            )
+            time.sleep(NOVA_COMPUTE_START_RETRY_DELAY)
+    return False
+
+
+def masakari_host_on_maintenance(snap: Snap) -> Optional[bool]:
+    """Ask Masakari whether this host is marked on_maintenance.
+
+    Returns:
+        True or False from Masakari. False also when the host is not registered in any
+        segment. None when the answer could not be obtained (API unreachable,
+        credentials missing, client library failure).
+    """
+    try:
+        import openstack
+
+        identity = snap.config.get_options("identity").as_dict().get("identity", {})
+        fqdn = snap.config.get("node.fqdn")
+        ca_bundle = snap.paths.common / "etc" / "ssl" / "certs" / "receive-ca-bundle.pem"
+        conn = openstack.connect(
+            auth_url=identity["auth-url"],
+            username=identity["username"],
+            password=identity["password"],
+            project_name=identity.get("project-name"),
+            user_domain_name=identity.get("user-domain-name"),
+            project_domain_name=identity.get("project-domain-name"),
+            region_name=identity.get("keystone-region-name") or identity.get("region-name"),
+            interface="internal",
+            api_timeout=MASAKARI_API_TIMEOUT,
+            cacert=str(ca_bundle) if ca_bundle.exists() else None,
+        )
+        names = {fqdn.lower(), fqdn.split(".")[0].lower()}
+        for segment in conn.instance_ha.segments():
+            for host in conn.instance_ha.hosts(segment.uuid):
+                if host.name and host.name.lower() in names:
+                    return bool(host.on_maintenance)
+        logging.info("Host %s is not registered in any Masakari segment", fqdn)
+        return False
+    except Exception as e:
+        logging.warning(f"Could not determine Masakari maintenance state: {e}")
+        return None
+
+
+def _call_with_timeout(func, timeout: float):
+    """Run func in a helper thread and give up after timeout seconds.
+
+    Returns func's result, or None if it timed out or raised. A stuck call is
+    abandoned (the daemon thread dies with the process), so one hung API request
+    cannot block the recovery.
+    """
+    outcome: Dict = {}
+
+    def runner():
+        try:
+            outcome["value"] = func()
+        except Exception as e:
+            outcome["error"] = e
+
+    thread = threading.Thread(target=runner, name="masakari-lookup", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        logging.warning(f"Masakari lookup timed out after {timeout}s")
+        return None
+    if "error" in outcome:
+        logging.warning(f"Masakari lookup failed: {outcome['error']}")
+        return None
+    return outcome.get("value")
+
+
+def host_in_maintenance(snap: Snap) -> bool:
+    """Return True if the node must be left alone because it is in Masakari maintenance.
+
+    Retries for a bounded time while Masakari cannot answer, which is expected right
+    after an outage. If it never answers the node is treated as not in maintenance.
+    """
+    deadline = time.monotonic() + MAINTENANCE_LOOKUP_BUDGET
+    while True:
+        answer = _call_with_timeout(
+            lambda: masakari_host_on_maintenance(snap), MASAKARI_ATTEMPT_TIMEOUT
+        )
+        if answer is not None:
+            return answer
+        if time.monotonic() + MAINTENANCE_LOOKUP_DELAY >= deadline:
+            break
+        time.sleep(MAINTENANCE_LOOKUP_DELAY)
+    logging.warning(
+        "Masakari did not answer within %ss, assuming the host is not in maintenance",
+        MAINTENANCE_LOOKUP_BUDGET,
+    )
+    return False
+
+
+def recover_node() -> None:
+    """Undo the evacuation procedure once the network is back.
+
+    Restarts nova-compute if (and only if) the procedure stopped it, unless the host
+    is in Masakari maintenance. The recorded state is kept whenever nothing was
+    restarted, so a later nic-up or an operator can still see what happened.
+    """
+    if not _recovery_lock.acquire(blocking=False):
+        logging.info("Recovery already in progress, ignoring")
+        return
+    try:
+        state = load_state()
+        if state is None:
+            logging.info("No evacuation recorded, nothing to recover")
+            return
+
+        if host_in_maintenance(Snap()):
+            logging.info("Host is in Masakari maintenance, leaving nova-compute untouched")
+            return
+
+        if state.get("nova_compute_stopped") and not start_nova_compute_with_retries():
+            logging.error("Recovery failed, keeping the evacuation state for the next nic-up")
+            return
+
+        clear_state()
+        logging.info("Evacuation procedure reversed")
+    except Exception:
+        logging.exception("Unexpected error during recovery")
+    finally:
+        _recovery_lock.release()
+
+
+def _response(status: str, message: str) -> str:
+    return json.dumps({"status": status, "message": message, "timestamp": time.time()})
+
+
+def handle_nic_down() -> str:
+    """Stop nova-compute and shut down the VMs, recording what was done."""
+    if load_state() is not None:
+        logging.info("Evacuation already recorded, ignoring repeated nic-down")
+        return _response("success", "Evacuation procedure already initiated")
+
+    logging.info("Network interface down detected, initiating evacuation procedure")
+    # Record first: if we are interrupted half way, recovery still knows what to undo.
+    save_state(
+        {
+            "timestamp": time.time(),
+            "nova_compute_stopped": nova_compute_active(),
+        }
+    )
+
+    stop_nova_compute()
+    shutdown_vms()
+
+    return _response("success", "Evacuation procedure initiated")
+
+
+def handle_nic_up() -> str:
+    """Reverse the evacuation procedure in the background."""
+    if load_state() is None:
+        logging.info("Network is up and no evacuation is recorded, nothing to do")
+        return _response("success", "No evacuation recorded, nothing to recover")
+
+    logging.info("Network interface up detected, starting recovery")
+    # Recovery may wait on Masakari and on nova-compute, so do not hold the sender
+    # (a Consul check with a short timeout) while it runs.
+    threading.Thread(target=recover_node, name="recover-node", daemon=True).start()
+    return _response("success", "Recovery initiated")
+
+
 def handle_network_status(data: Dict) -> str:
     """Handle network status messages and take appropriate actions
 
@@ -124,25 +405,45 @@ def handle_network_status(data: Dict) -> str:
     logging.info(f"Received network status update: {status_value}")
 
     if status == NetworkStatus.NIC_DOWN:
-        logging.info("Network interface down detected, initiating evacuation procedure")
+        return handle_nic_down()
+    if status == NetworkStatus.NIC_UP:
+        return handle_nic_up()
 
-        stop_nova_compute()
-        shutdown_vms()
+    logging.warning(f"Received unknown network status: {status_value}")
+    return _response("error", f"Unknown network status: {status_value}")
 
-        return json.dumps({
-            "status": "success",
-            "message": "Evacuation procedure initiated",
-            "timestamp": time.time()
-        })
 
-    else:
-        logging.warning(f"Received unknown network status: {status_value}")
+def _send(conn, payload: str) -> None:
+    """Send a response, tolerating a client that has already hung up."""
+    try:
+        conn.sendall(payload.encode())
+    except OSError as e:
+        logging.warning(f"Could not send response, client went away: {e}")
 
-        return json.dumps({
-            "status": "error",
-            "message": f"Unknown network status: {status_value}",
-            "timestamp": time.time()
-        })
+
+def _handle_connection(conn) -> None:
+    """Read one message from conn, act on it and answer."""
+    data = conn.recv(1024)
+    if not data:
+        return
+
+    raw_message = data.decode().strip()
+    logging.debug(f"Received raw message: {raw_message}")
+
+    try:
+        json_data = json.loads(raw_message)
+        message = NetworkStatusMessage.model_validate(json_data)
+        validated_data = message.model_dump()
+
+        response = handle_network_status(validated_data)
+        _send(conn, response)
+
+    except ValueError as e:
+        logging.error(f"Validation error: {e}")
+        _send(conn, _response("error", f"Schema validation failed: {str(e)}"))
+    except Exception as e:
+        logging.error(f"Error processing message: {e}")
+        _send(conn, _response("error", f"Server error: {str(e)}"))
 
 
 def run_listener():
@@ -162,37 +463,11 @@ def run_listener():
         while True:
             conn, _ = server_sock.accept()
             with conn:
-                data = conn.recv(1024)
-                if not data:
-                    continue
-
-                raw_message = data.decode().strip()
-                logging.debug(f"Received raw message: {raw_message}")
-
                 try:
-                    json_data = json.loads(raw_message)
-                    message = NetworkStatusMessage.model_validate(json_data)
-                    validated_data = message.model_dump()
-
-                    response = handle_network_status(validated_data)
-                    conn.sendall(response.encode())
-
-                except ValueError as e:
-                    logging.error(f"Validation error: {e}")
-                    error_response = json.dumps({
-                        "status": "error",
-                        "message": f"Schema validation failed: {str(e)}",
-                        "timestamp": time.time()
-                    })
-                    conn.sendall(error_response.encode())
-                except Exception as e:
-                    logging.error(f"Error processing message: {e}")
-                    error_response = json.dumps({
-                        "status": "error",
-                        "message": f"Server error: {str(e)}",
-                        "timestamp": time.time()
-                    })
-                    conn.sendall(error_response.encode())
+                    _handle_connection(conn)
+                except OSError as e:
+                    # A client that vanishes must never take the listener down
+                    logging.warning(f"Connection error, ignoring: {e}")
 
 
 if __name__ == "__main__":
