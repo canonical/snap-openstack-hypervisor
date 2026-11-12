@@ -2292,8 +2292,8 @@ def _ensure_secret(secret_uuid: str, secret_value: str) -> None:
                 secret = None
             else:
                 raise
-        # Secret is stored raw so encode it before comparison.
-        if secret == base64.b64encode(secret_value.encode()):
+        # Secret is stored decode fetched value before compare
+        if secret == base64.b64decode(secret_value):
             logging.info(f"Secret {secret_uuid} has desired value.")
         else:
             logging.info(f"Secret {secret_uuid} has wrong value, replacing.")
