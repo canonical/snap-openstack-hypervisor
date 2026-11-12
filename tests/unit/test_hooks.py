@@ -409,15 +409,16 @@ class TestHooks:
         conn_mock = mocker.Mock()
         mock_libvirt = mocker.Mock()
         secret_mock = mocker.Mock()
-        secret_mock.value.return_value = b"c2VjcmV0"
+        secret_mock.value.return_value = b"secret"
         mock_get_libvirt = mocker.patch.object(hooks, "_get_libvirt")
         mock_get_libvirt.return_value = mock_libvirt
         mock_libvirt.open.return_value = conn_mock
         mock_set_secret = mocker.patch.object(hooks, "_set_secret")
         conn_mock.listSecrets.return_value = ["uuid1"]
         conn_mock.secretLookupByUUIDString.return_value = secret_mock
-        hooks._ensure_secret("uuid1", "secret")
+        hooks._ensure_secret("uuid1", "c2VjcmV0")  # base64("secret")
         assert not mock_set_secret.called
+        assert not secret_mock.undefine.called
 
     def test_ensure_secret_secret_wrong_value(self, mocker):
         conn_mock = mocker.Mock()
@@ -430,8 +431,8 @@ class TestHooks:
         mock_set_secret = mocker.patch.object(hooks, "_set_secret")
         conn_mock.listSecrets.return_value = ["uuid1"]
         conn_mock.secretLookupByUUIDString.return_value = secret_mock
-        hooks._ensure_secret("uuid1", "secret")
-        mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "secret")
+        hooks._ensure_secret("uuid1", "c2VjcmV0")
+        mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "c2VjcmV0")
 
     def test_ensure_secret_secret_missing_value(self, mocker):
         class FakeError(Exception):
@@ -450,8 +451,8 @@ class TestHooks:
         mock_set_secret = mocker.patch.object(hooks, "_set_secret")
         conn_mock.listSecrets.return_value = ["uuid1"]
         conn_mock.secretLookupByUUIDString.return_value = secret_mock
-        hooks._ensure_secret("uuid1", "secret")
-        mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "secret")
+        hooks._ensure_secret("uuid1", "c2VjcmV0")
+        mock_set_secret.assert_called_once_with(conn_mock, "uuid1", "c2VjcmV0")
 
     def test_detect_compute_flavors_no_rights(self, mocker, snap):
         mocker.patch("pathlib.Path.read_text", mock.Mock(side_effect=PermissionError))
