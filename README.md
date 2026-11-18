@@ -59,6 +59,13 @@ Configuration of options related to compute (Nova):
 This option is runtime detected by the snap and will be set
 to `kvm` if the host is capable of full virtualization or `qemu` if not.
 
+* `compute.images-type` libvirt image backend for ephemeral storage
+
+Valid values: `raw`, `qcow2`, `rbd`, `flat` (and Nova's `lvm`, `ploop`,
+`default`). If unset, Nova's default (`qcow2`) is used.
+`rbd` requires Ceph access (see `compute.rbd-user`, `compute.rbd-secret-uuid`)
+and an RBD pool for Nova images.
+
 * `compute.cpu-mode` (`host-model`) CPU mode for instances
 
 Valid values: `host-model`, `host-passthrough`, `custom`, `none`.

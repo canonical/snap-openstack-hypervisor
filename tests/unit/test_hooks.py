@@ -2037,3 +2037,14 @@ class TestMigrateLibvirtState:
 
         dest = snap.paths.common / "var/lib/libvirt"
         assert (dest / "nvram").is_dir()
+
+
+class TestImagesTypeValidation:
+    def test_invalid_images_type_returned_empty(self, caplog):
+        """Invalid images-type is dropped and logged; valid ones pass."""
+        assert hooks._validate_images_type("qcow2") == "qcow2"
+        assert hooks._validate_images_type("rbd") == "rbd"
+        assert hooks._validate_images_type(None) == ""
+        with caplog.at_level("ERROR", logger="openstack_hypervisor.hooks"):
+            assert hooks._validate_images_type("qcow23") == ""
+        assert "Invalid compute.images-type" in caplog.text

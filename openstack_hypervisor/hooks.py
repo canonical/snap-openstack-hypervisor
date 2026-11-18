@@ -113,6 +113,8 @@ LAYOUT_BASE = Path("/var/lib/openstack-hypervisor")
 SNAP_USER = "snap_daemon"
 SNAP_GROUP = "snap_daemon"
 
+IMAGES_TYPE_CHOICES = frozenset({"raw", "flat", "qcow2", "lvm", "rbd", "ploop", "default"})
+
 
 class OwnedPath(Path):
     """Path subclass that includes ownership information."""
@@ -513,6 +515,7 @@ DEFAULT_CONFIG = {
     # Nova
     "compute.cpu-mode": "host-model",
     "compute.virt-type": "auto",
+    "compute.images-type": UNSET,
     "compute.cpu-models": UNSET,
     "compute.spice-proxy-address": _get_local_ip_by_default_route,  # noqa: F821
     "compute.rbd-user": "nova",
@@ -2763,6 +2766,23 @@ def configure(snap: Snap) -> None:
     )
 
 
+def _validate_images_type(images_type: str | None) -> str:
+    """Return a valid images_type or an empty string when invalid.
+
+    Logs an error so operators get feedback, and avoids rendering an
+    invalid value that would make nova-compute fail to start.
+    """
+    if images_type is not None and images_type not in IMAGES_TYPE_CHOICES:
+        logging.error(
+            "Invalid compute.images-type %r, ignoring it (nova default "
+            "applies). Valid values: %s",
+            images_type,
+            ", ".join(sorted(IMAGES_TYPE_CHOICES)),
+        )
+        return ""
+    return images_type or ""
+
+
 def _get_configure_context(snap: Snap) -> dict:
     context = snap.config.get_options(
         "compute",
@@ -2791,6 +2811,9 @@ def _get_configure_context(snap: Snap) -> dict:
     context.setdefault("network", {})
     context.setdefault("identity", {})
     context.setdefault("credentials", {})
+    context["compute"]["images_type"] = _validate_images_type(
+        context["compute"].get("images_type")
+    )
     context["compute"]["multipath_enabled"] = (
         context["compute"].get("multipath_forced", False) or _is_multipathd_available()
     )

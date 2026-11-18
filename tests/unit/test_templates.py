@@ -34,6 +34,7 @@ BASE_CONTEXT = {
         "block_device_allocate_retries_interval": "",
         "multipath_enabled": False,
         "virt_type": "kvm",
+        "images_type": "",
         "cpu_mode": "host-passthrough",
         "cpu_models": "",
         "migration_address": "",
@@ -113,6 +114,20 @@ def test_nova_block_device_allocate_retries_only_render_when_set():
 
     assert "block_device_allocate_retries = 120" in output
     assert "block_device_allocate_retries_interval = 3" in output
+
+
+def test_nova_libvirt_images_type_only_render_when_set():
+    output = _render("nova.conf.j2")
+
+    assert "images_type" not in output
+
+    compute = {
+        **BASE_CONTEXT["compute"],
+        "images_type": "qcow2",
+    }
+    output = _render("nova.conf.j2", compute=compute)
+
+    assert "images_type = qcow2" in output
 
 
 def test_neutron_clients_use_internal_interface():
