@@ -54,6 +54,13 @@ def _message(status):
     return {"version": "1.0", "timestamp": 1.0, "status": status}
 
 
+def _join_recovery_thread(svc, timeout=5):
+    """Wait for the recover-node thread spawned by handle_nic_up to finish."""
+    for t in threading.enumerate():
+        if t.name == "recover-node":
+            t.join(timeout)
+
+
 def _service(active):
     service = MagicMock()
     service.active = active
@@ -131,7 +138,7 @@ class TestNicDown:
 
         assert svc.load_state()["nova_compute_stopped"] is False
 
-    def test_repeated_nic_down_is_ignored_and_keeps_original_state(self, svc, monkeypatch):
+    def test_repeated_nic_down_cancels_recovery_and_restops_nova_compute(self, svc, monkeypatch):
         snap = _fake_snap(monkeypatch, svc, {"nova-compute": _service(True)})
         svc.handle_network_status(_message("nic-down"))
         # nova-compute is now down because of us: a second message must not rewrite
@@ -141,7 +148,10 @@ class TestNicDown:
         response = json.loads(svc.handle_network_status(_message("nic-down")))
 
         assert response["status"] == "success"
-        assert self.stop.call_count == 1
+        # The recovery is cancelled and nova-compute is stopped again in case a
+        # recovery had already restarted it. The VMs are not shut down a second
+        # time: an operator may have restarted them in the meantime.
+        assert self.stop.call_count == 2
         assert self.shutdown.call_count == 1
         assert svc.load_state()["nova_compute_stopped"] is True
 
@@ -152,11 +162,12 @@ class TestNicUp:
         """Run the recovery thread inline so tests can assert on its result."""
 
         class InlineThread:
-            def __init__(self, target, **kwargs):
+            def __init__(self, target, args=(), **kwargs):
                 self.target = target
+                self.args = args
 
             def start(self):
-                self.target()
+                self.target(*self.args)
 
         monkeypatch.setattr(svc.threading, "Thread", InlineThread)
 
@@ -174,7 +185,7 @@ class TestNicUp:
         svc.save_state({"nova_compute_stopped": True})
         start = MagicMock(return_value=True)
         monkeypatch.setattr(svc, "start_nova_compute", start)
-        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap: False)
+        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap, gen: False)
         monkeypatch.setattr(svc, "Snap", MagicMock())
 
         response = json.loads(svc.handle_network_status(_message("nic-up")))
@@ -187,7 +198,7 @@ class TestNicUp:
         svc.save_state({"nova_compute_stopped": False})
         start = MagicMock()
         monkeypatch.setattr(svc, "start_nova_compute", start)
-        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap: False)
+        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap, gen: False)
         monkeypatch.setattr(svc, "Snap", MagicMock())
 
         svc.handle_network_status(_message("nic-up"))
@@ -199,7 +210,7 @@ class TestNicUp:
         svc.save_state({"nova_compute_stopped": True})
         start = MagicMock()
         monkeypatch.setattr(svc, "start_nova_compute", start)
-        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap: True)
+        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap, gen: True)
         monkeypatch.setattr(svc, "Snap", MagicMock())
 
         svc.handle_network_status(_message("nic-up"))
@@ -211,7 +222,7 @@ class TestNicUp:
         svc.save_state({"nova_compute_stopped": True})
         start = MagicMock(return_value=False)
         monkeypatch.setattr(svc, "start_nova_compute", start)
-        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap: False)
+        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap, gen: False)
         monkeypatch.setattr(svc, "Snap", MagicMock())
 
         svc.handle_network_status(_message("nic-up"))
@@ -223,7 +234,7 @@ class TestNicUp:
         svc.save_state({"nova_compute_stopped": True})
         start = MagicMock(side_effect=[False, False, True])
         monkeypatch.setattr(svc, "start_nova_compute", start)
-        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap: False)
+        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap, gen: False)
         monkeypatch.setattr(svc, "Snap", MagicMock())
 
         svc.handle_network_status(_message("nic-up"))
@@ -235,7 +246,7 @@ class TestNicUp:
     def test_no_delay_after_the_last_failed_attempt(self, svc, monkeypatch):
         monkeypatch.setattr(svc, "start_nova_compute", MagicMock(return_value=False))
 
-        assert svc.start_nova_compute_with_retries() is False
+        assert svc.start_nova_compute_with_retries(svc._outage_generation) is False
 
         delays = svc.NOVA_COMPUTE_START_ATTEMPTS - 1
         assert svc.clock.elapsed == delays * svc.NOVA_COMPUTE_START_RETRY_DELAY
@@ -246,7 +257,7 @@ class TestNicUp:
         monkeypatch.setattr(svc, "start_nova_compute", start)
         assert svc._recovery_lock.acquire(blocking=False)
         try:
-            svc.recover_node()
+            svc.recover_node(svc._outage_generation)
         finally:
             svc._recovery_lock.release()
 
@@ -254,12 +265,118 @@ class TestNicUp:
         assert svc.load_state() is not None
 
 
+class TestRecoveryCancellation:
+    """A newer nic-down must cancel a recovery that has not finished.
+
+    handle_nic_up spawns recover_node in a background thread; that thread can sit
+    in the Masakari lookup or in nova-compute start retries for minutes. If a
+    second outage hits meanwhile, the recovery must not start nova-compute while
+    the network is down, and a start that already happened must be undone.
+    """
+
+    @pytest.fixture
+    def _actions(self, svc, monkeypatch):
+        self.stop = MagicMock()
+        self.shutdown = MagicMock()
+        monkeypatch.setattr(svc, "stop_nova_compute", self.stop)
+        monkeypatch.setattr(svc, "shutdown_vms", self.shutdown)
+
+    def test_stale_generation_aborts_before_any_action(self, svc, monkeypatch):
+        """A nic-down that arrived after the nic-up invalidates the recovery outright."""
+        svc.save_state({"nova_compute_stopped": True})
+        start = MagicMock()
+        lookup = MagicMock()
+        monkeypatch.setattr(svc, "start_nova_compute", start)
+        monkeypatch.setattr(svc, "host_in_maintenance", lookup)
+        monkeypatch.setattr(svc, "Snap", MagicMock())
+
+        stale = svc._outage_generation
+        svc._cancel_pending_recovery()  # simulates the newer nic-down
+        svc.recover_node(stale)
+
+        start.assert_not_called()
+        lookup.assert_not_called()
+        assert svc.load_state() is not None
+
+    def test_nic_down_during_masakari_lookup_cancels_recovery(self, svc, monkeypatch, _actions):
+        """A nic-down that arrives while recovery waits on Masakari stops the start."""
+        svc.save_state({"nova_compute_stopped": True})
+        start = MagicMock()
+        monkeypatch.setattr(svc, "start_nova_compute", start)
+        monkeypatch.setattr(svc, "Snap", MagicMock())
+        entered = threading.Event()
+        monkeypatch.setattr(
+            svc,
+            "masakari_host_on_maintenance",
+            lambda snap: entered.set() or threading.Event().wait(5),
+        )
+        monkeypatch.setattr(svc, "MASAKARI_ATTEMPT_TIMEOUT", 0.05)
+        monkeypatch.setattr(svc, "MAINTENANCE_LOOKUP_DELAY", 0.01)
+
+        def nic_down():
+            entered.wait(5)
+            svc.handle_network_status(_message("nic-down"))
+
+        canceller = threading.Thread(target=nic_down)
+        canceller.start()
+        svc.recover_node(0)  # generation captured before the nic-down bumped it
+        canceller.join(5)
+
+        start.assert_not_called()
+        assert svc.load_state() is not None
+        assert self.stop.call_count == 1
+
+    def test_nic_down_after_start_undoes_the_start(self, svc, monkeypatch, _actions):
+        """A nic-down that arrives while the start is in flight: the start is undone."""
+        svc.save_state({"nova_compute_stopped": True})
+        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap, gen: False)
+        monkeypatch.setattr(svc, "Snap", MagicMock())
+        entered = threading.Event()
+
+        def slow_start(gen):
+            entered.set()
+            threading.Event().wait(0.2)
+            return True
+
+        monkeypatch.setattr(svc, "start_nova_compute", slow_start)
+
+        def nic_down():
+            entered.wait(5)
+            threading.Event().wait(0.05)  # let the start return first
+            svc.handle_network_status(_message("nic-down"))
+
+        canceller = threading.Thread(target=nic_down)
+        canceller.start()
+        svc.recover_node(0)
+        canceller.join(5)
+
+        # The recovery undid the start it had completed, in addition to the
+        # stop the nic-down itself performed.
+        assert self.stop.call_count == 2
+        assert svc.load_state() is not None
+
+    def test_nic_up_after_cancelled_recovery_recovers_normally(self, svc, monkeypatch):
+        """After a cancel, state exists; new nic-up spawns recovery with current gen → start called, state cleared."""
+        svc.save_state({"nova_compute_stopped": True})
+        start = MagicMock(return_value=True)
+        monkeypatch.setattr(svc, "start_nova_compute", start)
+        monkeypatch.setattr(svc, "host_in_maintenance", lambda snap, gen: False)
+        monkeypatch.setattr(svc, "Snap", MagicMock())
+
+        svc._cancel_pending_recovery()  # simulates the cancelled recovery
+        svc.handle_network_status(_message("nic-up"))  # spawns a fresh recovery
+        _join_recovery_thread(svc)
+
+        start.assert_called_once()
+        assert svc.load_state() is None
+
+
 class TestStartNovaCompute:
     def test_already_active(self, svc, monkeypatch):
         service = _service(True)
         _fake_snap(monkeypatch, svc, {"nova-compute": service})
 
-        assert svc.start_nova_compute() is True
+        assert svc.start_nova_compute(svc._outage_generation) is True
         service.start.assert_not_called()
 
     def test_starts_and_waits_until_stable(self, svc, monkeypatch):
@@ -267,7 +384,7 @@ class TestStartNovaCompute:
         service.start.side_effect = lambda: setattr(service, "active", True)
         _fake_snap(monkeypatch, svc, {"nova-compute": service})
 
-        assert svc.start_nova_compute() is True
+        assert svc.start_nova_compute(svc._outage_generation) is True
 
         service.start.assert_called_once()
         # It did not return on the first sight of "active"
@@ -284,30 +401,30 @@ class TestStartNovaCompute:
 
         snap.services.list.side_effect = flapping
 
-        assert svc.start_nova_compute() is False
+        assert svc.start_nova_compute(svc._outage_generation) is False
 
     def test_missing_service(self, svc, monkeypatch):
         _fake_snap(monkeypatch, svc, {})
-        assert svc.start_nova_compute() is False
+        assert svc.start_nova_compute(svc._outage_generation) is False
 
     def test_times_out(self, svc, monkeypatch):
         service = _service(False)
         _fake_snap(monkeypatch, svc, {"nova-compute": service})
         monkeypatch.setattr(svc, "NOVA_COMPUTE_START_TIMEOUT", 0)
 
-        assert svc.start_nova_compute() is False
+        assert svc.start_nova_compute(svc._outage_generation) is False
 
 
 class TestHostInMaintenance:
     def test_returns_masakari_answer(self, svc, monkeypatch):
         monkeypatch.setattr(svc, "masakari_host_on_maintenance", lambda snap: True)
-        assert svc.host_in_maintenance(MagicMock()) is True
+        assert svc.host_in_maintenance(MagicMock(), svc._outage_generation) is True
 
     def test_retries_until_masakari_answers(self, svc, monkeypatch):
         answers = iter([None, None, False])
         monkeypatch.setattr(svc, "masakari_host_on_maintenance", lambda snap: next(answers))
 
-        assert svc.host_in_maintenance(MagicMock()) is False
+        assert svc.host_in_maintenance(MagicMock(), svc._outage_generation) is False
         assert svc.clock.elapsed == 2 * svc.MAINTENANCE_LOOKUP_DELAY
 
     def test_assumes_not_in_maintenance_when_masakari_never_answers(self, svc, monkeypatch):
@@ -316,7 +433,7 @@ class TestHostInMaintenance:
             svc, "masakari_host_on_maintenance", lambda snap: calls.append(1) or None
         )
 
-        assert svc.host_in_maintenance(MagicMock()) is False
+        assert svc.host_in_maintenance(MagicMock(), svc._outage_generation) is False
 
         assert len(calls) > 1
         # bounded: never waits longer than the budget
@@ -330,7 +447,7 @@ class TestHostInMaintenance:
         monkeypatch.setattr(svc, "MAINTENANCE_LOOKUP_BUDGET", 0)
 
         try:
-            assert svc.host_in_maintenance(MagicMock()) is False
+            assert svc.host_in_maintenance(MagicMock(), svc._outage_generation) is False
         finally:
             release.set()
 
