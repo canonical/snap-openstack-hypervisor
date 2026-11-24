@@ -5,8 +5,9 @@ import logging
 import os
 import socket
 import subprocess
+import threading
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional, Union
 
 import psutil
 from pydantic import BaseModel, Field, field_validator
@@ -14,34 +15,108 @@ from snaphelpers import Snap
 
 SOCKET_PATH = os.path.join(os.environ["SNAP_DATA"], "hypervisor", "shutdown.sock")
 
+STATE_FILENAME = "pre-evacuation-state.json"
+NOVA_COMPUTE = "nova-compute"
+NOVA_COMPUTE_START_TIMEOUT = 60
+# nova-compute must stay active this long to count as started: a service that
+# crashes on startup is briefly "active" between restarts.
+NOVA_COMPUTE_STABLE_SECONDS = 15
+NOVA_COMPUTE_POLL_SECONDS = 2
+# The sender reports nic-up only once, so a failed start must be retried here: nothing
+# else would restart nova-compute until the next network flap.
+NOVA_COMPUTE_START_ATTEMPTS = 5
+NOVA_COMPUTE_START_RETRY_DELAY = 30
+# When Masakari cannot be asked whether the host is in maintenance, retry for a
+# while and then keep the node down: restarting into an unknown maintenance state
+# could fight an evacuation, and the sweep retries once Masakari answers.
+MAINTENANCE_LOOKUP_BUDGET = 120
+MAINTENANCE_LOOKUP_DELAY = 10
+# Right after an outage the control plane may accept connections and never answer,
+# so every API call needs a timeout of its own.
+MASAKARI_API_TIMEOUT = 10
+MASAKARI_ATTEMPT_TIMEOUT = 40
+# A failed recovery cycle keeps its request pending; the sweeper re-runs it after
+# this interval so a transiently broken control plane cannot strand the node.
+RECOVERY_SWEEP_INTERVAL = 60
+# After this many failed recovery cycles for one outage, stop retrying and hand
+# over to the operator (recovery_status='failed').
+MAX_RECOVERY_CYCLES = 3
+
 PROTOCOL_VERSION = "1.0"
 VIRSH_TIMEOUT = 3
+# Never let a stalled client block the single-threaded Unix socket listener.
+CLIENT_READ_TIMEOUT = 2
+
+# The recovery worker runs one cycle at a time; the running flag keeps duplicates out.
+_recovery_running = False
+# A recovery that is still running must be abandoned when a newer nic-down arrives:
+# a second outage means the node must stay down, and a recovery that already
+# restarted nova-compute would leave it running during the outage. Every nic-down
+# bumps the generation; a recovery tagged with an older generation is cancelled.
+# Reentrant: _outage_cancelled is also called while the lock is already held.
+_state_lock = threading.RLock()
+_outage_generation = 0
+
+
+def _cancel_pending_recovery() -> None:
+    """Invalidate any recovery in flight: a newer nic-down wins over a stale recovery."""
+    global _outage_generation
+    with _state_lock:
+        _outage_generation += 1
+
+
+def _outage_cancelled(generation: int) -> bool:
+    """Return True if a newer nic-down arrived since this recovery started."""
+    with _state_lock:
+        return _outage_generation != generation
+
+
+def _interruptible_sleep(seconds: float, generation: int) -> bool:
+    """Sleep up to seconds, returning True if a newer nic-down cancelled the recovery.
+
+    Polls instead of blocking on an event, so a single generation counter drives
+    both the sleep and the cancellation checks.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        if _outage_cancelled(generation):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(1.0, remaining))
+
 
 class NetworkStatus(enum.Enum):
     """Enum for network interface status"""
+
     NIC_DOWN = "nic-down"
+    NIC_UP = "nic-up"
 
 
 class NetworkStatusMessage(BaseModel):
     """Pydantic model for network status messages"""
+
     version: str = Field(description="Protocol version")
     timestamp: float = Field(description="Message timestamp")
     status: str = Field(description="Network status")
 
-    @field_validator('version')
+    @field_validator("version")
     @classmethod
     def validate_version(cls, v):
         if v != PROTOCOL_VERSION:
             logging.warning(f"Incompatible protocol version: {v}, expected: {PROTOCOL_VERSION}")
         return v
 
-    @field_validator('status')
+    @field_validator("status")
     @classmethod
     def validate_status(cls, v):
         try:
             return NetworkStatus(v).value
         except ValueError:
-            raise ValueError(f"Invalid status: {v}. Must be one of: {', '.join([s.value for s in NetworkStatus])}")
+            raise ValueError(
+                f"Invalid status: {v}. Must be one of: {', '.join([s.value for s in NetworkStatus])}"
+            )
 
 
 def stop_nova_compute():
@@ -53,8 +128,8 @@ def stop_nova_compute():
         snap = Snap()
         services = snap.services.list()
 
-        if 'nova-compute' in services:
-            service = services['nova-compute']
+        if "nova-compute" in services:
+            service = services["nova-compute"]
 
             if service.active:
                 logging.info("nova-compute is active. Proceeding to stop the service...")
@@ -79,7 +154,7 @@ def shutdown_vms():
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
     )
     vm_names = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
 
@@ -96,6 +171,7 @@ def shutdown_vms():
             force_shutdown_vms(vm_names)
             break
 
+
 def force_shutdown_vms(vm_names: List[str]):
     """
     Forcefully stop VMs by killing their qemu processes.
@@ -109,6 +185,501 @@ def force_shutdown_vms(vm_names: List[str]):
                     logging.warning("Force killed VM: %s", vm_name)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.Error) as exc:
                     logging.error("Failed to kill qemu process for '%s': %s", vm_name, exc)
+
+
+def _state_path() -> str:
+    """Path of the file recording what the evacuation procedure did."""
+    return os.path.join(os.environ["SNAP_DATA"], STATE_FILENAME)
+
+
+def load_state() -> Optional[Dict]:
+    """Return the recorded evacuation state, or None if no evacuation is recorded."""
+    try:
+        with open(_state_path(), "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        # An unreadable file still means an evacuation happened. Assume nova-compute was
+        # stopped: starting a service that is already running is harmless, while leaving
+        # the node down is not.
+        logging.error(f"Unreadable evacuation state file: {e}")
+        return {"nova_compute_stopped": True, "corrupt": True}
+
+
+def save_state(state: Dict) -> None:
+    """Atomically record the evacuation state."""
+    path = _state_path()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
+def clear_state() -> None:
+    """Forget the recorded evacuation state."""
+    try:
+        os.remove(_state_path())
+    except FileNotFoundError:
+        pass
+
+
+def nova_compute_active() -> bool:
+    """Return True if the nova-compute service is currently running."""
+    services = Snap().services.list()
+    service = services.get(NOVA_COMPUTE)
+    return bool(service and service.active)
+
+
+def start_nova_compute(generation: int) -> bool:
+    """Start the nova-compute service and wait until it is active.
+
+    Returns:
+        True if nova-compute is active, False if it could not be started in time
+        or if a newer nic-down cancelled the recovery.
+    """
+    try:
+        services = Snap().services.list()
+        service = services.get(NOVA_COMPUTE)
+        if service is None:
+            logging.error("nova-compute service not found in the list of snap services")
+            return False
+        if service.active:
+            logging.info("nova-compute is already active; verifying it stays stable...")
+        else:
+            logging.info("Starting nova-compute...")
+            # Hold the generation lock across the start decision, so a nic-down that
+            # arrives during the start-wait cannot slip past the check below.
+            with _state_lock:
+                if _outage_cancelled(generation):
+                    logging.info("A newer nic-down arrived, not starting nova-compute")
+                    return False
+                service.start()
+        deadline = time.monotonic() + NOVA_COMPUTE_START_TIMEOUT
+        active_since = None
+        while time.monotonic() < deadline:
+            if _outage_cancelled(generation):
+                logging.info("A newer nic-down arrived, abandoning nova-compute start")
+                return False
+            if nova_compute_active():
+                active_since = active_since or time.monotonic()
+                if time.monotonic() - active_since >= NOVA_COMPUTE_STABLE_SECONDS:
+                    logging.info("nova-compute service started successfully.")
+                    return True
+            else:
+                active_since = None
+            time.sleep(NOVA_COMPUTE_POLL_SECONDS)
+        logging.error("nova-compute did not stay active within the timeout")
+    except Exception as e:
+        logging.error(f"Unexpected error during nova-compute start: {e}")
+    return False
+
+
+def start_nova_compute_with_retries(generation: int) -> bool:
+    """Start nova-compute, retrying a few times if it does not come up."""
+    for attempt in range(1, NOVA_COMPUTE_START_ATTEMPTS + 1):
+        if start_nova_compute(generation):
+            return True
+        if _outage_cancelled(generation):
+            logging.info("A newer nic-down arrived, abandoning recovery")
+            return False
+        if attempt < NOVA_COMPUTE_START_ATTEMPTS:
+            logging.warning(
+                "nova-compute start attempt %s/%s failed, retrying in %ss",
+                attempt,
+                NOVA_COMPUTE_START_ATTEMPTS,
+                NOVA_COMPUTE_START_RETRY_DELAY,
+            )
+            if _interruptible_sleep(NOVA_COMPUTE_START_RETRY_DELAY, generation):
+                logging.info("A newer nic-down arrived, abandoning recovery")
+                return False
+    return False
+
+
+def masakari_host_on_maintenance(snap: Snap) -> Optional[bool]:
+    """Ask Masakari whether this host is marked on_maintenance.
+
+    Returns:
+        True or False from Masakari. False also when the host is not registered in any
+        segment. None when the answer could not be obtained (API unreachable,
+        credentials missing, client library failure).
+    """
+    try:
+        import openstack
+
+        identity = snap.config.get_options("identity").as_dict().get("identity", {})
+        fqdn = snap.config.get("node.fqdn")
+        ca_bundle = snap.paths.common / "etc" / "ssl" / "certs" / "receive-ca-bundle.pem"
+        conn = openstack.connect(
+            auth_url=identity["auth-url"],
+            username=identity["username"],
+            password=identity["password"],
+            project_name=identity.get("project-name"),
+            user_domain_name=identity.get("user-domain-name"),
+            project_domain_name=identity.get("project-domain-name"),
+            # Masakari runs in the workload region, not the Keystone-only region.
+            region_name=identity.get("region-name") or identity.get("keystone-region-name"),
+            interface="internal",
+            api_timeout=MASAKARI_API_TIMEOUT,
+            cacert=str(ca_bundle) if ca_bundle.exists() else None,
+        )
+        names = {fqdn.lower(), fqdn.split(".")[0].lower()}
+        in_masakari_segment = False
+        for segment in conn.instance_ha.segments():
+            for host in conn.instance_ha.hosts(segment.uuid):
+                if host.name and host.name.lower() in names:
+                    in_masakari_segment = True
+                    if host.on_maintenance:
+                        logging.info(
+                            "Host %s is on_maintenance in Masakari (operator handoff required)",
+                            fqdn,
+                        )
+                        return True
+        if not in_masakari_segment:
+            logging.info("Host %s is not registered in any Masakari segment", fqdn)
+
+        # Masakari's host-failure workflow also disables nova-compute in Nova; do not
+        # restart the local daemon while Nova considers the host disabled.
+        for svc in conn.compute.services(binary=NOVA_COMPUTE):
+            if svc.host and svc.host.lower() in names and svc.status == "disabled":
+                logging.info(
+                    "Nova compute service on %s is disabled (operator handoff required)",
+                    fqdn,
+                )
+                return True
+        return False
+    except Exception as e:
+        logging.warning(f"Could not determine Masakari maintenance state: {e}")
+        return None
+
+
+def _call_with_timeout(func, timeout: float):
+    """Run func in a helper thread and give up after timeout seconds.
+
+    Returns func's result, or None if it timed out or raised. A stuck call is
+    abandoned (the daemon thread dies with the process), so one hung API request
+    cannot block the recovery.
+    """
+    outcome: Dict = {}
+
+    def runner():
+        try:
+            outcome["value"] = func()
+        except Exception as e:
+            outcome["error"] = e
+
+    thread = threading.Thread(target=runner, name="masakari-lookup", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        logging.warning(f"Masakari lookup timed out after {timeout}s")
+        return None
+    if "error" in outcome:
+        logging.warning(f"Masakari lookup failed: {outcome['error']}")
+        return None
+    return outcome.get("value")
+
+
+def host_in_maintenance(snap: Snap, generation: int) -> Optional[Union[bool, str]]:
+    """Return whether the node must be left alone because of Masakari maintenance.
+
+    Retries for a bounded time while Masakari cannot answer, which is expected right
+    after an outage. If it never answers the status stays unknown: the caller keeps
+    the node down (fail-safe) instead of guessing.
+
+    Returns:
+        True (maintenance or Nova-disabled operator handoff), False (safe to restart),
+        "unknown" (Masakari never answered - caller must not restart), or None if a
+        newer nic-down cancelled the recovery while the lookup was in progress.
+    """
+    deadline = time.monotonic() + MAINTENANCE_LOOKUP_BUDGET
+    while True:
+        answer = _call_with_timeout(
+            lambda: masakari_host_on_maintenance(snap), MASAKARI_ATTEMPT_TIMEOUT
+        )
+        if _outage_cancelled(generation):
+            return None
+        if answer is not None:
+            return answer
+        if time.monotonic() + MAINTENANCE_LOOKUP_DELAY >= deadline:
+            break
+        if _interruptible_sleep(MAINTENANCE_LOOKUP_DELAY, generation):
+            return None
+    logging.warning(
+        "Masakari maintenance status unavailable after %ss; failing closed "
+        "(keeping the node down until the status is known)",
+        MAINTENANCE_LOOKUP_BUDGET,
+    )
+    return "unknown"
+
+
+def _recover_once(generation: int, state: Dict) -> bool:
+    """Run one recovery attempt for the given outage generation.
+
+    Returns:
+        True when this recovery attempt finished the job (state cleared, nothing
+        left to do). False when the attempt ended without restarting nova-compute
+        (cancelled, maintenance handoff, unknown maintenance status, or failed
+        start) and a later cycle must pick the pending request up.
+    """
+    if _outage_cancelled(generation):
+        logging.info("A newer nic-down arrived, abandoning recovery")
+        return False
+
+    maintenance = host_in_maintenance(Snap(), generation)
+    if maintenance is None:
+        logging.info("Recovery cancelled by a newer nic-down, keeping the evacuation state")
+        return False
+    if maintenance is True:
+        with _state_lock:
+            if _outage_cancelled(generation):
+                logging.info("A newer nic-down arrived, keeping the evacuation state")
+                return False
+            current = load_state()
+            if current is not None and current.get("recovery_requested"):
+                current["recovery_requested"] = False
+                current["recovery_status"] = "deferred_maintenance"
+                try:
+                    save_state(current)
+                except Exception as e:
+                    logging.error(f"Failed to update state after maintenance check: {e}")
+        logging.info(
+            "Host requires operator handoff (Masakari maintenance or disabled Nova "
+            "compute service); leaving nova-compute untouched"
+        )
+        return False
+    if maintenance == "unknown":
+        logging.warning(
+            "Masakari maintenance status unknown; keeping nova-compute down "
+            "(fail-safe). The pending recovery is retried until Masakari answers."
+        )
+        with _state_lock:
+            current = load_state()
+            if current is not None:
+                current["recovery_status"] = "waiting_maintenance_status"
+                try:
+                    save_state(current)
+                except Exception as e:
+                    logging.error(f"Failed to update state after unknown status: {e}")
+        return False
+
+    if state.get("nova_compute_stopped"):
+        if not start_nova_compute_with_retries(generation):
+            if _outage_cancelled(generation):
+                logging.info(
+                    "Recovery cancelled by a newer nic-down, keeping the evacuation state"
+                )
+            else:
+                with _state_lock:
+                    if not _outage_cancelled(generation):
+                        current = load_state()
+                        if current is not None:
+                            cycles = int(current.get("recovery_cycles", 0)) + 1
+                            current["recovery_cycles"] = cycles
+                            if cycles >= MAX_RECOVERY_CYCLES:
+                                current["recovery_requested"] = False
+                                current["recovery_status"] = "failed"
+                                current["failed_at"] = time.time()
+                                logging.error(
+                                    "Recovery failed after %s cycles of %s nova-compute "
+                                    "start attempts; operator intervention required "
+                                    "(evacuation state kept with recovery_status='failed')",
+                                    cycles,
+                                    NOVA_COMPUTE_START_ATTEMPTS,
+                                )
+                            else:
+                                current["recovery_status"] = "retry_scheduled"
+                                logging.error(
+                                    "Recovery cycle %s/%s failed; the recovery sweeper "
+                                    "will retry while the request stays pending",
+                                    cycles,
+                                    MAX_RECOVERY_CYCLES,
+                                )
+                            try:
+                                save_state(current)
+                            except Exception as e:
+                                logging.error(f"Failed to update state after failed start: {e}")
+            return False
+        if _outage_cancelled(generation):
+            # A newer nic-down arrived while we were starting. It may have stopped
+            # the service behind our back, or missed it while it was still
+            # activating; undo the start we completed, because nova-compute must
+            # not run during the outage.
+            stop_nova_compute()
+            logging.info(
+                "A newer nic-down arrived, stopped nova-compute again and "
+                "keeping the evacuation state"
+            )
+            return False
+
+    with _state_lock:
+        if _outage_cancelled(generation):
+            if state.get("nova_compute_stopped"):
+                stop_nova_compute()
+            logging.info("A newer nic-down arrived, keeping the evacuation state")
+            return False
+        clear_state()
+    logging.info("Evacuation procedure reversed")
+    return True
+
+
+def _recovery_worker() -> None:
+    """Run recovery cycles until the pending request is completed or deferred."""
+    global _recovery_running
+    try:
+        while True:
+            with _state_lock:
+                state = load_state()
+                if state is None or not state.get("recovery_requested"):
+                    _recovery_running = False
+                    return
+                generation = _outage_generation
+            if not _recover_once(generation, state):
+                # This cycle ended without completing the recovery: cancelled by a
+                # newer nic-down, deferred to the operator, maintenance status
+                # unknown, or the start attempts failed. The request stays pending
+                # on disk; the sweeper re-launches a worker for the next cycle.
+                _recovery_running = False
+                return
+    except Exception:
+        logging.exception("Unexpected error during recovery")
+        with _state_lock:
+            _recovery_running = False
+
+
+def _recovery_sweeper() -> None:
+    """Periodically relaunch the recovery worker while a request stays pending.
+
+    Covers the cases the sender cannot: a recovery cycle that failed and scheduled
+    a retry, Masakari that only answers later, or any exit path that left the
+    request pending without a live worker.
+    """
+    while True:
+        time.sleep(RECOVERY_SWEEP_INTERVAL)
+        try:
+            with _state_lock:
+                state = load_state()
+                if state is None or not state.get("recovery_requested"):
+                    continue
+                if _recovery_running:
+                    continue
+            logging.info("Recovery sweeper: pending request found, running recovery")
+            _start_recovery_worker()
+        except Exception:
+            logging.exception("Unexpected error in the recovery sweeper")
+
+
+def _start_recovery_worker() -> None:
+    """Ensure a background recovery worker is running to drain pending requests."""
+    global _recovery_running
+    with _state_lock:
+        if _recovery_running:
+            logging.info("Recovery worker already active; it will pick up the pending request")
+            return
+        _recovery_running = True
+    threading.Thread(target=_recovery_worker, name="recover-node", daemon=True).start()
+
+
+def resume_pending_recovery() -> None:
+    """Resume a durably recorded recovery request after a receiver restart."""
+    with _state_lock:
+        state = load_state()
+        if state is None or not state.get("recovery_requested"):
+            return
+    logging.info("Found pending recovery request on startup, resuming recovery")
+    _start_recovery_worker()
+
+
+def _response(status: str, message: str) -> str:
+    return json.dumps({"status": status, "message": message, "timestamp": time.time()})
+
+
+def handle_nic_down() -> str:
+    """Stop nova-compute and shut down the VMs, recording what was done."""
+    with _state_lock:
+        _cancel_pending_recovery()
+        generation = _outage_generation
+        existing = load_state()
+        nova_was_active = nova_compute_active()
+        if existing is not None:
+            # A redelivery for this outage, or a new outage while the old record
+            # still exists (recovery was deferred, failed, or cancelled). Keep the
+            # record, re-tag it with the current outage generation, and re-fence:
+            # virsh only touches running domains, so re-running the shutdown
+            # completes an interrupted evacuation and stops anything an operator
+            # or a cancelled recovery restarted in the meantime.
+            state = dict(existing)
+            state["outage_generation"] = generation
+            state["recovery_requested"] = False
+            state.pop("recovery_status", None)
+            state["recovery_cycles"] = 0
+            if nova_was_active:
+                state["nova_compute_stopped"] = True
+            state["fencing_completed"] = False
+            try:
+                save_state(state)
+            except Exception as e:
+                logging.error(f"Failed to update evacuation state on nic-down: {e}")
+            logging.info(
+                "Evacuation already recorded: re-fencing (stopping nova-compute "
+                "and shutting down running VMs)"
+            )
+        else:
+            state = {
+                "timestamp": time.time(),
+                "outage_generation": generation,
+                "nova_compute_stopped": nova_was_active,
+                "recovery_requested": False,
+                "recovery_cycles": 0,
+                "fencing_completed": False,
+            }
+            # Record first: if we are interrupted half way, recovery still knows what to undo.
+            try:
+                save_state(state)
+            except Exception as e:
+                logging.error(f"Failed to save evacuation state on nic-down: {e}")
+            logging.info("Network interface down detected, initiating evacuation procedure")
+
+    stop_nova_compute()
+    shutdown_vms()
+
+    with _state_lock:
+        current = load_state()
+        if current is not None and current.get("outage_generation") == generation:
+            current["fencing_completed"] = True
+            try:
+                save_state(current)
+            except Exception as e:
+                logging.error(f"Failed to mark fencing completed: {e}")
+
+    return _response("success", "Evacuation procedure initiated")
+
+
+def handle_nic_up() -> str:
+    """Durably record a recovery request and ensure the background worker runs it."""
+    with _state_lock:
+        state = load_state()
+        if state is None:
+            logging.info("Network is up and no evacuation is recorded, nothing to do")
+            return _response("success", "No evacuation recorded, nothing to recover")
+        state["recovery_requested"] = True
+        state["recovery_status"] = "pending"
+        state["recovery_cycles"] = 0
+        try:
+            save_state(state)
+        except Exception as e:
+            logging.error(f"Failed to persist recovery request: {e}")
+            return _response("error", f"Failed to persist recovery request: {e}")
+
+    logging.info("Network interface up detected, starting recovery")
+    # Recovery may wait on Masakari and on nova-compute, so do not hold the sender
+    # (a Consul check with a short timeout) while it runs. Because recovery_requested
+    # is already persisted, an active worker will pick it up instead of dropping it.
+    _start_recovery_worker()
+    return _response("success", "Recovery initiated")
+
 
 def handle_network_status(data: Dict) -> str:
     """Handle network status messages and take appropriate actions
@@ -124,75 +695,85 @@ def handle_network_status(data: Dict) -> str:
     logging.info(f"Received network status update: {status_value}")
 
     if status == NetworkStatus.NIC_DOWN:
-        logging.info("Network interface down detected, initiating evacuation procedure")
+        return handle_nic_down()
+    if status == NetworkStatus.NIC_UP:
+        return handle_nic_up()
 
-        stop_nova_compute()
-        shutdown_vms()
+    logging.warning(f"Received unknown network status: {status_value}")
+    return _response("error", f"Unknown network status: {status_value}")
 
-        return json.dumps({
-            "status": "success",
-            "message": "Evacuation procedure initiated",
-            "timestamp": time.time()
-        })
 
-    else:
-        logging.warning(f"Received unknown network status: {status_value}")
+def _send(conn, payload: str) -> None:
+    """Send a response, tolerating a client that has already hung up."""
+    try:
+        conn.sendall(payload.encode())
+    except OSError as e:
+        logging.warning(f"Could not send response, client went away: {e}")
 
-        return json.dumps({
-            "status": "error",
-            "message": f"Unknown network status: {status_value}",
-            "timestamp": time.time()
-        })
+
+def _handle_connection(conn) -> None:
+    """Read one message from conn, act on it and answer."""
+    conn.settimeout(CLIENT_READ_TIMEOUT)
+    data = conn.recv(1024)
+    if not data:
+        return
+
+    raw_message = data.decode().strip()
+    logging.debug(f"Received raw message: {raw_message}")
+
+    try:
+        json_data = json.loads(raw_message)
+        message = NetworkStatusMessage.model_validate(json_data)
+        validated_data = message.model_dump()
+
+        response = handle_network_status(validated_data)
+        _send(conn, response)
+
+    except ValueError as e:
+        logging.error(f"Validation error: {e}")
+        _send(conn, _response("error", f"Schema validation failed: {str(e)}"))
+    except Exception as e:
+        logging.error(f"Error processing message: {e}")
+        _send(conn, _response("error", f"Server error: {str(e)}"))
+
+
+def create_listener_socket() -> socket.socket:
+    """Create, bind and restrict the listener socket.
+
+    The socket is owner-only (root) so unprivileged local users cannot trigger
+    evacuation or recovery; the consul-client health check runs as root.
+    """
+    os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+    if os.path.exists(SOCKET_PATH):
+        os.remove(SOCKET_PATH)
+    server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old_umask = os.umask(0o177)
+    try:
+        server_sock.bind(SOCKET_PATH)
+    finally:
+        os.umask(old_umask)
+    os.chmod(SOCKET_PATH, 0o600)
+    server_sock.listen()
+    return server_sock
 
 
 def run_listener():
     logging.basicConfig(level=logging.INFO)
 
-    os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
-    if os.path.exists(SOCKET_PATH):
-        os.remove(SOCKET_PATH)
-
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_sock:
-        server_sock.bind(SOCKET_PATH)
-        os.chmod(SOCKET_PATH, 0o666)
-        server_sock.listen()
+    with create_listener_socket() as server_sock:
         logging.info(f"Listening on Unix socket: {SOCKET_PATH}")
         logging.info(f"Using protocol version: {PROTOCOL_VERSION}")
+        resume_pending_recovery()
+        threading.Thread(target=_recovery_sweeper, name="recovery-sweeper", daemon=True).start()
 
         while True:
             conn, _ = server_sock.accept()
             with conn:
-                data = conn.recv(1024)
-                if not data:
-                    continue
-
-                raw_message = data.decode().strip()
-                logging.debug(f"Received raw message: {raw_message}")
-
                 try:
-                    json_data = json.loads(raw_message)
-                    message = NetworkStatusMessage.model_validate(json_data)
-                    validated_data = message.model_dump()
-
-                    response = handle_network_status(validated_data)
-                    conn.sendall(response.encode())
-
-                except ValueError as e:
-                    logging.error(f"Validation error: {e}")
-                    error_response = json.dumps({
-                        "status": "error",
-                        "message": f"Schema validation failed: {str(e)}",
-                        "timestamp": time.time()
-                    })
-                    conn.sendall(error_response.encode())
-                except Exception as e:
-                    logging.error(f"Error processing message: {e}")
-                    error_response = json.dumps({
-                        "status": "error",
-                        "message": f"Server error: {str(e)}",
-                        "timestamp": time.time()
-                    })
-                    conn.sendall(error_response.encode())
+                    _handle_connection(conn)
+                except OSError as e:
+                    # A client that vanishes must never take the listener down
+                    logging.warning(f"Connection error, ignoring: {e}")
 
 
 if __name__ == "__main__":
