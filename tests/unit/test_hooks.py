@@ -988,6 +988,30 @@ def test_configure_stops_ovn_agent_without_usable_environment(mocker, snap, ovn_
     snapctl.start.assert_not_called()
 
 
+def test_get_configure_context_reads_parallel_connections(mocker, snap):
+    """Read the snap key as the Nova template variable."""
+    _prepare_minimal_configure_context(mocker, snap)
+    snap.config.get_options.return_value["compute"] = {
+        "live-migration-parallel-connections": 2,
+    }
+
+    context = hooks._get_configure_context(snap)
+
+    assert context["compute"]["live_migration_parallel_connections"] == 2
+
+
+@pytest.mark.parametrize("connections", [0, 256, True, "2\n[DEFAULT]"])
+def test_get_configure_context_rejects_invalid_parallel_connections(mocker, snap, connections):
+    """Reject invalid snap values before templates are rendered."""
+    _prepare_minimal_configure_context(mocker, snap)
+    snap.config.get_options.return_value["compute"] = {
+        "live-migration-parallel-connections": connections,
+    }
+
+    with pytest.raises(ValueError, match="compute.live-migration-parallel-connections"):
+        hooks._get_configure_context(snap)
+
+
 def test_get_configure_context_reads_ovn_connections_without_logging_them(mocker, snap, caplog):
     nb_connection = "ssl:192.0.2.10:6641"
     sb_connection = "ssl:192.0.2.10:6642"

@@ -71,6 +71,9 @@ cpu_models = {{ compute.cpu_models }}
 {% endif %}
 live_migration_with_native_tls = true
 live_migration_scheme = tls
+{% if compute.live_migration_parallel_connections | default(1) > 1 -%}
+live_migration_parallel_connections = {{ compute.live_migration_parallel_connections }}
+{% endif -%}
 {% if compute.migration_address %}
 live_migration_inbound_addr = {{ compute.migration_address }}
 {% endif -%}
