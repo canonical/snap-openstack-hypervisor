@@ -3,6 +3,7 @@
 
 from pathlib import Path
 
+import pytest
 from jinja2 import Environment, FileSystemLoader
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
@@ -113,6 +114,22 @@ def test_nova_block_device_allocate_retries_only_render_when_set():
 
     assert "block_device_allocate_retries = 120" in output
     assert "block_device_allocate_retries_interval = 3" in output
+
+
+@pytest.mark.parametrize("connections", [None, 1, 2, 255])
+def test_nova_live_migration_parallel_connections(connections):
+    """Render the QEMU connection count only when parallelism is enabled."""
+    compute = dict(BASE_CONTEXT["compute"])
+    if connections is not None:
+        compute["live_migration_parallel_connections"] = connections
+
+    output = _render("nova.conf.j2", compute=compute)
+
+    if connections in (None, 1):
+        assert "live_migration_parallel_connections" not in output
+    else:
+        libvirt = output.split("[libvirt]\n", 1)[1].split("\n[", 1)[0]
+        assert f"live_migration_parallel_connections = {connections}" in libvirt.splitlines()
 
 
 def test_neutron_clients_use_internal_interface():

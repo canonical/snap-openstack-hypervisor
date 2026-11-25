@@ -522,6 +522,7 @@ DEFAULT_CONFIG = {
     "compute.cert": UNSET,
     "compute.key": UNSET,
     "compute.migration-address": UNSET,
+    "compute.live-migration-parallel-connections": UNSET,
     "compute.resume-on-boot": True,
     "compute.block-device-allocate-retries": UNSET,
     "compute.block-device-allocate-retries-interval": UNSET,
@@ -2788,6 +2789,11 @@ def _get_configure_context(snap: Snap) -> dict:
     )
     context = _context_compat(context)
     context.setdefault("compute", {})
+    parallel_connections = context["compute"].get("live_migration_parallel_connections", 1)
+    if type(parallel_connections) is not int or not 1 <= parallel_connections <= 255:
+        raise ValueError(
+            "compute.live-migration-parallel-connections must be an integer between 1 and 255"
+        )
     context.setdefault("network", {})
     context.setdefault("identity", {})
     context.setdefault("credentials", {})
