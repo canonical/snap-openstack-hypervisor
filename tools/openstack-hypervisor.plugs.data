@@ -1,0 +1,84 @@
+{
+  "block-devices": {
+    "allow-auto-connection": true,
+    "allow-installation": true
+  },
+  "dm-multipath": {
+    "allow-auto-connection": true,
+    "allow-installation": true
+  },
+  "firewall-control": {
+    "allow-auto-connection": true
+  },
+  "hardware-observe": {
+    "allow-auto-connection": true
+  },
+  "hugepages-control": {
+    "allow-auto-connection": true
+  },
+  "iscsi-initiator": {
+    "allow-auto-connection": true,
+    "allow-installation": true
+  },
+  "kernel-module-control": {
+    "allow-auto-connection": true,
+    "allow-installation": true
+  },
+  "kernel-module-observe": {
+    "allow-auto-connection": true
+  },
+  "kvm": {
+    "allow-auto-connection": true
+  },
+  "libvirt": {
+    "allow-auto-connection": true
+  },
+  "microstack-support": {
+    "allow-auto-connection": true,
+    "allow-installation": true
+  },
+  "mount-observe": {
+    "allow-auto-connection": true
+  },
+  "netlink-audit": {
+    "allow-auto-connection": true
+  },
+  "network-control": {
+    "allow-auto-connection": true
+  },
+  "network-observe": {
+    "allow-auto-connection": true
+  },
+  "network-setup-control": {
+    "allow-auto-connection": true
+  },
+  "nvme-control": {
+    "allow-auto-connection": true,
+    "allow-installation": true
+  },
+  "openvswitch-support": {
+    "allow-auto-connection": true
+  },
+  "process-control": {
+    "allow-auto-connection": true
+  },
+  "raw-usb": {
+    "allow-auto-connection": true
+  },
+  "system-files": {
+    "allow-installation": {
+      "plug-attributes": {
+        "write": "/etc/driverctl\\.d"
+      },
+      "plug-names": [
+        "etc-driverctl"
+      ]
+    }
+  },
+  "system-observe": {
+    "allow-auto-connection": true
+  },
+  "system-trace": {
+    "allow-auto-connection": true
+  }
+}
